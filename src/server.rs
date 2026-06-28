@@ -424,6 +424,73 @@ async fn get_thread(
     }
 }
 
+// ── Thread polling endpoint ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct PollQuery {
+    /// The content length the client already has for the latest assistant message.
+    /// New content beyond this length is returned as the delta.
+    since: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct PollResponse {
+    /// Delta content since the last known content length, if any.
+    pub new_content: Option<String>,
+    /// Whether the thread's current turn is complete.
+    pub completed: bool,
+    /// Total content length of the latest assistant message (for the next poll).
+    pub content_len: usize,
+}
+
+/// Poll for new thread state.
+///
+/// Alternative to SSE for clients that cannot maintain a persistent connection
+/// or when WebSocket events from Zed are unreliable. The client calls this
+/// endpoint at regular intervals (e.g., every 500ms), passing `since` as the
+/// content length returned by the previous response. If the assistant message
+/// has grown, the delta is returned in `new_content`.
+async fn poll_thread(
+    State(state): State<SharedState>,
+    axum::extract::Path(thread_id): axum::extract::Path<String>,
+    Query(query): Query<PollQuery>,
+) -> Result<Json<PollResponse>, StatusCode> {
+    let mgr = state.zed_manager.read().await;
+    let thread = mgr.threads.get(&thread_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let since = query.since.unwrap_or(0);
+
+    // Find the latest assistant message for delta computation
+    let last_msg = thread.messages.iter().rev().find(|m| m.role == "assistant");
+
+    match last_msg {
+        Some(msg) if msg.content.len() > since => {
+            let delta = msg.content[since..].to_string();
+            Ok(Json(PollResponse {
+                new_content: Some(delta),
+                completed: thread.completed || thread.turn_completed > 0,
+                content_len: msg.content.len(),
+            }))
+        }
+        Some(msg) => {
+            // No new content; report completion or no-change
+            Ok(Json(PollResponse {
+                new_content: None,
+                completed: thread.completed || thread.turn_completed > 0,
+                content_len: msg.content.len(),
+            }))
+        }
+        None => {
+            // No assistant message exists yet
+            Ok(Json(PollResponse {
+                new_content: None,
+                completed: thread.completed || thread.turn_completed > 0,
+                content_len: 0,
+            }))
+        }
+    }
+}
+
 // ── File search endpoints ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -603,6 +670,7 @@ pub async fn run_http_server(addr: &str, state: SharedState) -> anyhow::Result<(
         .route("/v1/cancel", post(cancel_turn))
         .route("/v1/threads", get(list_threads))
         .route("/v1/threads/{thread_id}", get(get_thread))
+        .route("/v1/threads/{thread_id}/poll", get(poll_thread))
         .route("/v1/files", get(search_files_handler))
         .route("/v1/files/mention", get(mention_files_handler))
         .route("/v1/git/status", get(git_status))
