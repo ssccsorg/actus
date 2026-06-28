@@ -317,6 +317,7 @@ impl ZedManager {
 pub async fn run_ws_server(
     ws_host: &str,
     zed_manager: Arc<RwLock<ZedManager>>,
+    ws_tx: crate::server::WsCommandTx,
 ) -> anyhow::Result<()> {
     let port = ws_host.split(':').nth(1).unwrap_or("8080");
     let listener = TcpListener::bind(&format!("127.0.0.1:{}", port)).await?;
@@ -333,13 +334,23 @@ pub async fn run_ws_server(
 
     // Create channel for sending commands to Zed
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let tx_for_shared = tx.clone();
 
     {
         let mut mgr = zed_manager.write().await;
         mgr.zed_connected = true;
         mgr.set_ws_tx(tx);
     }
+
+    // Also set the shared ws_tx for lock-free command sending
+    {
+        let mut tx_guard = ws_tx.lock().await;
+        *tx_guard = Some(tx_for_shared);
+    }
     tracing::info!("Zed WebSocket connected");
+
+    // Clone ws_tx for the read loop (it needs to clear the sender on disconnect)
+    let ws_tx_clone = ws_tx.clone();
 
     // Spawn write task: forward messages from channel to WebSocket
     let write_handle = tokio::spawn(async move {
@@ -363,20 +374,38 @@ pub async fn run_ws_server(
                         Some(Ok(Message::Ping(_))) => {}
                         Some(Ok(Message::Close(_))) => {
                             tracing::info!("Zed WebSocket closed");
-                            let mut mgr = zed_manager.write().await;
-                            mgr.zed_connected = false;
+                            {
+                                let mut mgr = zed_manager.write().await;
+                                mgr.zed_connected = false;
+                            }
+                            {
+                                let mut tx_guard = ws_tx_clone.lock().await;
+                                *tx_guard = None;
+                            }
                             break;
                         }
                         Some(Err(e)) => {
                             tracing::error!("WebSocket read error: {}", e);
-                            let mut mgr = zed_manager.write().await;
-                            mgr.zed_connected = false;
+                            {
+                                let mut mgr = zed_manager.write().await;
+                                mgr.zed_connected = false;
+                            }
+                            {
+                                let mut tx_guard = ws_tx_clone.lock().await;
+                                *tx_guard = None;
+                            }
                             break;
                         }
                         None => {
                             tracing::info!("WebSocket stream ended");
-                            let mut mgr = zed_manager.write().await;
-                            mgr.zed_connected = false;
+                            {
+                                let mut mgr = zed_manager.write().await;
+                                mgr.zed_connected = false;
+                            }
+                            {
+                                let mut tx_guard = ws_tx_clone.lock().await;
+                                *tx_guard = None;
+                            }
                             break;
                         }
                         _ => {}

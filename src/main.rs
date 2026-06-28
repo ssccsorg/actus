@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::server::AppState;
+use crate::server::{AppState, WsCommandTx};
 use crate::zed::ZedManager;
 
 #[derive(clap::Parser, Debug, Clone)]
@@ -139,6 +139,10 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("  HTTP API:   http://127.0.0.1:{}", args.http_port);
     tracing::info!("  WebSocket:  ws://{}", ws_host);
 
+    // Create shared command channel (separate from ZedManager RwLock)
+    // to avoid lock contention between SSE handlers and cancel/command endpoints.
+    let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
+
     // Start WebSocket server (Zed connects to us)
     let zed_manager = Arc::new(RwLock::new(ZedManager::new(
         session_id.clone(),
@@ -148,14 +152,16 @@ async fn main() -> anyhow::Result<()> {
 
     let ws_zed_manager = zed_manager.clone();
     let ws_host_clone = ws_host.clone();
-    let ws_server =
-        tokio::spawn(async move { zed::run_ws_server(&ws_host_clone, ws_zed_manager).await });
+    let ws_tx_clone = ws_tx.clone();
+    let ws_server = tokio::spawn(async move {
+        zed::run_ws_server(&ws_host_clone, ws_zed_manager, ws_tx_clone).await
+    });
 
     // Wait for WebSocket server to be ready
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    // Launch Zed headless
-    zed::launch_zed(
+    // Launch Zed headless and keep the child handle for graceful shutdown
+    let mut zed_child = zed::launch_zed(
         &bin_path,
         &workdir,
         user_data_dir.path(),
@@ -163,9 +169,10 @@ async fn main() -> anyhow::Result<()> {
         &ws_host,
     )
     .await?;
+    tracing::info!("Zed PID: {:?}", zed_child.id());
 
     // Build app state and start HTTP server
-    let state = Arc::new(AppState::new(zed_manager.clone(), workdir.clone()));
+    let state = Arc::new(AppState::new(zed_manager.clone(), ws_tx.clone(), workdir.clone()));
 
     let http_server = tokio::spawn({
         let state = state.clone();
@@ -198,12 +205,50 @@ async fn main() -> anyhow::Result<()> {
             mgr.agent_ready
         };
         if ready {
-            tracing::info!("Agent ready after {}s, starting CLI", i + 1);
+            tracing::info!("Agent ready after {}s", i + 1);
             break;
         }
         if i == 29 {
-            tracing::warn!("Agent not ready after 30s, starting CLI anyway");
+            tracing::warn!("Agent not ready after 30s");
         }
+    }
+
+    // ── Graceful shutdown ────────────────────────────────────────────
+    // Handle SIGTERM/SIGINT: save threads, terminate Zed, exit cleanly.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    {
+        let zed_manager = zed_manager.clone();
+
+        tokio::spawn(async move {
+            let mut sigterm = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate(),
+            ).expect("Failed to register SIGTERM handler");
+            let mut sigint = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::interrupt(),
+            ).expect("Failed to register SIGINT handler");
+
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = sigint.recv() => {}
+            }
+
+            tracing::info!("Shutdown signal received, cleaning up...");
+
+            // Cancel current turn if active
+            {
+                let mgr = zed_manager.read().await;
+                mgr.cancel_current_turn().ok();
+            }
+
+            // Save threads
+            {
+                let mgr = zed_manager.read().await;
+                mgr.save_threads();
+            }
+
+            let _ = shutdown_tx.send(());
+        });
     }
 
     if let Some(cli_path) = cli_path {
@@ -218,14 +263,16 @@ async fn main() -> anyhow::Result<()> {
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn CLI: {}", e))?;
 
-        // Wait for CLI or server to finish
+        // Wait for CLI, server, or shutdown signal
         tokio::select! {
             r = ws_server => {
                 cli.kill().await.ok();
+                zed_child.kill().await.ok();
                 r.unwrap()?
             },
             r = http_server => {
                 cli.kill().await.ok();
+                zed_child.kill().await.ok();
                 r.unwrap()?
             },
             result = cli.wait() => {
@@ -234,13 +281,28 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => tracing::error!("CLI error: {}", e),
                 }
             },
+            _ = shutdown_rx => {
+                cli.kill().await.ok();
+                zed_child.kill().await.ok();
+                tracing::info!("Shutdown complete");
+            },
         }
     } else {
         tracing::warn!("No CLI found, running server only");
-        // Wait for servers
+        // Wait for servers or shutdown signal
         tokio::select! {
-            r = ws_server => r.unwrap()?,
-            r = http_server => r.unwrap()?,
+            r = ws_server => {
+                zed_child.kill().await.ok();
+                r.unwrap()?
+            },
+            r = http_server => {
+                zed_child.kill().await.ok();
+                r.unwrap()?
+            },
+            _ = shutdown_rx => {
+                zed_child.kill().await.ok();
+                tracing::info!("Shutdown complete");
+            },
         }
     }
 

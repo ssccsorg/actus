@@ -13,13 +13,19 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, Notify};
+use tokio::sync::{RwLock, Notify, mpsc};
 
 use std::path::PathBuf;
 
 use crate::files;
 use crate::git;
 use crate::zed::ZedManager;
+
+/// Channel sender for WebSocket commands to Zed.
+/// Shared between AppState and ZedManager so cancel can send
+/// without acquiring the ZedManager RwLock (avoiding lock contention
+/// with long-running SSE handlers).
+pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -43,13 +49,15 @@ fn prepare_and_clear_acp(mgr: &mut ZedManager, thread_id: &str, user_message: &s
 
 pub struct AppState {
     pub zed_manager: Arc<RwLock<ZedManager>>,
+    pub ws_tx: WsCommandTx,
     pub workdir: PathBuf,
 }
 
 impl AppState {
-    pub fn new(zed_manager: Arc<RwLock<ZedManager>>, workdir: PathBuf) -> Self {
+    pub fn new(zed_manager: Arc<RwLock<ZedManager>>, ws_tx: WsCommandTx, workdir: PathBuf) -> Self {
         Self {
             zed_manager,
+            ws_tx,
             workdir,
         }
     }
@@ -163,7 +171,7 @@ async fn chat_async(
         .insert(request_id.clone(), thread_id.clone());
     drop(mgr);
 
-    send_ws_command(&state.zed_manager, &cmd.to_string()).await?;
+    send_ws_command(&state.ws_tx, &cmd.to_string()).await?;
 
     // Mark thread as activated
     {
@@ -219,7 +227,7 @@ async fn chat_stream(
     };
 
     send_ws_command(
-        &state.zed_manager,
+        &state.ws_tx,
         &serde_json::json!({
             "type": "chat_message",
             "data": {
@@ -467,14 +475,20 @@ async fn mention_files_handler(
 // ── WebSocket command sender ───────────────────────────────────────────
 
 async fn send_ws_command(
-    zed_manager: &Arc<RwLock<ZedManager>>,
+    ws_tx: &WsCommandTx,
     cmd: &str,
 ) -> Result<(), StatusCode> {
-    let mgr = zed_manager.read().await;
-    mgr.send_command(cmd).map_err(|e| {
-        tracing::error!("Failed to send WS command: {}", e);
-        StatusCode::SERVICE_UNAVAILABLE
-    })
+    let tx_guard = ws_tx.lock().await;
+    match &*tx_guard {
+        Some(tx) => tx.send(cmd.to_string()).map_err(|e| {
+            tracing::error!("Failed to send WS command: {}", e);
+            StatusCode::SERVICE_UNAVAILABLE
+        }),
+        None => {
+            tracing::error!("Cannot send WS command: not connected");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
 }
 
 // ── Git endpoints ──────────────────────────────────────────────────────
@@ -532,14 +546,23 @@ async fn git_log(
 
 async fn cancel_turn(
     State(state): State<SharedState>,
-    Json(_req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let mgr = state.zed_manager.read().await;
-    match mgr.cancel_current_turn() {
-        Ok(_) => Json(serde_json::json!({"status": "cancelled"})),
-        Err(e) => {
-            tracing::error!("Cancel failed: {}", e);
-            Json(serde_json::json!({"status": "error", "error": e}))
+    let tx_guard = state.ws_tx.lock().await;
+    match &*tx_guard {
+        Some(tx) => {
+            let cmd = serde_json::json!({
+                "type": "cancel_current_turn",
+                "data": {}
+            });
+            if tx.send(cmd.to_string()).is_ok() {
+                Json(serde_json::json!({"status": "cancelled"}))
+            } else {
+                tracing::error!("Cancel failed: WebSocket channel closed");
+                Json(serde_json::json!({"status": "error", "error": "WebSocket not connected"}))
+            }
+        }
+        None => {
+            Json(serde_json::json!({"status": "error", "error": "WebSocket not connected"}))
         }
     }
 }
