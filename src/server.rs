@@ -276,6 +276,7 @@ async fn chat_stream(
     };
 
     let stream = async_stream::stream! {
+        tracing::debug!("SSE stream starting for thread {} (turn_id={}, new={})", tid, turn_id, is_new);
         let event_name = if is_new { "thread_created" } else { "thread_resumed" };
         yield Ok(Event::default()
             .event(event_name)
@@ -298,10 +299,15 @@ async fn chat_stream(
         let mut done = false;
         let mut rx = state_clone.zed_manager.read().await.thread_notify.subscribe();
 
+        let mut poll_count = 0u64;
+        let start = std::time::Instant::now();
+        let max_wait = Duration::from_secs(120); // 2 min max before timeout
         while !done {
             // Wait for notification or poll at 100ms intervals
             tokio::select! {
-                _ = rx.changed() => {},
+                _ = rx.changed() => {
+                    tracing::debug!("SSE stream {}: notification received (poll #{})", tid, poll_count);
+                },
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {},
             }
 
@@ -338,6 +344,7 @@ async fn chat_stream(
 
                 // Check completion: wait for the turn we started
                 if thread.turn_completed > turn_id {
+                    tracing::debug!("SSE stream {}: turn completed ({} > {})", tid, thread.turn_completed, turn_id);
                     yield Ok(Event::default()
                         .event("message_completed")
                         .data(serde_json::to_string(&serde_json::json!({
@@ -348,6 +355,19 @@ async fn chat_stream(
             }
 
             drop(mgr);
+            poll_count += 1;
+
+            // Timeout: if no response within max_wait, emit a timeout event
+            if start.elapsed() > max_wait {
+                tracing::warn!("SSE stream {}: timeout after {}s ({} polls)", tid, max_wait.as_secs(), poll_count);
+                yield Ok(Event::default()
+                    .event("error")
+                    .data(serde_json::to_string(&serde_json::json!({
+                        "thread_id": tid.clone(),
+                        "error": "timeout: no response from agent",
+                    })).unwrap()));
+                done = true;
+            }
         }
     };
 
@@ -479,11 +499,17 @@ async fn send_ws_command(
     cmd: &str,
 ) -> Result<(), StatusCode> {
     let tx_guard = ws_tx.lock().await;
+    tracing::debug!("send_ws_command: tx_present={}", tx_guard.is_some());
     match &*tx_guard {
-        Some(tx) => tx.send(cmd.to_string()).map_err(|e| {
-            tracing::error!("Failed to send WS command: {}", e);
-            StatusCode::SERVICE_UNAVAILABLE
-        }),
+        Some(tx) => {
+            tracing::debug!("send_ws_command: sending {} bytes (type: {:?})", cmd.len(),
+                serde_json::from_str::<serde_json::Value>(cmd).ok()
+                    .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string())));
+            tx.send(cmd.to_string()).map_err(|e| {
+                tracing::error!("Failed to send WS command: {}", e);
+                StatusCode::SERVICE_UNAVAILABLE
+            })
+        },
         None => {
             tracing::error!("Cannot send WS command: not connected");
             Err(StatusCode::SERVICE_UNAVAILABLE)

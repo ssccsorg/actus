@@ -369,7 +369,17 @@ pub async fn run_ws_server(
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
+                            tracing::debug!("WS Text msg ({} bytes): {}", text.len(), &text[..text.len().min(300)]);
                             handle_zed_event(&zed_manager, &text).await;
+                        }
+                        Some(Ok(Message::Binary(data))) => {
+                            tracing::debug!("WS Binary msg ({} bytes): {:?}", data.len(), &data[..data.len().min(100)]);
+                            // Zed may send events as binary — try UTF-8 decode
+                            if let Ok(text) = String::from_utf8(data.to_vec()) {
+                                handle_zed_event(&zed_manager, &text).await;
+                            } else {
+                                tracing::warn!("Received non-UTF-8 binary WebSocket message ({} bytes)", data.len());
+                            }
                         }
                         Some(Ok(Message::Ping(_))) => {}
                         Some(Ok(Message::Close(_))) => {
@@ -421,12 +431,18 @@ pub async fn run_ws_server(
 }
 
 async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
+    tracing::debug!("WS event received: {}", &text[..text.len().min(200)]);
+
     let msg: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(e) => {
+            tracing::warn!("Failed to parse WS event as JSON: {} (text: {})", e, &text[..text.len().min(100)]);
+            return;
+        },
     };
 
     let event_type = msg.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+    tracing::debug!("WS event type: '{}'", event_type);
     let data = msg
         .get("data")
         .and_then(|v| v.as_object())
@@ -486,6 +502,10 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            tracing::debug!("message_added: acp_id={}, role={}, content_len={}",
+                &acp_id[..acp_id.len().min(12)],
+                data.get("role").and_then(|v| v.as_str()).unwrap_or("?"),
+                content.len());
             let role = data
                 .get("role")
                 .and_then(|v| v.as_str())
