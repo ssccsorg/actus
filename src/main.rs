@@ -254,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── WebSocket health monitor ─────────────────────────────────────
     // Periodically checks if events are still arriving from Zed via the
-    // WebSocket. If no events arrive within 45 seconds, assumes the Zed
+    // WebSocket. If no events arrive within 15 seconds, assumes the Zed
     // side is stuck and forces reconnection by setting zed_connected = false.
     // The WS read loop's health check detects this, breaks, and the
     // connection loop accepts a new connection (Zed auto-reconnects).
@@ -264,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::spawn(async move {
             let check_interval = Duration::from_secs(10);
-            let timeout = Duration::from_secs(45);
+            let timeout = Duration::from_secs(15);
 
             loop {
                 tokio::time::sleep(check_interval).await;
