@@ -1,0 +1,50 @@
+diff --git a/crates/zed/src/main.rs b/crates/zed/src/main.rs
+index 9db9d440d2..fa0cb1d665 100644
+--- a/crates/zed/src/main.rs
++++ b/crates/zed/src/main.rs
+@@ -887,7 +887,7 @@ fn main() {
+         .detach_and_log_err(cx);
+ 
+         if args.headless {
+-            initialize_headless(app_state.clone(), cx);
++            initialize_headless(app_state.clone(), args.paths_or_urls.clone(), cx);
+             return;
+         }
+ 
+@@ -1514,7 +1514,7 @@ async fn installation_id(db: KeyValueStore) -> Result<IdType> {
+ ///
+ /// Without `external_websocket_sync` enabled this is effectively a no-op idle loop —
+ /// the flag is mostly useful for the Helix integration.
+-fn initialize_headless(app_state: Arc<AppState>, cx: &mut App) {
++fn initialize_headless(app_state: Arc<AppState>, paths: Vec<String>, cx: &mut App) {
+     log::info!("🟢 [HEADLESS] Starting Zed in headless mode (no windows, no display)");
+     eprintln!("🟢 [HEADLESS] Starting Zed in headless mode (no windows, no display)");
+ 
+@@ -1541,6 +1541,27 @@ fn initialize_headless(app_state: Arc<AppState>, cx: &mut App) {
+             cx,
+         );
+ 
++        // Add worktrees from CLI paths so the agent can see project files.
++        // Without this, the project has zero worktrees and all file-based tools
++        // (grep, find_path, list_directory, etc.) return empty results.
++        if !paths.is_empty() {
++            let project_clone = project.clone();
++            let fs = app_state.fs.clone();
++            cx.spawn(async move |cx| {
++                let path = std::path::Path::new(&paths[0]);
++                if path.exists() {
++                    let canonical = fs.canonicalize(path).await.unwrap_or_else(|_| path.to_path_buf());
++                    cx.update(|cx| {
++                        project_clone.update(cx, |project, cx| {
++                            project.find_or_create_worktree(&canonical, true, cx)
++                        })
++                        .detach_and_log_err(cx);
++                    });
++                }
++            })
++            .detach();
++        }
++
+         let thread_store = ThreadStore::global(cx);
+ 
+         external_websocket_sync::setup_thread_handler(

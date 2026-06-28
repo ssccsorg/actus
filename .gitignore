@@ -1,0 +1,59 @@
+# Rust build output
+target/
+*.rs.bk
+
+# Dependencies
+node_modules/
+*.d.ts
+
+# Python (LightRAG)
+__pycache__/
+
+# Helix fork clone (managed by build.sh)
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Wrangler build output
+.wrangler/
+dist/
+
+# Local secrets (NEVER commit)
+.dev.vars
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# LightRAG runtime
+inputs/
+rag/inputs/
+.pytest_cache/
+.python-version
+
+# Rust build (workspace)
+core/target/
+result/
+
+logs
+
+# Pre-compiled binaries (Helix remote_server, etc.)
+.bin/
