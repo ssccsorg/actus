@@ -13,6 +13,7 @@ mod zed;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::server::{AppState, WsCommandTx};
@@ -248,6 +249,49 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let _ = shutdown_tx.send(());
+        });
+    }
+
+    // ── WebSocket health monitor ─────────────────────────────────────
+    // Periodically checks if events are still arriving from Zed via the
+    // WebSocket. If no events arrive within 45 seconds, assumes the Zed
+    // side is stuck and forces reconnection by setting zed_connected = false.
+    // The WS read loop's health check detects this, breaks, and the
+    // connection loop accepts a new connection (Zed auto-reconnects).
+    {
+        let zed_manager = zed_manager.clone();
+        let ws_tx = ws_tx.clone();
+
+        tokio::spawn(async move {
+            let check_interval = Duration::from_secs(10);
+            let timeout = Duration::from_secs(45);
+
+            loop {
+                tokio::time::sleep(check_interval).await;
+
+                let (connected, elapsed) = {
+                    let mgr = zed_manager.read().await;
+                    (mgr.zed_connected, mgr.last_event_time.elapsed())
+                };
+
+                if connected && elapsed > timeout {
+                    tracing::warn!(
+                        "Health monitor: no events from Zed for {}s, forcing reconnection",
+                        elapsed.as_secs()
+                    );
+                    // Force reconnection: clear zed_connected and ws_tx.
+                    // The WS read loop's periodic check will break, and
+                    // the connection loop will accept a new connection.
+                    {
+                        let mut mgr = zed_manager.write().await;
+                        mgr.zed_connected = false;
+                    }
+                    {
+                        let mut guard = ws_tx.lock().await;
+                        *guard = None;
+                    }
+                }
+            }
         });
     }
 

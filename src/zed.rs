@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,7 @@ pub struct ZedManager {
     pub ws_host: String,
     pub zed_connected: bool,
     pub agent_ready: bool,
-    /// Channel to send WebSocket messages to Zed
+    /// Channel to send WebSocket commands to Zed
     pub ws_tx: Option<mpsc::UnboundedSender<String>>,
     /// Threads managed by this Zed instance
     pub threads: HashMap<String, ThreadSession>,
@@ -36,6 +37,15 @@ pub struct ZedManager {
     pub thread_notify: watch::Sender<u64>,
     /// Waiters for threads whose acp_thread_id is being established
     pub thread_waiters: HashMap<String, Arc<Notify>>,
+    /// Monotonically increasing reconnect counter. Incremented each time
+    /// a new WS connection is established (for SSE consumers to detect).
+    pub reconnect_count: u64,
+    /// Timestamp of the last event received from the WebSocket.
+    /// Used to detect stuck connections where Zed stops sending events.
+    pub last_event_time: Instant,
+    /// Pending chat messages that need to be re-sent after reconnection.
+    /// Stores (request_id, thread_id, message) tuples.
+    pub pending_chat_queue: Vec<(String, String, String)>,
 }
 
 /// A single conversation thread.
@@ -94,6 +104,9 @@ impl ZedManager {
             threads_activated: HashSet::new(),
             thread_notify,
             thread_waiters: HashMap::new(),
+            reconnect_count: 0,
+            last_event_time: Instant::now(),
+            pending_chat_queue: Vec::new(),
         }
     }
 
@@ -326,108 +339,173 @@ pub async fn run_ws_server(
         listener.local_addr()?.port()
     );
 
-    let (stream, peer) = listener.accept().await?;
-    tracing::info!("Zed connecting from {}", peer);
+    // Connection loop: accept → read → disconnect → accept again
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        tracing::info!("Zed connecting from {}", peer);
 
-    let ws_stream = accept_async(stream).await?;
-    let (mut write, mut read) = ws_stream.split();
+        let ws_stream = accept_async(stream).await?;
+        let (mut write, mut read) = ws_stream.split();
 
-    // Create channel for sending commands to Zed
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let tx_for_shared = tx.clone();
-
-    {
-        let mut mgr = zed_manager.write().await;
-        mgr.zed_connected = true;
-        mgr.set_ws_tx(tx);
-    }
-
-    // Also set the shared ws_tx for lock-free command sending
-    {
-        let mut tx_guard = ws_tx.lock().await;
-        *tx_guard = Some(tx_for_shared);
-    }
-    tracing::info!("Zed WebSocket connected");
-
-    // Clone ws_tx for the read loop (it needs to clear the sender on disconnect)
-    let ws_tx_clone = ws_tx.clone();
-
-    // Spawn write task: forward messages from channel to WebSocket
-    let write_handle = tokio::spawn(async move {
-        while let Some(cmd) = rx.recv().await {
-            if let Err(e) = write.send(Message::Text(cmd.into())).await {
-                tracing::error!("WebSocket write error: {}", e);
-                break;
-            }
+        // Increment reconnect counter and set zed_connected
+        {
+            let mut mgr = zed_manager.write().await;
+            mgr.reconnect_count += 1;
+            mgr.zed_connected = true;
+            mgr.agent_ready = false;
+            tracing::info!(
+                "Zed WebSocket connected (reconnect #{})",
+                mgr.reconnect_count
+            );
         }
-    });
 
-    // Read loop
-    let read_handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                msg = read.next() => {
-                    match msg {
-                        Some(Ok(Message::Text(text))) => {
-                            tracing::debug!("WS Text msg ({} bytes): {}", text.len(), &text[..text.len().min(300)]);
-                            handle_zed_event(&zed_manager, &text).await;
-                        }
-                        Some(Ok(Message::Binary(data))) => {
-                            tracing::debug!("WS Binary msg ({} bytes): {:?}", data.len(), &data[..data.len().min(100)]);
-                            // Zed may send events as binary — try UTF-8 decode
-                            if let Ok(text) = String::from_utf8(data.to_vec()) {
-                                handle_zed_event(&zed_manager, &text).await;
-                            } else {
-                                tracing::warn!("Received non-UTF-8 binary WebSocket message ({} bytes)", data.len());
-                            }
-                        }
-                        Some(Ok(Message::Ping(_))) => {}
-                        Some(Ok(Message::Close(_))) => {
-                            tracing::info!("Zed WebSocket closed");
-                            {
-                                let mut mgr = zed_manager.write().await;
-                                mgr.zed_connected = false;
-                            }
-                            {
-                                let mut tx_guard = ws_tx_clone.lock().await;
-                                *tx_guard = None;
-                            }
-                            break;
-                        }
-                        Some(Err(e)) => {
-                            tracing::error!("WebSocket read error: {}", e);
-                            {
-                                let mut mgr = zed_manager.write().await;
-                                mgr.zed_connected = false;
-                            }
-                            {
-                                let mut tx_guard = ws_tx_clone.lock().await;
-                                *tx_guard = None;
-                            }
-                            break;
-                        }
-                        None => {
-                            tracing::info!("WebSocket stream ended");
-                            {
-                                let mut mgr = zed_manager.write().await;
-                                mgr.zed_connected = false;
-                            }
-                            {
-                                let mut tx_guard = ws_tx_clone.lock().await;
-                                *tx_guard = None;
-                            }
-                            break;
-                        }
-                        _ => {}
-                    }
+        // Create channel for sending commands to Zed
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let tx_for_shared = tx.clone();
+
+        // Channel for resending pending messages (must be created BEFORE
+        // set_ws_tx so the pending resend can use the new channel)
+        let (resend_tx, mut resend_rx) = mpsc::unbounded_channel::<String>();
+
+        {
+            let mut mgr = zed_manager.write().await;
+            mgr.set_ws_tx(tx);
+        }
+
+        // Set the shared ws_tx for lock-free command sending
+        {
+            let mut tx_guard = ws_tx.lock().await;
+            *tx_guard = Some(tx_for_shared);
+        }
+        tracing::info!("Zed WebSocket re-established");
+
+        // Resend any pending chat messages that were queued before reconnection.
+        // These are messages that were sent via SSE but never received a response
+        // because the WebSocket connection dropped.
+        {
+            let mgr = zed_manager.read().await;
+            for (rid, tid, cmd) in &mgr.pending_chat_queue {
+                tracing::info!(
+                    "Resending pending message request_id={}, thread_id={}",
+                    &rid[..rid.len().min(12)],
+                    &tid[..tid.len().min(12)]
+                );
+                if let Err(e) = resend_tx.send(cmd.clone()) {
+                    tracing::error!("Failed to queue resend: {}", e);
                 }
             }
         }
-    });
 
-    read_handle.await?;
-    write_handle.abort();
-    Ok(())
+        // Merge resend_rx into the main write loop so both normal and
+        // reconnection-resend commands go through the same writer.
+        // rx is for normal chat_message commands, resend_rx is for
+        // commands retried after a WebSocket reconnection.
+
+        // Clone for the spawned tasks so the originals stay in the outer loop
+        let zed_manager_for_read = zed_manager.clone();
+        let ws_tx_for_read = ws_tx.clone();
+
+        // Spawn write task: forward commands from both normal and
+        // resend channels to WebSocket
+        let write_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(cmd) = rx.recv() => {
+                        if let Err(e) = write.send(Message::Text(cmd.into())).await {
+                            tracing::error!("WebSocket write error: {}", e);
+                            break;
+                        }
+                    },
+                    Some(cmd) = resend_rx.recv() => {
+                        if let Err(e) = write.send(Message::Text(cmd.into())).await {
+                            tracing::error!("WebSocket resend error: {}", e);
+                            break;
+                        }
+                    },
+                }
+            }
+        });
+
+        // Read loop with periodic health check
+        let read_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                tracing::debug!("WS Text msg ({} bytes): {}", text.len(), &text[..text.len().min(300)]);
+                                handle_zed_event(&zed_manager_for_read, &text).await;
+                            }
+                            Some(Ok(Message::Binary(data))) => {
+                                tracing::debug!("WS Binary msg ({} bytes): {:?}", data.len(), &data[..data.len().min(100)]);
+                                if let Ok(text) = String::from_utf8(data.to_vec()) {
+                                    handle_zed_event(&zed_manager_for_read, &text).await;
+                                } else {
+                                    tracing::warn!("Received non-UTF-8 binary WebSocket message ({} bytes)", data.len());
+                                }
+                            }
+                            Some(Ok(Message::Ping(_))) => {}
+                            Some(Ok(Message::Close(_))) => {
+                                tracing::info!("Zed WebSocket closed");
+                                {
+                                    let mut mgr = zed_manager_for_read.write().await;
+                                    mgr.zed_connected = false;
+                                }
+                                {
+                                    let mut guard = ws_tx_for_read.lock().await;
+                                    *guard = None;
+                                }
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                tracing::error!("WebSocket read error: {}", e);
+                                {
+                                    let mut mgr = zed_manager_for_read.write().await;
+                                    mgr.zed_connected = false;
+                                }
+                                {
+                                    let mut guard = ws_tx_for_read.lock().await;
+                                    *guard = None;
+                                }
+                                break;
+                            }
+                            None => {
+                                tracing::info!("WebSocket stream ended");
+                                {
+                                    let mut mgr = zed_manager_for_read.write().await;
+                                    mgr.zed_connected = false;
+                                }
+                                {
+                                    let mut guard = ws_tx_for_read.lock().await;
+                                    *guard = None;
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    },
+                    // Periodic health check: break if zed_connected was
+                    // set to false by the health monitor task.
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                        if !zed_manager_for_read.read().await.zed_connected {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        read_handle.await?;
+        write_handle.abort();
+
+        // Clear ws_tx on disconnect
+        {
+            let mut tx_guard = ws_tx.lock().await;
+            *tx_guard = None;
+        }
+
+        tracing::info!("WS connection lost, waiting for next connection...");
+    }
 }
 
 async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
@@ -443,6 +521,13 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
 
     let event_type = msg.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
     tracing::debug!("WS event type: '{}'", event_type);
+
+    // Update last_event_time for health monitor
+    {
+        let mut mgr = zed_manager.write().await;
+        mgr.last_event_time = Instant::now();
+    }
+
     let data = msg
         .get("data")
         .and_then(|v| v.as_object())

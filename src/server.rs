@@ -226,19 +226,24 @@ async fn chat_stream(
         mgr.get_acp_thread_id(&thread_id)
     };
 
-    send_ws_command(
-        &state.ws_tx,
-        &serde_json::json!({
-            "type": "chat_message",
-            "data": {
-                "message": message,
-                "request_id": request_id,
-                "acp_thread_id": acp_id,
-            }
-        })
-        .to_string(),
-    )
-    .await?;
+    let ws_command = serde_json::json!({
+        "type": "chat_message",
+        "data": {
+            "message": message,
+            "request_id": request_id,
+            "acp_thread_id": acp_id,
+        }
+    })
+    .to_string();
+
+    send_ws_command(&state.ws_tx, &ws_command).await?;
+
+    // Store in pending queue for potential reconnection retry
+    {
+        let mut mgr = state.zed_manager.write().await;
+        mgr.pending_chat_queue
+            .push((request_id.clone(), thread_id.clone(), ws_command));
+    }
 
     // If this is a resumed thread waiting for acp_thread_id establishment,
     // wait for the thread_created notification from the Zed WebSocket
