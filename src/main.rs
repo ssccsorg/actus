@@ -263,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
         let ws_tx = ws_tx.clone();
 
         tokio::spawn(async move {
+            tracing::info!("Health monitor started (check every 10s, timeout 15s)");
             let check_interval = Duration::from_secs(10);
             let timeout = Duration::from_secs(15);
 
@@ -271,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let (connected, elapsed) = {
                     let mgr = zed_manager.read().await;
-                    (mgr.zed_connected, mgr.last_event_time.elapsed())
+                    (mgr.zed_connected, mgr.last_sse_event_time.elapsed())
                 };
 
                 if connected && elapsed > timeout {

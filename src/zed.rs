@@ -40,9 +40,12 @@ pub struct ZedManager {
     /// Monotonically increasing reconnect counter. Incremented each time
     /// a new WS connection is established (for SSE consumers to detect).
     pub reconnect_count: u64,
-    /// Timestamp of the last event received from the WebSocket.
-    /// Used to detect stuck connections where Zed stops sending events.
-    pub last_event_time: Instant,
+    /// Timestamp of the last PING received from Zed (for keepalive).
+    pub last_ping_time: Instant,
+    /// Timestamp of the last meaningful SSE event (message_added,
+    /// message_completed, thread_created, agent_ready).
+    /// Used to detect stuck connections where SSE events stop arriving.
+    pub last_sse_event_time: Instant,
     /// Pending chat messages that need to be re-sent after reconnection.
     /// Stores (request_id, thread_id, message) tuples.
     pub pending_chat_queue: Vec<(String, String, String)>,
@@ -105,7 +108,8 @@ impl ZedManager {
             thread_notify,
             thread_waiters: HashMap::new(),
             reconnect_count: 0,
-            last_event_time: Instant::now(),
+            last_ping_time: Instant::now(),
+            last_sse_event_time: Instant::now(),
             pending_chat_queue: Vec::new(),
         }
     }
@@ -522,10 +526,16 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
     let event_type = msg.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
     tracing::debug!("WS event type: '{}'", event_type);
 
-    // Update last_event_time for health monitor
+    // Update event timestamps for health monitor.
+    // ping only updates last_ping_time; all other events update
+    // last_sse_event_time so the monitor can detect SSE stalls.
     {
         let mut mgr = zed_manager.write().await;
-        mgr.last_event_time = Instant::now();
+        if event_type == "ping" {
+            mgr.last_ping_time = Instant::now();
+        } else {
+            mgr.last_sse_event_time = Instant::now();
+        }
     }
 
     let data = msg
