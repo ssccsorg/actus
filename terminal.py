@@ -38,6 +38,8 @@ except ImportError:
     _sp.check_call([sys.executable, "-m", "pip", "install", "httpx"])
     import httpx
 
+import aiohttp
+
 
 # ── Globals ──────────────────────────────────────────────────────────────
 
