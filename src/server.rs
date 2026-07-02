@@ -269,6 +269,7 @@ async fn chat_stream(
         mgr.threads_activated.insert(thread_id.clone());
     }
 
+    tracing::debug!("chat_stream: preparing SSE stream for thread {} (turn_id candidate)", thread_id);
     // Build SSE stream: poll with backoff, using the watch channel for notification.
     // Each SSE stream captures the current turn_id and waits for
     // thread.turn_completed > turn_id, so multiple SSE streams on
@@ -280,6 +281,7 @@ async fn chat_stream(
         mgr.threads.get(&tid).map(|t| t.turn_completed).unwrap_or(0)
     };
 
+    tracing::debug!("chat_stream: SSE stream created, returning to axum");
     let stream = async_stream::stream! {
         tracing::debug!("SSE stream starting for thread {} (turn_id={}, new={})", tid, turn_id, is_new);
         let event_name = if is_new { "thread_created" } else { "thread_resumed" };
@@ -316,10 +318,31 @@ async fn chat_stream(
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {},
             }
 
+            // Log every 10th poll so we can see the loop is alive
+            if poll_count % 10 == 0 {
+                tracing::debug!("SSE pool {}: iter #{}", tid, poll_count);
+            }
+
             let mgr = state_clone.zed_manager.read().await;
             let thread = mgr.threads.get(&tid);
 
             if let Some(thread) = thread {
+                let msg_count = thread.messages.len();
+                let turn_comp = thread.turn_completed;
+                let last_assistant = thread
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "assistant")
+                    .map(|m| (m.content.len(), m.entry_type.as_deref().unwrap_or("")));
+
+                if poll_count % 100 == 0 || msg_count > 1 {
+                    tracing::debug!(
+                        "SSE pool {}: msgs={}, turn={}/{}, last_assistant_len={:?}, last_content_len={}",
+                        poll_count, msg_count, turn_comp, turn_id, last_assistant, last_content.len()
+                    );
+                }
+
                 // Find last assistant message (with tool metadata)
                 let last_msg = thread
                     .messages
@@ -336,6 +359,7 @@ async fn chat_stream(
                     let delta = &assistant_content[last_content.len()..];
                     last_content = assistant_content.to_string();
 
+                    tracing::debug!("SSE stream {}: yielding {} bytes delta", tid, delta.len());
                     yield Ok(Event::default()
                         .event("message_added")
                         .data(serde_json::to_string(&serde_json::json!({
@@ -356,6 +380,10 @@ async fn chat_stream(
                             "thread_id": tid.clone(),
                         })).unwrap()));
                     done = true;
+                }
+            } else {
+                if poll_count % 50 == 0 {
+                    tracing::debug!("SSE stream {}: thread not found after {} polls", tid, poll_count);
                 }
             }
 

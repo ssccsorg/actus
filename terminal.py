@@ -44,8 +44,7 @@ except ImportError:
 _shutdown = False
 current_thread_id = None
 show_raw = False
-# Track the current SSE curl process so we can kill it on new requests
-_current_proc = None
+
 
 
 # ── ANSI colors ──────────────────────────────────────────────────────────
@@ -242,7 +241,12 @@ async def resolve_mentions(client: NexClient, message: str) -> str:
 
 
 async def send_chat(client: NexClient, message: str):
-    """Send a message via SSE streaming endpoint /v1/chat."""
+    """Send a message via /v1/chat/async + polling /v1/threads/:id/poll.
+
+    Uses async submission (returns immediately) and polls for new content
+    at 300ms intervals. This avoids the SSE streaming issues with the
+    WebSocket event delivery from Zed.
+    """
     global current_thread_id, show_raw
 
     if not message:
@@ -259,85 +263,69 @@ async def send_chat(client: NexClient, message: str):
         body["thread_id"] = current_thread_id
 
     if show_raw:
-        print(f"\n{C.DIM}[RAW REQ] {json.dumps(body)}{C.END}")
+        print(f"\n{C.DIM}[ASYNC REQ] {json.dumps(body)}{C.END}")
 
-    thread_announced = False
+    # Step 1: Send message via async endpoint
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                f"{client.base_url}/v1/chat/async",
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    print(f"{C.RED}Error {resp.status}: {text}{C.END}")
+                    return
+                result = await resp.json()
+                tid = result.get("thread_id", "")
+                if tid:
+                    current_thread_id = tid
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            print(f"{C.RED}Request failed: {e}{C.END}")
+            return
 
-    url = f"{client.base_url}/v1/chat"
-    body_str = json.dumps(body)
-    global _current_proc
+    print(f"\n{C.CYAN}Thread: {current_thread_id}{C.END}\n")
 
-    # Kill previous SSE connection if still running
-    if _current_proc and _current_proc.returncode is None:
-        _current_proc.kill()
-        await _current_proc.wait()
+    # Step 2: Poll for response
+    content_len = 0
+    poll_interval = 0.3
+    max_wait = 120.0  # 2 minutes max
+    waited = 0.0
 
-    proc = await asyncio.create_subprocess_exec(
-        "curl", "-s", "-N", "-X", "POST", url,
-        "-H", "Content-Type: application/json",
-        "-d", body_str,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
-    )
-    _current_proc = proc
-    print(f"{C.DIM}[SSE] curl started PID {proc.pid}{C.END}", file=sys.stderr)
-
-    event_type = ""
-    raw_data = ""
-
-    while not _shutdown:
-        line_b = await proc.stdout.readline()
-        if not line_b:
-            break
-        line = line_b.decode().strip()
-
-        if line.startswith("event: "):
-            event_type = line[7:].strip()
-        elif line.startswith("data: "):
-            raw_data = line[6:]
-        elif not line:
-            if not event_type or not raw_data:
-                event_type = ""
-                raw_data = ""
-                continue
-
+    async with aiohttp.ClientSession() as session:
+        while waited < max_wait:
             try:
-                event_data = json.loads(raw_data)
-            except json.JSONDecodeError:
-                event_type = ""
-                raw_data = ""
-                continue
+                async with session.get(
+                    f"{client.base_url}/v1/threads/{current_thread_id}/poll",
+                    params={"since": content_len},
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status != 200:
+                        await asyncio.sleep(poll_interval)
+                        waited += poll_interval
+                        continue
+                    data = await resp.json()
 
-            if show_raw:
-                print(f"\n{C.DIM}[RAW SSE] event={event_type} data={json.dumps(event_data)}{C.END}")
+                    new_content = data.get("new_content")
+                    content_len = data.get("content_len", content_len)
+                    completed = data.get("completed", False)
 
-            if event_type == "thread_created":
-                new_tid = event_data.get("thread_id", "")
-                if new_tid:
-                    current_thread_id = new_tid
-                if not thread_announced:
-                    print(f"\n{C.CYAN}Thread: {current_thread_id}{C.END}\n")
-                    thread_announced = True
+                    if new_content:
+                        print(new_content, end="", flush=True)
 
-            elif event_type == "message_added":
-                delta = event_data.get("content", "")
-                if delta:
-                    print(delta, end="", flush=True)
+                    if completed:
+                        print(f"\n{C.GREEN}✓ Complete{C.END}")
+                        print()
+                        return
 
-            elif event_type == "message_completed":
-                print(f"\n{C.GREEN}✓ Complete{C.END}")
-                print()
-                proc.kill()
-                _current_proc = None
-                return
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
 
-            event_type = ""
-            raw_data = ""
+            await asyncio.sleep(poll_interval)
+            waited += poll_interval
 
-    await proc.wait()
-    _current_proc = None
-
-    if not thread_announced and current_thread_id:
-        print(f"\n{C.CYAN}Thread: {current_thread_id}{C.END}\n")
+    print(f"\n{C.YELLOW}⚠ Timeout after 120s{C.END}\n")
 
 
 # ── Stdin reader ─────────────────────────────────────────────────────────
