@@ -120,6 +120,7 @@ pub struct ThreadDetailResponse {
     pub messages: Vec<serde_json::Value>,
     pub created_at: String,
     pub completed: bool,
+    pub turn_completed: u64,
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────
@@ -451,6 +452,7 @@ async fn get_thread(
                 messages,
                 created_at: thread.created_at.to_rfc3339(),
                 completed: thread.completed,
+                turn_completed: thread.turn_completed,
             }))
         }
         None => Err(StatusCode::NOT_FOUND),
@@ -464,6 +466,10 @@ pub struct PollQuery {
     /// The content length the client already has for the latest assistant message.
     /// New content beyond this length is returned as the delta.
     since: Option<usize>,
+    /// The turn_completed value the client last observed.
+    /// If omitted, defaults to 0. Poll returns `completed: true` when
+    /// thread.turn_completed exceeds this value (i.e., a new turn finished).
+    turn: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -492,6 +498,7 @@ async fn poll_thread(
     let thread = mgr.threads.get(&thread_id).ok_or(StatusCode::NOT_FOUND)?;
 
     let since = query.since.unwrap_or(0);
+    let known_turn = query.turn.unwrap_or(0);
 
     // Find the latest assistant message for delta computation
     let last_msg = thread.messages.iter().rev().find(|m| m.role == "assistant");
@@ -501,7 +508,7 @@ async fn poll_thread(
             let delta = msg.content[since..].to_string();
             Ok(Json(PollResponse {
                 new_content: Some(delta),
-                completed: thread.completed || thread.turn_completed > 0,
+                completed: thread.turn_completed > known_turn,
                 content_len: msg.content.len(),
             }))
         }
@@ -509,7 +516,7 @@ async fn poll_thread(
             // No new content; report completion or no-change
             Ok(Json(PollResponse {
                 new_content: None,
-                completed: thread.completed || thread.turn_completed > 0,
+                completed: thread.turn_completed > known_turn,
                 content_len: msg.content.len(),
             }))
         }
@@ -517,7 +524,7 @@ async fn poll_thread(
             // No assistant message exists yet
             Ok(Json(PollResponse {
                 new_content: None,
-                completed: thread.completed || thread.turn_completed > 0,
+                completed: thread.turn_completed > known_turn,
                 content_len: 0,
             }))
         }

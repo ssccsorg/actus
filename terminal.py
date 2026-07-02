@@ -289,7 +289,20 @@ async def send_chat(client: NexClient, message: str):
 
     print(f"\n{C.CYAN}Thread: {current_thread_id}{C.END}\n")
 
-    # Step 2: Poll for response
+    # Step 2: Get current thread state to know the starting turn
+    known_turn = 0
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(
+                f"{client.base_url}/v1/threads/{current_thread_id}",
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    known_turn = data.get("turn_completed", 0)
+        except Exception:
+            pass
+
     content_len = 0
     poll_interval = 0.3
     max_wait = 120.0  # 2 minutes max
@@ -300,7 +313,7 @@ async def send_chat(client: NexClient, message: str):
             try:
                 async with session.get(
                     f"{client.base_url}/v1/threads/{current_thread_id}/poll",
-                    params={"since": content_len},
+                    params={"since": content_len, "turn": known_turn},
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as resp:
                     if resp.status != 200:
