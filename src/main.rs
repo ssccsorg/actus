@@ -155,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
     let ws_host_clone = ws_host.clone();
     let ws_tx_clone = ws_tx.clone();
     let ws_server = tokio::spawn(async move {
-        zed::run_ws_server(&ws_host_clone, ws_zed_manager, ws_tx_clone).await
+        zed::control::run_ws_server(&ws_host_clone, ws_zed_manager, ws_tx_clone).await
     });
 
     // Wait for WebSocket server to be ready
