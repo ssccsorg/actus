@@ -315,7 +315,16 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let request_id = data
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let mut mgr = zed_manager.write().await;
+            // Clean up pending queue so reconnection doesn't resend this
+            if !request_id.is_empty() {
+                mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
+            }
             if let Some(thread) = mgr.threads.get_mut(&acp_id) {
                 thread.completed = true;
                 thread.turn_completed = thread.turn_completed.wrapping_add(1);
