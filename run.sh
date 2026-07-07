@@ -331,6 +331,7 @@ case "$MODE" in
         run_tests
         ;;
     --server-only|-s)
+        ensure_zed_binary
         info "Starting server only via runner.py"
         python3 "$RUNNER" --server-only --workdir "$PROJECT_DIR" &
         SERVER_PID=$!
@@ -344,7 +345,8 @@ case "$MODE" in
         show_help
         ;;
     *)
-        info "Starting Actus via runner.py"
+        ensure_zed_binary
+        info "Building and starting Actus..."
         python3 "$RUNNER" --workdir "$PROJECT_DIR"
         ;;
 esac
