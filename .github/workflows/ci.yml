@@ -32,16 +32,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Pull or build Docker image
+      - name: Build and test (base target)
         run: |
-          if docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest 2>/dev/null; then
-            echo "Image pulled successfully."
-          else
-            echo "Image not found in registry. Building..."
-            docker buildx build --load \
-              --cache-from type=gha,scope=shared-actus \
-              --cache-to type=gha,mode=min,scope=shared-actus \
-              -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-              -f Dockerfile .
-          fi
+          docker buildx build --load \
+            --cache-from type=gha,scope=shared-actus \
+            --cache-to type=gha,mode=min,scope=shared-actus \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            -f Dockerfile .
+        shell: bash
+
+      - name: Full integration test (full target)
+        run: |
+          docker buildx build --load \
+            --cache-from type=gha,scope=shared-actus \
+            --cache-to type=gha,mode=min,scope=shared-actus \
+            --target full \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:full \
+            -f Dockerfile .
         shell: bash
