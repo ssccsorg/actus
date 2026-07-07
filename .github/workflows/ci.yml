@@ -5,29 +5,15 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  workflow_dispatch:
 
 jobs:
-  test:
+  docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libwayland-dev libxkbcommon-dev
-
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Run test suite
-        run: ./run.sh --test
+      - name: Build Docker image and run tests
+        run: docker build .
         env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          DOCKER_BUILDKIT: 1

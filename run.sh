@@ -20,6 +20,7 @@ TERMINAL="$SCRIPT_DIR/terminal.py"
 SERVER_LOG="/tmp/actus-server.log"
 HTTP_PORT="${ACTUS_HTTP_PORT:-9090}"
 WS_PORT="${ACTUS_WS_PORT:-8080}"
+ZED_BIN="$SCRIPT_DIR/helix/.bin/helix-zed-headless-arm64"
 
 # ── Colors ────────────────────────────────────────────────────────────
 PASS="\033[92m✓\033[0m"
