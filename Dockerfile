@@ -2,7 +2,14 @@
 
 FROM ubuntu:24.04 AS zed-builder
 
-RUN apt-get update && apt-get install -y build-essential curl git \
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    pkg-config \
+    libx11-dev \
+    libxcb-dev \
+    libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/* \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
