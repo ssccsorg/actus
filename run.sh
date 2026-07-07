@@ -55,15 +55,10 @@ test_static_rust() {
 
 test_rust_unit() {
     step "Static: Rust unit tests"
-    if cargo test 2>&1 | tail -1 | grep -q "test result: ok"; then
+    if cargo test 2>&1; then
         pass "cargo test"
     else
-        # Cargo test may fail if no tests found -- that is OK
-        if cargo test 2>&1 | grep -q "0 measured"; then
-            warn "No unit tests found"
-        else
-            fail "cargo test failed"
-        fi
+        fail "cargo test failed"
     fi
 }
 
