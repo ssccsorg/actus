@@ -82,14 +82,19 @@ async fn main() -> anyhow::Result<()> {
     let bin_path = if let Some(p) = args.bin {
         p
     } else {
-        // Search common locations
+        let arch_suffix = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "amd64",
+            other => other,
+        };
+        let bin_name = format!("helix-zed-headless-{}", arch_suffix);
         let candidates = vec![
             dirs::home_dir()
-                .map(|h| h.join(".bin/helix-zed-headless-arm64"))
+                .map(|h| h.join(format!(".bin/{}", bin_name)))
                 .unwrap_or_default(),
-            PathBuf::from("../.bin/helix-zed-headless-arm64"),
-            PathBuf::from(".bin/helix-zed-headless-arm64"),
-            PathBuf::from("helix/.bin/helix-zed-headless-arm64"),
+            PathBuf::from(format!("../.bin/{}", bin_name)),
+            PathBuf::from(format!(".bin/{}", bin_name)),
+            PathBuf::from(format!("helix/.bin/{}", bin_name)),
         ];
         candidates
             .into_iter()

@@ -30,7 +30,13 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent  # actus/
 PROJECT_DIR = SCRIPT_DIR                        # actus/ = project root
 ACTUS_BIN = PROJECT_DIR / "target" / "debug" / "actus"
-ZED_BIN = SCRIPT_DIR / "helix" / ".bin" / "helix-zed-headless-arm64"
+import platform
+_arch = platform.machine().lower()
+if _arch in ("x86_64", "amd64"):
+    _arch = "amd64"
+elif _arch in ("aarch64", "arm64"):
+    _arch = "arm64"
+ZED_BIN = SCRIPT_DIR / "helix" / ".bin" / f"helix-zed-headless-{_arch}"
 TERMINAL = SCRIPT_DIR / "terminal.py"
 
 
