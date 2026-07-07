@@ -175,8 +175,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo_path = dir.path();
 
-        // Init git repo
-        git(&["init"], repo_path).unwrap();
+        // Init git repo with known branch name
+        git(&["init", "--initial-branch=main"], repo_path).unwrap();
         git(&["config", "user.email", "test@test.com"], repo_path).unwrap();
         git(&["config", "user.name", "Test"], repo_path).unwrap();
 
