@@ -6,7 +6,7 @@ Provides HTTP API for multi-thread, multi-agent conversations
 with async task queue and approval gates.
 
 Usage:
-  export DEEPSEEK_API_KEY="sk-xxx"
+  export LLM_API_KEY="sk-xxx"
   python3 -server.py
 
 API:
@@ -29,7 +29,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import uvicorn
 
@@ -69,9 +69,9 @@ if env_file.exists():
             k, _, v = line.partition("=")
             os.environ.setdefault(k.strip(), v.strip())
 
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("LLM_API_KEY")
-if not DEEPSEEK_API_KEY:
-    print("ERROR: DEEPSEEK_API_KEY or LLM_API_KEY env var required")
+api_key = os.environ.get("LLM_API_KEY")
+if not api_key:
+    print("ERROR: LLM_API_KEY env var required")
     sys.exit(1)
 
 # ── Thread Manager ──────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ class ThreadSession:
         self.thread_id = thread_id
         self.messages: list[dict] = []
         self.created_at = datetime.now(timezone.utc)
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.ws: Any = None
         self._pending_requests: dict[str, asyncio.Future] = {}
 
     def add_message(self, role: str, content: str, msg_id: str = ""):
@@ -104,9 +104,8 @@ class ThreadManager:
 
     def __init__(self):
         self._threads: dict[str, ThreadSession] = {}
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws: Any = None
         self._ready = asyncio.Event()
-
     @property
     def ws(self):
         return self._ws
@@ -229,7 +228,7 @@ async def handle_zed_connection(websocket):
             except json.JSONDecodeError:
                 pass
     except websockets.exceptions.ConnectionClosed:
-        print(f"[-server] Zed connection closed")
+        print("[-server] Zed connection closed")
     finally:
         threads.ws = None
 
@@ -249,7 +248,7 @@ async def handle_zed_message(msg: dict):
 
     elif event_type == "thread_created":
         acp_id = data.get("acp_thread_id", "")
-        rid = data.get("request_id", "")
+        data.get("request_id", "")
         sess = threads.get_or_create(acp_id)
         print(f"[-server] Thread created: {acp_id}")
 
@@ -427,6 +426,7 @@ async def list_tasks(status: str = ""):
 async def approve_task(task_id: str):
     if tasks_q.approve(task_id):
         task = tasks_q.get(task_id)
+        assert task is not None
         asyncio.create_task(execute_task(task))
         return {"status": "approved"}
     raise HTTPException(status_code=404, detail="Task not found or not awaiting approval")
@@ -565,11 +565,11 @@ async def main():
 
     # Bootstrap Zed settings
     user_data_dir = tempfile.mkdtemp(prefix="-")
-    ensure_zed_settings(user_data_dir, DEEPSEEK_API_KEY)
-
+    assert api_key is not None
+    ensure_zed_settings(user_data_dir, api_key)
     session_id = f"ses-actus-{uuid.uuid4().hex[:8]}"
 
-    print(f"[-server] Starting...")
+    print("[-server] Starting...")
     print(f"  Binary:     {bin_path}")
     print(f"  Workdir:    {workdir}")
     print(f"  HTTP API:   http://{HOST}:{args.http_port}")
@@ -625,7 +625,7 @@ async def main():
     )
     server = uvicorn.Server(config)
 
-    print(f"[-server] Ready. Waiting for Zed to connect...")
+    print("[-server] Ready. Waiting for Zed to connect...")
 
     # Run both servers concurrently
     await asyncio.gather(server.serve(), ws_server.wait_closed())

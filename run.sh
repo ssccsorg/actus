@@ -109,7 +109,7 @@ test_threads() {
 start_server() {
     step "Starting  server via runner.py"
 
-    local api_key="${LLM_API_KEY:-${DEEPSEEK_API_KEY:-}}"
+    local api_key="${LLM_API_KEY:-}"
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
         api_key=$(grep -E '^LLM_API_KEY=' "$SCRIPT_DIR/.env" | head -1 | cut -d= -f2-)
     fi
@@ -196,7 +196,6 @@ Modes:
 
 Environment:
   LLM_API_KEY      Provider API key
-  DEEPSEEK_API_KEY Fallback API key
   LLM_PROVIDER     Provider name (default: deepseek)
   LLM_BASE_URL     API base URL
   LLM_MODEL        Model name

@@ -110,9 +110,9 @@ def main():
                 os.environ.setdefault(k.strip(), v.strip())
 
     # Resolve API key
-    api_key = args.api_key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("LLM_API_KEY", "")
+    api_key = args.api_key or os.environ.get("LLM_API_KEY", "")
     if not api_key:
-        print(f"{C.YELLOW}Warning: No API key set. Set DEEPSEEK_API_KEY or LLM_API_KEY.{C.END}")
+        print(f"{C.YELLOW}Warning: No API key set. Set LLM_API_KEY.{C.END}")
 
     # Build Rust binary
     if not args.no_build:
@@ -165,7 +165,7 @@ def main():
         # Wait for server health
         import http.client as _hc
         import json as _j
-        print(f"Waiting for server...", file=sys.stderr)
+        print("Waiting for server...", file=sys.stderr)
         for i in range(30):
             try:
                 conn = _hc.HTTPConnection("127.0.0.1", args.http_port, timeout=2)

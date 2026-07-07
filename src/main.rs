@@ -38,7 +38,7 @@ struct Args {
     #[arg(long, default_value = "8080")]
     ws_port: u16,
 
-    /// LLM API key (default: DEEPSEEK_API_KEY or LLM_API_KEY env var)
+    /// LLM API key (default: LLM_API_KEY env var)
     #[arg(long)]
     api_key: Option<String>,
 
@@ -75,9 +75,8 @@ async fn main() -> anyhow::Result<()> {
     // Resolve API key
     let api_key = args
         .api_key
-        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
         .or_else(|| std::env::var("LLM_API_KEY").ok())
-        .ok_or_else(|| anyhow::anyhow!("API key required: set DEEPSEEK_API_KEY or --api-key"))?;
+        .ok_or_else(|| anyhow::anyhow!("API key required: set LLM_API_KEY or --api-key"))?;
 
     // Resolve binary path
     let bin_path = if let Some(p) = args.bin {
