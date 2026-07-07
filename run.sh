@@ -15,12 +15,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
+HELIX_DIR="$SCRIPT_DIR/helix"
 RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
+ZED_BIN="$HELIX_DIR/.bin/helix-zed-headless-arm64"
 SERVER_LOG="/tmp/actus-server.log"
 HTTP_PORT="${ACTUS_HTTP_PORT:-9090}"
 WS_PORT="${ACTUS_WS_PORT:-8080}"
-ZED_BIN="$SCRIPT_DIR/helix/.bin/helix-zed-headless-arm64"
 
 # ── Colors ────────────────────────────────────────────────────────────
 PASS="\033[92m✓\033[0m"
@@ -195,8 +196,28 @@ test_llm_chat() {
 
 # ── Server start ──────────────────────────────────────────────────────
 
+ensure_zed_binary() {
+    if [ -f "$ZED_BIN" ]; then
+        pass "Zed binary: $ZED_BIN"
+        return 0
+    fi
+    info "Zed binary not found at $ZED_BIN"
+    if [ -f "$HELIX_DIR/build.sh" ]; then
+        info "Building Zed from source via helix/build.sh..."
+        bash "$HELIX_DIR/build.sh" --build-only --release || {
+            warn "Zed build failed — integration tests will be skipped"
+            return 1
+        }
+    else
+        warn "helix/build.sh not found — integration tests will be skipped"
+        return 1
+    fi
+}
+
 start_server() {
     step "Starting Actus server via runner.py"
+
+    ensure_zed_binary
 
     local api_key="${LLM_API_KEY:-}"
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
