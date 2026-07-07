@@ -106,6 +106,7 @@ class ThreadManager:
         self._threads: dict[str, ThreadSession] = {}
         self._ws: Any = None
         self._ready = asyncio.Event()
+
     @property
     def ws(self):
         return self._ws
@@ -248,7 +249,6 @@ async def handle_zed_message(msg: dict):
 
     elif event_type == "thread_created":
         acp_id = data.get("acp_thread_id", "")
-        data.get("request_id", "")
         sess = threads.get_or_create(acp_id)
         print(f"[-server] Thread created: {acp_id}")
 

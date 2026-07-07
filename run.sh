@@ -46,7 +46,7 @@ cleanup() {
 
 test_static_rust() {
     step "Static: Rust compile"
-    if cargo check 2>/dev/null; then
+    if cargo check; then
         pass "cargo check"
     else
         fail "cargo check failed"
@@ -67,7 +67,7 @@ test_static_python() {
     local ok=true
     for pyfile in "$SCRIPT_DIR"/*.py; do
         if [ -f "$pyfile" ]; then
-            if python3 -m py_compile "$pyfile" 2>/dev/null; then
+            if python3 -m py_compile "$pyfile"; then
                 pass "$(basename "$pyfile")"
             else
                 warn "$(basename "$pyfile") failed"
