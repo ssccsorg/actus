@@ -32,12 +32,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and test
+      - name: Build and test (base target)
         run: |
           docker buildx build --load \
             --cache-from type=gha,scope=shared-actus \
             --cache-to type=gha,mode=min,scope=shared-actus \
-            --target full \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
             -f Dockerfile .
         shell: bash
