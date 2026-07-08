@@ -26,13 +26,13 @@ COPY src/ src/
 COPY *.py run.sh ./
 RUN cargo build --release
 
+ENTRYPOINT ["./target/release/actus"]
+
 # ── Full integration ─────────────────────────────────────────────────
 
 FROM base AS full
 
 COPY --from=zed-builder /workspace/helix/.bin/ helix/.bin/
-
-ENTRYPOINT ["./target/release/actus"]
 
 # Default: lean binary only
 FROM base
