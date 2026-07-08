@@ -184,7 +184,7 @@ test_llm_chat() {
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
         api_key=$(grep -E '^LLM_API_KEY=' "$SCRIPT_DIR/.env" | head -1 | cut -d= -f2-)
     fi
-    if [ -z "$api_key" ]; then
+    if [ -z "$api_key" ] || [ "$api_key" = "ci-skip" ]; then
         warn "Skipped: no LLM_API_KEY set"
         return 0
     fi

@@ -27,4 +27,8 @@ jobs:
             -f Dockerfile .
 
       - name: Run tests
-        run: docker run --rm -e ZED_BIN=/bin/true --entrypoint ./run.sh actus:ci --test
+        run: docker run --rm \
+          -e ZED_BIN=/bin/true \
+          -e LLM_API_KEY=ci-skip \
+          --entrypoint ./run.sh \
+          actus:ci --test
