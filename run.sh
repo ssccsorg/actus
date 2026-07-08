@@ -18,12 +18,15 @@ PROJECT_DIR="$SCRIPT_DIR"
 HELIX_DIR="$SCRIPT_DIR/helix"
 RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
-ACTUS_ARCH="$(uname -m)"
-case "$ACTUS_ARCH" in
-    x86_64|amd64) ACTUS_ARCH="amd64" ;;
-    aarch64|arm64) ACTUS_ARCH="arm64" ;;
-esac
-ZED_BIN="$HELIX_DIR/.bin/helix-zed-headless-$ACTUS_ARCH"
+# Respect pre-configured ZED_BIN (e.g. CI sets ZED_BIN=/bin/true)
+if [ -z "${ZED_BIN:-}" ]; then
+    ACTUS_ARCH="$(uname -m)"
+    case "$ACTUS_ARCH" in
+        x86_64|amd64) ACTUS_ARCH="amd64" ;;
+        aarch64|arm64) ACTUS_ARCH="arm64" ;;
+    esac
+    ZED_BIN="$HELIX_DIR/.bin/helix-zed-headless-$ACTUS_ARCH"
+fi
 SERVER_LOG="/tmp/actus-server.log"
 HTTP_PORT="${ACTUS_HTTP_PORT:-9090}"
 WS_PORT="${ACTUS_WS_PORT:-8080}"
