@@ -33,6 +33,7 @@ ENTRYPOINT ["./target/release/actus"]
 FROM base AS full
 
 COPY --from=zed-builder /workspace/helix/.bin/ helix/.bin/
+COPY NOTICE.md /
 
 # Default: lean binary only
 FROM base

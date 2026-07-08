@@ -1,0 +1,15 @@
+GNU General Public License v3.0
+
+The `helix/subtree/` directory and the binary produced by
+`helix/build.sh` are derived from Zed Editor
+(https://github.com/helixml/zed), which is licensed under the
+GNU General Public License, version 3.
+
+A copy of the GPL v3 can be found at:
+https://www.gnu.org/licenses/gpl-3.0.html
+
+The source code for the Helix fork of Zed is available at:
+https://github.com/helixml/zed
+
+All modifications made under `helix/patch/` are also distributed
+under GPL v3.
