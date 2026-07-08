@@ -27,4 +27,4 @@ jobs:
             -f Dockerfile .
 
       - name: Run tests
-        run: docker run --rm -e ZED_BIN=/bin/true actus:ci ./run.sh --test
+        run: docker run --rm -e ZED_BIN=/bin/true --entrypoint ./run.sh actus:ci --test
