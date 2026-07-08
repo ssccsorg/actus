@@ -18,10 +18,13 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: Build and test
+      - name: Build image
         run: |
           docker buildx build --load \
             --cache-from type=gha,scope=shared-actus \
             --cache-to type=gha,mode=min,scope=shared-actus \
+            -t actus:ci \
             -f Dockerfile .
-        shell: bash
+
+      - name: Run tests
+        run: docker run --rm -e ZED_BIN=/bin/true actus:ci ./run.sh --test
