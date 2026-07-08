@@ -239,7 +239,6 @@ start_server() {
         "--http-port" "$HTTP_PORT"
         "--ws-port" "$WS_PORT"
         "--server-only"
-        "--no-build"
     )
     [ -n "$api_key" ] && runner_args+=("--api-key" "$api_key")
     if [ -f "$ZED_BIN" ]; then
