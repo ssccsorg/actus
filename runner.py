@@ -130,13 +130,7 @@ def main():
             sys.exit(1)
 
     # Kill any stale server on our ports before starting
-    import http.client as _hc
-    for _port in [args.http_port, args.ws_port]:
-        subprocess.run(
-            ["lsof", "-ti", f":{_port}", "-sTCP:LISTEN"],
-            capture_output=True, text=True, timeout=5
-        )
-        subprocess.run(["pkill", "-f", ""], capture_output=True, timeout=5)
+    subprocess.run(["pkill", "-f", "actus"], capture_output=True, timeout=5)
     time.sleep(1)
 
     # Build and start Rust server
