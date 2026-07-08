@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // Protocol types for Zed headless communication.
 //
 // Ported from helixml/zed's external_websocket_sync crate (types.rs)

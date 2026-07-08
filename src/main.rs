@@ -38,7 +38,7 @@ struct Args {
     #[arg(long, default_value = "8080")]
     ws_port: u16,
 
-    /// LLM API key (default: DEEPSEEK_API_KEY or LLM_API_KEY env var)
+    /// LLM API key (default: LLM_API_KEY env var)
     #[arg(long)]
     api_key: Option<String>,
 
@@ -75,22 +75,26 @@ async fn main() -> anyhow::Result<()> {
     // Resolve API key
     let api_key = args
         .api_key
-        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
         .or_else(|| std::env::var("LLM_API_KEY").ok())
-        .ok_or_else(|| anyhow::anyhow!("API key required: set DEEPSEEK_API_KEY or --api-key"))?;
+        .ok_or_else(|| anyhow::anyhow!("API key required: set LLM_API_KEY or --api-key"))?;
 
     // Resolve binary path
     let bin_path = if let Some(p) = args.bin {
         p
     } else {
-        // Search common locations
+        let arch_suffix = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "amd64",
+            other => other,
+        };
+        let bin_name = format!("helix-zed-headless-{}", arch_suffix);
         let candidates = vec![
             dirs::home_dir()
-                .map(|h| h.join(".bin/helix-zed-headless-arm64"))
+                .map(|h| h.join(format!(".bin/{}", bin_name)))
                 .unwrap_or_default(),
-            PathBuf::from("../.bin/helix-zed-headless-arm64"),
-            PathBuf::from(".bin/helix-zed-headless-arm64"),
-            PathBuf::from("helix/.bin/helix-zed-headless-arm64"),
+            PathBuf::from(format!("../.bin/{}", bin_name)),
+            PathBuf::from(format!(".bin/{}", bin_name)),
+            PathBuf::from(format!("helix/.bin/{}", bin_name)),
         ];
         candidates
             .into_iter()

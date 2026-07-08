@@ -1,0 +1,58 @@
+name: Publish actus Docker Image
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "Dockerfile"
+      - "Cargo.*"
+      - "src/**"
+      - ".github/workflows/publish-actus-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: "actus-image"
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ssccsorg/actus
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          push: true
+          cache-from: type=gha,scope=shared-actus
+          cache-to: type=gha,mode=min,scope=shared-actus
+          provenance: false
+          sbom: false
+
+      - name: Prune old cache
+        run: |
+          gh extension install actions/gh-actions-cache 2>/dev/null || true
+          gh actions-cache delete ${{ env.IMAGE_NAME }} --confirm 2>/dev/null || true
+        continue-on-error: true
+        shell: bash

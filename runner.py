@@ -30,7 +30,13 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent  # actus/
 PROJECT_DIR = SCRIPT_DIR                        # actus/ = project root
 ACTUS_BIN = PROJECT_DIR / "target" / "debug" / "actus"
-ZED_BIN = SCRIPT_DIR / "helix" / ".bin" / "helix-zed-headless-arm64"
+import platform
+_arch = platform.machine().lower()
+if _arch in ("x86_64", "amd64"):
+    _arch = "amd64"
+elif _arch in ("aarch64", "arm64"):
+    _arch = "arm64"
+ZED_BIN = SCRIPT_DIR / "helix" / ".bin" / f"helix-zed-headless-{_arch}"
 TERMINAL = SCRIPT_DIR / "terminal.py"
 
 
@@ -110,9 +116,9 @@ def main():
                 os.environ.setdefault(k.strip(), v.strip())
 
     # Resolve API key
-    api_key = args.api_key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("LLM_API_KEY", "")
+    api_key = args.api_key or os.environ.get("LLM_API_KEY", "")
     if not api_key:
-        print(f"{C.YELLOW}Warning: No API key set. Set DEEPSEEK_API_KEY or LLM_API_KEY.{C.END}")
+        print(f"{C.YELLOW}Warning: No API key set. Set LLM_API_KEY.{C.END}")
 
     # Build Rust binary
     if not args.no_build:
@@ -124,13 +130,7 @@ def main():
             sys.exit(1)
 
     # Kill any stale server on our ports before starting
-    import http.client as _hc
-    for _port in [args.http_port, args.ws_port]:
-        subprocess.run(
-            ["lsof", "-ti", f":{_port}", "-sTCP:LISTEN"],
-            capture_output=True, text=True, timeout=5
-        )
-        subprocess.run(["pkill", "-f", ""], capture_output=True, timeout=5)
+    subprocess.run(["pkill", "-f", "actus"], capture_output=True, timeout=5)
     time.sleep(1)
 
     # Build and start Rust server
@@ -165,7 +165,7 @@ def main():
         # Wait for server health
         import http.client as _hc
         import json as _j
-        print(f"Waiting for server...", file=sys.stderr)
+        print("Waiting for server...", file=sys.stderr)
         for i in range(30):
             try:
                 conn = _hc.HTTPConnection("127.0.0.1", args.http_port, timeout=2)

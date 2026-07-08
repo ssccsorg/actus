@@ -183,7 +183,7 @@ async def select_thread_prompt(client: NexClient, threads: list[dict]) -> str | 
         print(f"  [{i}] {title:<43} {msg_count:>4} msgs  {created}")
 
     default = 1 if len(user_threads) == 1 else 0
-    print(f"  [0] New thread")
+    print("  [0] New thread")
 
     prompt = f"Select thread [{default}]: "
     result = await loop.run_in_executor(None, lambda: input(prompt))
@@ -416,6 +416,9 @@ async def read_stdin(client: NexClient):
                 else:
                     print(f"{C.RED}Invalid thread number: {num}. Available: 1-{len(user_threads)}.{C.END}")
                     continue
+            if target is None:
+                print(f"{C.RED}No thread ID specified.{C.END}")
+                continue
             t = await client.get_thread(target)
             if t is None:
                 print(f"{C.RED}Thread '{target}' not found.{C.END}")
@@ -553,7 +556,8 @@ def main():
 
         # Health check
         h = await client.health()
-        print_banner(h)
+        if h is not None:
+            print_banner(h)
 
         if h and h.get("status") == "ok":
             print(f"  {C.DIM}Server:{C.END} {base_url}")

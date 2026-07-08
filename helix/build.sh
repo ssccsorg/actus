@@ -14,7 +14,13 @@ HELIX_DIR="$SCRIPT_DIR"
 REPO_DIR="$HELIX_DIR/subtree"                    # cloned repo
 PATCHES_DIR="$HELIX_DIR/patch"                   # local patches
 BIN_DIR="$HELIX_DIR/.bin"
-BIN="$BIN_DIR/helix-zed-headless-arm64"
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64|amd64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+BIN="$BIN_DIR/helix-zed-headless-$ARCH"
 FORCE=false
 RELEASE=false
 BUILD_ONLY=false
