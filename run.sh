@@ -150,6 +150,23 @@ test_threads() {
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('threads',[])))" 2>/dev/null || echo "0")
     pass "Threads: $count"
+
+    # Thread detail (if any threads exist)
+    local first_id
+    first_id=$(echo "$r" | python3 -c "import sys,json; ts=json.load(sys.stdin).get('threads',[]); print(ts[0]['id'] if ts else '')" 2>/dev/null)
+    if [ -n "$first_id" ]; then
+        local detail
+        detail=$(curl -s "http://127.0.0.1:$HTTP_PORT/v1/threads/$first_id" 2>/dev/null)
+        local has_id
+        has_id=$(echo "$detail" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'id' in d else 1)" 2>/dev/null && echo "1" || echo "0")
+        if [ "$has_id" = "1" ]; then
+            pass "Thread detail: $first_id"
+        else
+            warn "Thread detail returned unexpected response"
+        fi
+    else
+        warn "No threads to test detail"
+    fi
 }
 
 test_git_status() {
@@ -175,6 +192,19 @@ test_git_log() {
         pass "Git log returned $count commits"
     else
         warn "Git log returned 0 commits (empty repo?)"
+    fi
+}
+
+test_git_diff() {
+    step "Test: Git diff"
+    local r
+    r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/git/diff 2>/dev/null)
+    local ok
+    ok=$(echo "$r" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'diff' in d or 'error' in d else 1)" 2>/dev/null && echo "1" || echo "0")
+    if [ "$ok" = "1" ]; then
+        pass "Git diff returned valid response"
+    else
+        warn "Git diff: unexpected response"
     fi
 }
 
@@ -288,6 +318,7 @@ run_tests() {
     test_threads
     test_git_status
     test_git_log
+    test_git_diff
     test_llm_chat
     cleanup
 
