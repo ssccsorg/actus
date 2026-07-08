@@ -3,7 +3,7 @@ name = "actus"
 version = "0.1.0"
 edition = "2021"
 license = "BUSL-1.1"
-description = "Headless Zed AI agent — REST API server"
+description = "Agent execution runtime across a shared knowledge space"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
