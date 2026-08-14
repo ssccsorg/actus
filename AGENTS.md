@@ -31,7 +31,6 @@
 ---
 title: text
 subtitle: text
-date: last-modified
 metadata-files:
   - path/to/_include/author.yml
 abstract: |
