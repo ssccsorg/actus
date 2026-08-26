@@ -37,7 +37,9 @@ impl AgentKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<AgentKind> {
+    /// Strict lookup of a kind by its wire name. Returns None for
+    /// unknown names.
+    pub fn parse(s: &str) -> Option<AgentKind> {
         AgentKind::ALL.iter().find(|k| k.as_str() == s).copied()
     }
 }

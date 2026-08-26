@@ -3,7 +3,7 @@
 use axum::response::sse::Event;
 use axum::{
     Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{Json, Sse},
     routing::{get, post},
@@ -13,50 +13,28 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, Notify, mpsc};
 
 use std::path::PathBuf;
 
+use crate::agent::{AgentBackend, AgentRegistry, AgentStatus};
 use crate::files;
 use crate::git;
-use crate::zed::ZedManager;
-
-/// Channel sender for WebSocket commands to Zed.
-/// Shared between AppState and ZedManager so cancel can send
-/// without acquiring the ZedManager RwLock (avoiding lock contention
-/// with long-running SSE handlers).
-pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
-
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-/// Prepare the user message, injecting conversation context if this thread
-/// hasn't been activated in the current Zed session yet.
-fn prepare_and_clear_acp(mgr: &mut ZedManager, thread_id: &str, user_message: &str) -> String {
-    if !mgr.threads_activated.contains(thread_id) {
-        // Clear stale acp_thread_id from previous sessions
-        if let Some(thread) = mgr.threads.get_mut(thread_id) {
-            thread.acp_thread_id = None;
-        }
-        mgr.thread_id_map.retain(|_, v| v != thread_id);
-        if let Some(ctx) = mgr.format_conversation_context(thread_id) {
-            return format!("{}\n\n{}", ctx, user_message);
-        }
-    }
-    user_message.to_string()
-}
+pub use crate::zed::WsCommandTx;
 
 // ── App State ──────────────────────────────────────────────────────────
 
 pub struct AppState {
-    pub zed_manager: Arc<RwLock<ZedManager>>,
+    /// Running agent backends. Handlers talk only to the default agent
+    /// through the `AgentBackend` trait until per-agent routing lands.
+    pub agents: AgentRegistry,
     pub ws_tx: WsCommandTx,
     pub workdir: PathBuf,
 }
 
 impl AppState {
-    pub fn new(zed_manager: Arc<RwLock<ZedManager>>, ws_tx: WsCommandTx, workdir: PathBuf) -> Self {
+    pub fn new(agents: AgentRegistry, ws_tx: WsCommandTx, workdir: PathBuf) -> Self {
         Self {
-            zed_manager,
+            agents,
             ws_tx,
             workdir,
         }
@@ -64,6 +42,14 @@ impl AppState {
 }
 
 type SharedState = Arc<AppState>;
+
+/// Default agent serving the chat and thread endpoints.
+async fn default_agent(state: &SharedState) -> Result<Arc<dyn AgentBackend>, StatusCode> {
+    state
+        .agents
+        .default_agent()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
 
 // ── Models ─────────────────────────────────────────────────────────────
 
@@ -73,6 +59,8 @@ pub struct HealthResponse {
     pub zed_connected: bool,
     pub agent_ready: bool,
     pub active_threads: usize,
+    /// Per-agent runtime state from the execution fabric.
+    pub agents: Vec<AgentStatus>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -126,12 +114,21 @@ pub struct ThreadDetailResponse {
 // ── Handlers ───────────────────────────────────────────────────────────
 
 async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
-    let mgr = state.zed_manager.read().await;
+    let agents = state.agents.statuses().await;
+    let (zed_connected, agent_ready, active_threads) = match state.agents.default_agent() {
+        Some(agent) => {
+            let status = agent.status().await;
+            let threads = agent.threads().await.len();
+            (status.connected, status.ready, threads)
+        }
+        None => (false, false, 0),
+    };
     Json(HealthResponse {
         status: "ok".to_string(),
-        zed_connected: mgr.zed_connected,
-        agent_ready: mgr.agent_ready,
-        active_threads: mgr.threads.len(),
+        zed_connected,
+        agent_ready,
+        active_threads,
+        agents,
     })
 }
 
@@ -140,50 +137,16 @@ async fn chat_async(
     State(state): State<SharedState>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, StatusCode> {
-    let mut mgr = state.zed_manager.write().await;
-
-    if !mgr.zed_connected || !mgr.agent_ready {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    let thread_id = mgr.get_or_create_thread(req.thread_id.as_deref());
-
-    // Set title from the raw user message before context injection
-    mgr.set_title(&thread_id, &req.message);
-
-    // Enrich with context (for sending to Zed), but store raw message in thread
-    let enriched = prepare_and_clear_acp(&mut mgr, &thread_id, &req.message);
-    mgr.add_message(&thread_id, "user", &req.message, None);
-
-    let request_id = uuid::Uuid::new_v4().to_string();
-
-    let acp_id = mgr.get_acp_thread_id(&thread_id);
-
-    let cmd = serde_json::json!({
-        "type": "chat_message",
-        "data": {
-            "message": enriched,
-            "request_id": request_id,
-            "acp_thread_id": acp_id,
-        }
-    });
-
-    mgr.pending_requests
-        .insert(request_id.clone(), thread_id.clone());
-    drop(mgr);
-
-    send_ws_command(&state.ws_tx, &cmd.to_string()).await?;
-
-    // Mark thread as activated
-    {
-        let mut mgr = state.zed_manager.write().await;
-        mgr.threads_activated.insert(thread_id.clone());
-    }
+    let agent = default_agent(&state).await?;
+    let receipt = agent
+        .submit(req.thread_id.as_deref(), &req.message)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
     Ok(Json(ChatResponse {
         task_id: uuid::Uuid::new_v4().to_string(),
         status: "approved".to_string(),
-        thread_id,
+        thread_id: receipt.thread_id,
     }))
 }
 
@@ -192,97 +155,32 @@ async fn chat_stream(
     State(state): State<SharedState>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    let thread_id;
-    let request_id;
-    let message: String;
-    let is_new;
+    let agent = default_agent(&state).await?;
 
-    // Acquire write lock, create thread, send command, then release.
-    {
-        let mut mgr = state.zed_manager.write().await;
-        if !mgr.zed_connected || !mgr.agent_ready {
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
+    // Submit through the fabric: thread creation, context injection,
+    // command send, and the resume wait happen inside the adapter.
+    let receipt = agent
+        .submit(req.thread_id.as_deref(), &req.message)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-        thread_id = mgr.get_or_create_thread(req.thread_id.as_deref());
+    let tid = receipt.thread_id.clone();
+    let is_new = receipt.is_new;
+    // Build SSE stream: poll with backoff, using the watch channel for
+    // notification. Each SSE stream captures the current turn_id and
+    // waits for thread.turn_completed > turn_id, so multiple SSE streams
+    // on the same thread don't interfere with each other.
+    let turn_id = agent
+        .thread(&tid)
+        .await
+        .map(|t| t.turn_completed)
+        .unwrap_or(0);
 
-        // Track whether this is a new thread (no prior messages)
-        is_new = mgr.threads.get(&thread_id).map_or(true, |t| t.messages.is_empty());
-
-        // Set title from the raw user message before context injection
-        mgr.set_title(&thread_id, &req.message);
-
-        // Enrich with context (for sending to Zed), but store raw message in thread
-        message = prepare_and_clear_acp(&mut mgr, &thread_id, &req.message);
-        mgr.add_message(&thread_id, "user", &req.message, None);
-
-        request_id = uuid::Uuid::new_v4().to_string();
-        mgr.pending_requests
-            .insert(request_id.clone(), thread_id.clone());
-    }
-
-    // Send the WS command FIRST (acp_thread_id may be null for new threads)
-    let acp_id = {
-        let mgr = state.zed_manager.read().await;
-        mgr.get_acp_thread_id(&thread_id)
-    };
-
-    let ws_command = serde_json::json!({
-        "type": "chat_message",
-        "data": {
-            "message": message,
-            "request_id": request_id,
-            "acp_thread_id": acp_id,
-        }
-    })
-    .to_string();
-
-    send_ws_command(&state.ws_tx, &ws_command).await?;
-
-    // Store in pending queue for potential reconnection retry
-    {
-        let mut mgr = state.zed_manager.write().await;
-        mgr.pending_chat_queue
-            .push((request_id.clone(), thread_id.clone(), ws_command));
-    }
-
-    // If this is a resumed thread waiting for acp_thread_id establishment,
-    // wait for the thread_created notification from the Zed WebSocket
-    let is_resume_wait = !is_new && acp_id.is_none() && {
-        let mgr = state.zed_manager.read().await;
-        mgr.threads_activated.contains(&thread_id)
-    };
-    if is_resume_wait {
-        let waiter = Arc::new(Notify::new());
-        {
-            let mut mgr = state.zed_manager.write().await;
-            mgr.thread_waiters.insert(thread_id.clone(), waiter.clone());
-        }
-        tokio::select! {
-            _ = waiter.notified() => {},
-            _ = tokio::time::sleep(Duration::from_secs(20)) => {},
-        }
-    }
-
-    // Mark thread as activated (after send + wait to avoid false wait triggers)
-    {
-        let mut mgr = state.zed_manager.write().await;
-        mgr.threads_activated.insert(thread_id.clone());
-    }
-
-    tracing::debug!("chat_stream: preparing SSE stream for thread {} (turn_id candidate)", thread_id);
-    // Build SSE stream: poll with backoff, using the watch channel for notification.
-    // Each SSE stream captures the current turn_id and waits for
-    // thread.turn_completed > turn_id, so multiple SSE streams on
-    // the same thread don't interfere with each other.
-    let state_clone = state.clone();
-    let tid = thread_id.clone();
-    let turn_id = {
-        let mgr = state_clone.zed_manager.read().await;
-        mgr.threads.get(&tid).map(|t| t.turn_completed).unwrap_or(0)
-    };
-
-    tracing::debug!("chat_stream: SSE stream created, returning to axum");
+    tracing::debug!(
+        "chat_stream: SSE stream created for thread {} (turn_id={}, new={})",
+        tid, turn_id, is_new
+    );
+    let agent_stream = agent.clone();
     let stream = async_stream::stream! {
         tracing::debug!("SSE stream starting for thread {} (turn_id={}, new={})", tid, turn_id, is_new);
         let event_name = if is_new { "thread_created" } else { "thread_resumed" };
@@ -294,18 +192,19 @@ async fn chat_stream(
 
         // When resuming, start last_content at the current assistant content
         // so we only emit new deltas, not old messages.
-        let mut last_content = {
-            let mgr_b = state_clone.zed_manager.read().await;
-            mgr_b.threads.get(&tid).and_then(|t| {
+        let mut last_content = agent_stream
+            .thread(&tid)
+            .await
+            .and_then(|t| {
                 t.messages
                     .iter()
                     .rev()
                     .find(|m| m.role == "assistant")
                     .map(|m| m.content.clone())
-            }).unwrap_or_default()
-        };
+            })
+            .unwrap_or_default();
         let mut done = false;
-        let mut rx = state_clone.zed_manager.read().await.thread_notify.subscribe();
+        let mut rx = agent_stream.subscribe().await;
 
         let mut poll_count = 0u64;
         let start = std::time::Instant::now();
@@ -324,8 +223,7 @@ async fn chat_stream(
                 tracing::debug!("SSE pool {}: iter #{}", tid, poll_count);
             }
 
-            let mgr = state_clone.zed_manager.read().await;
-            let thread = mgr.threads.get(&tid);
+            let thread = agent_stream.thread(&tid).await;
 
             if let Some(thread) = thread {
                 let msg_count = thread.messages.len();
@@ -388,7 +286,6 @@ async fn chat_stream(
                 }
             }
 
-            drop(mgr);
             poll_count += 1;
 
             // Timeout: if no response within max_wait, emit a timeout event
@@ -409,27 +306,29 @@ async fn chat_stream(
 }
 
 async fn list_threads(State(state): State<SharedState>) -> Json<ThreadListResponse> {
-    let mgr = state.zed_manager.read().await;
-    let mut threads: Vec<ThreadSummary> = mgr
-        .threads
-        .values()
-        .map(|t| ThreadSummary {
-            id: t.id.clone(),
-            title: t.title.clone(),
-            message_count: t.messages.len(),
-            created_at: t.created_at.to_rfc3339(),
-        })
-        .collect();
-    threads.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let mut threads: Vec<ThreadSummary> = Vec::new();
+    if let Ok(agent) = default_agent(&state).await {
+        let sessions = agent.threads().await;
+        threads = sessions
+            .iter()
+            .map(|t| ThreadSummary {
+                id: t.id.clone(),
+                title: t.title.clone(),
+                message_count: t.messages.len(),
+                created_at: t.created_at.to_rfc3339(),
+            })
+            .collect();
+        threads.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    }
     Json(ThreadListResponse { threads })
 }
 
 async fn get_thread(
     State(state): State<SharedState>,
-    axum::extract::Path(thread_id): axum::extract::Path<String>,
+    Path(thread_id): Path<String>,
 ) -> Result<Json<ThreadDetailResponse>, StatusCode> {
-    let mgr = state.zed_manager.read().await;
-    match mgr.threads.get(&thread_id) {
+    let agent = default_agent(&state).await?;
+    match agent.thread(&thread_id).await {
         Some(thread) => {
             let messages: Vec<serde_json::Value> = thread
                 .messages
@@ -494,8 +393,8 @@ async fn poll_thread(
     axum::extract::Path(thread_id): axum::extract::Path<String>,
     Query(query): Query<PollQuery>,
 ) -> Result<Json<PollResponse>, StatusCode> {
-    let mgr = state.zed_manager.read().await;
-    let thread = mgr.threads.get(&thread_id).ok_or(StatusCode::NOT_FOUND)?;
+    let agent = default_agent(&state).await?;
+    let thread = agent.thread(&thread_id).await.ok_or(StatusCode::NOT_FOUND)?;
 
     let since = query.since.unwrap_or(0);
     let known_turn = query.turn.unwrap_or(0);
@@ -597,31 +496,6 @@ async fn mention_files_handler(
         "mention": mention,
         "count": results.len(),
     }))
-}
-
-// ── WebSocket command sender ───────────────────────────────────────────
-
-async fn send_ws_command(
-    ws_tx: &WsCommandTx,
-    cmd: &str,
-) -> Result<(), StatusCode> {
-    let tx_guard = ws_tx.lock().await;
-    tracing::debug!("send_ws_command: tx_present={}", tx_guard.is_some());
-    match &*tx_guard {
-        Some(tx) => {
-            tracing::debug!("send_ws_command: sending {} bytes (type: {:?})", cmd.len(),
-                serde_json::from_str::<serde_json::Value>(cmd).ok()
-                    .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string())));
-            tx.send(cmd.to_string()).map_err(|e| {
-                tracing::error!("Failed to send WS command: {}", e);
-                StatusCode::SERVICE_UNAVAILABLE
-            })
-        },
-        None => {
-            tracing::error!("Cannot send WS command: not connected");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
 }
 
 // ── Git endpoints ──────────────────────────────────────────────────────

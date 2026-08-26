@@ -43,6 +43,27 @@ agent with file-system and git awareness. The architecture is designed to
 accept any agent that communicates via WebSocket, making actus a universal
 gateway for agent execution.
 
+## Agent Execution Fabric
+
+Like neXus weaves heterogeneous FIH storage types behind one thin knowledge
+fabric, actus weaves heterogeneous agent platforms behind one thin execution
+fabric. Any platform can be orchestrated through the same actus surface;
+Zed headless is the default agent.
+
+- `agent::AgentKind` — platform kinds (`zed`, `langgraph`, `native`),
+  extensible by adding a kind and an adapter.
+- `agent::AgentBackend` — uniform async trait (`status`, `submit`, `cancel`,
+  `thread`, `threads`, `subscribe`) implemented by every platform adapter.
+- `agent::AgentRegistry` — name to running adapter map with a default agent.
+- `zed::backend::ZedBackend` — first adapter, wrapping `ZedManager`.
+  ACP-over-WebSocket details (reconnect, event dispatch) stay inside
+  `zed::control`; the adapter owns thread state and command submission.
+
+HTTP handlers talk only to the `AgentBackend` trait, so a new platform
+(LangGraph Server over REST/SSE, an in-process Rust agent) plugs in by
+implementing the trait and registering it. `/v1/health` reports per-agent
+status in the `agents` map.
+
 ## Agent Types
 
 | Agent | Role | Protocol |
@@ -108,11 +129,13 @@ docker build --target full .
 actus/
 ├── src/
 │   ├── main.rs          Server entry point
+│   ├── agent/           Execution fabric: AgentKind, AgentBackend, AgentRegistry
 │   ├── server.rs        REST API routes and handlers
 │   ├── files.rs         File search and mention
 │   ├── git.rs           Git operations
 │   └── zed/
 │       ├── mod.rs       Zed lifecycle and session management
+│       ├── backend.rs   ZedBackend adapter (AgentBackend impl)
 │       ├── control.rs   WebSocket bridge and event dispatch
 │       └── types.rs     Protocol type definitions
 ├── helix/

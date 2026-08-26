@@ -6,18 +6,17 @@
 // Usage:
 //    --workdir /path/to/project
 
-mod files;
-mod git;
-mod server;
-mod zed;
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use crate::server::{AppState, WsCommandTx};
-use crate::zed::ZedManager;
+use actus::agent::AgentRegistry;
+use actus::server::run_http_server;
+use actus::server::{AppState, WsCommandTx};
+use actus::zed::backend::ZedBackend;
+use actus::zed::control::run_ws_server;
+use actus::zed::{ensure_zed_settings, launch_zed, ZedManager};
 
 #[derive(clap::Parser, Debug, Clone)]
 #[command(name = "", version, about = "Headless Zed AI agent server")]
@@ -113,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Bootstrap Zed user data dir with LLM settings
     let user_data_dir = tempfile::tempdir()?;
-    zed::ensure_zed_settings(
+    ensure_zed_settings(
         user_data_dir.path(),
         &api_key,
         &provider,
@@ -159,14 +158,14 @@ async fn main() -> anyhow::Result<()> {
     let ws_host_clone = ws_host.clone();
     let ws_tx_clone = ws_tx.clone();
     let ws_server = tokio::spawn(async move {
-        zed::control::run_ws_server(&ws_host_clone, ws_zed_manager, ws_tx_clone).await
+        run_ws_server(&ws_host_clone, ws_zed_manager, ws_tx_clone).await
     });
 
     // Wait for WebSocket server to be ready
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Launch Zed headless and keep the child handle for graceful shutdown
-    let mut zed_child = zed::launch_zed(
+    let mut zed_child = launch_zed(
         &bin_path,
         &workdir,
         user_data_dir.path(),
@@ -176,13 +175,22 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     tracing::info!("Zed PID: {:?}", zed_child.id());
 
+    // Build the execution fabric: one Zed backend as the default agent.
+    // Future platform adapters register here the same way.
+    let backend = Arc::new(ZedBackend {
+        manager: zed_manager.clone(),
+        ws_tx: ws_tx.clone(),
+    });
+    let mut registry = AgentRegistry::new();
+    registry.register(backend, true);
+
     // Build app state and start HTTP server
-    let state = Arc::new(AppState::new(zed_manager.clone(), ws_tx.clone(), workdir.clone()));
+    let state = Arc::new(AppState::new(registry, ws_tx.clone(), workdir.clone()));
 
     let http_server = tokio::spawn({
         let state = state.clone();
         let addr = format!("127.0.0.1:{}", args.http_port);
-        async move { server::run_http_server(&addr, state).await }
+        async move { run_http_server(&addr, state).await }
     });
 
     // Resolve CLI path (terminal.py) — skip if --server-only

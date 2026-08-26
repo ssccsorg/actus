@@ -1,7 +1,16 @@
 // Zed headless management — process lifecycle, WebSocket bridge, and protocol types.
 
+pub mod backend;
 pub mod control;
 pub mod types;
+
+pub use crate::agent::{ThreadMessage, ThreadSession};
+
+/// Channel sender for WebSocket commands to Zed. Shared between
+/// `AppState` and `ZedManager` so cancel can send without acquiring the
+/// `ZedManager` RwLock (avoiding lock contention with long-running SSE
+/// handlers).
+pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
 
 // Zed manager — WebSocket connection, session management, and settings bootstrap
 
@@ -10,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
+use serde_json;
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch, Notify};
 use uuid::Uuid;
@@ -52,34 +61,6 @@ pub struct ZedManager {
     pub pending_chat_queue: Vec<(String, String, String)>,
 }
 
-/// A single conversation thread.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ThreadSession {
-    pub id: String,
-    /// Auto-generated from first user message (first 80 chars, "..." appended if truncated)
-    pub title: Option<String>,
-    pub messages: Vec<ThreadMessage>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    /// True when the last assistant response is complete (message_completed received)
-    pub completed: bool,
-    /// Zed-side ACP thread ID for continuing conversations across restarts
-    pub acp_thread_id: Option<String>,
-    /// Monotonically increasing turn counter. Each SSE stream waits for its
-    /// turn to complete by watching thread.turn_completed >= its captured turn_id.
-    pub turn_completed: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ThreadMessage {
-    pub role: String,
-    pub content: String,
-    pub message_id: Option<String>,
-    pub entry_type: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_status: Option<String>,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-}
-
 impl ZedManager {
     pub fn new(session_id: String, ws_host: String, threads_dir: &Path) -> Self {
         let threads_file = threads_dir.join("threads.json");
@@ -113,6 +94,22 @@ impl ZedManager {
             last_sse_event_time: Instant::now(),
             pending_chat_queue: Vec::new(),
         }
+    }
+
+    /// Prepare the user message, injecting conversation context if this
+    /// thread has not been activated in the current Zed session yet.
+    pub fn prepare_message(&mut self, thread_id: &str, user_message: &str) -> String {
+        if !self.threads_activated.contains(thread_id) {
+            // Clear stale acp_thread_id from previous sessions
+            if let Some(thread) = self.threads.get_mut(thread_id) {
+                thread.acp_thread_id = None;
+            }
+            self.thread_id_map.retain(|_, v| v != thread_id);
+            if let Some(ctx) = self.format_conversation_context(thread_id) {
+                return format!("{}\n\n{}", ctx, user_message);
+            }
+        }
+        user_message.to_string()
     }
 
     pub fn set_ws_tx(&mut self, tx: mpsc::UnboundedSender<String>) {
