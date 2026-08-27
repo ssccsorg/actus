@@ -120,7 +120,8 @@ mirroring Zed's mention picker:
 
 | Form | Source | Example |
 |---|---|---|
-| `@path/to/file` | file search, paths injected | `@src/server.rs` |
+| `@path/to/file` | file paths auto-injected (top matches) | `@src/server.rs` |
+| `@?query` | interactive picker across files, symbols, threads | `@?server` |
 | `@rules` | project rule files (AGENTS.md, *.mdc) | `@rules` |
 | `@symbol:query` | definition-pattern symbol search | `@symbol:search_symbols` |
 | `@thread:query` | conversation thread content | `@thread:thread-title` |
@@ -128,8 +129,8 @@ mirroring Zed's mention picker:
 
 Server endpoints: `/v1/symbols?q=`, `/v1/rules`, `/v1/fetch?url=`.
 Diagnostics mention is deferred (requires a language server).
-When a mention matches several candidates, the CLI opens a numbered
-picker (files and symbols grouped, `a` for all, `0` to skip).
+Plain `@` mentions stay non-interactive so chat flows smoothly; the
+picker opens only for explicit `@?query`.
 
 ## Agent Types
 

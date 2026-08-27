@@ -261,13 +261,32 @@ async def select_thread_prompt(client: NexClient, threads: list[dict]) -> str | 
     return None
 
 
+# ── Shared stdin prompt ────────────────────────────────────────────────
+# Interactive prompts (mention picker, tool approval) must not compete
+# with read_stdin's StreamReader for the same stdin. They register a queue
+# here; read_stdin routes the next line to the active prompt.
+_prompt_q: "asyncio.Queue[str] | None" = None
+
+
+async def _ask(prompt: str) -> str:
+    global _prompt_q
+    print(prompt, end="", flush=True)
+    q: asyncio.Queue[str] = asyncio.Queue()
+    _prompt_q = q
+    try:
+        return await q.get()
+    finally:
+        _prompt_q = None
+
+
 # ── Send message (SSE streaming) ─────────────────────────────────────────
 
 async def resolve_mentions(client: NexClient, message: str) -> str:
     """Resolve @mentions to context before sending.
 
     Supported forms:
-      @path/to/file    file path mention (searched, paths injected)
+      @path/to/file    file paths auto-injected (top matches)
+      @?query          interactive picker across files/symbols/threads
       @rules           project rule files (AGENTS.md, *.mdc)
       @symbol:query    definition-pattern symbol search
       @thread:query    conversation thread content
@@ -275,7 +294,7 @@ async def resolve_mentions(client: NexClient, message: str) -> str:
     """
     import re
 
-    pattern = re.compile(r"@([\w./_-]+(?::[^\s]+)?)")
+    pattern = re.compile(r"@(\??[\w./_-]+(?::[^\s]+)?)")
     matches = list(pattern.finditer(message))
     if not matches:
         return message
@@ -302,7 +321,7 @@ async def _mention_picker(client: NexClient, token: str, candidates: list) -> li
     for i, (kind, label, _) in enumerate(candidates, 1):
         print(f"  [{i}] {icons.get(kind, '•')} {label}")
     print(f"  [a] all  [0] skip")
-    answer = (await asyncio.to_thread(input, "Select [0]: ")).strip()
+    answer = (await _ask("Select [0]: ")).strip()
     if answer.lower() == "a":
         return candidates
     try:
@@ -324,6 +343,36 @@ async def _thread_payload(client: NexClient, t: dict) -> str:
 
 
 async def _resolve_mention(client: NexClient, token: str) -> str:
+    # Explicit picker: @?query opens the interactive menu across files,
+    # symbols, and threads.
+    if token.startswith("?"):
+        q = token[1:]
+        files = await client.search_files(q)
+        syms = await client.search_symbols(q)
+        threads = await client.list_threads()
+        candidates = [
+            ("file", f"{f.get('relative_path', f.get('path', '?'))}", f)
+            for f in (files or [])[:6]
+        ]
+        candidates += [
+            (
+                "symbol",
+                f"{s.get('file', '?')}:{s.get('line', '?')} {s.get('snippet', '').strip()[:44]}",
+                s,
+            )
+            for s in (syms or [])[:6]
+        ]
+        if threads:
+            candidates += [
+                ("thread", f"{t.get('title') or t['id']}", t) for t in threads[:6]
+            ]
+        if not candidates:
+            return f"@{token}"
+        chosen = await _mention_picker(client, token, candidates)
+        if not chosen:
+            return f"@{token}"
+        return "\n\n".join(await _mention_payloads(client, chosen))
+
     # Deterministic sources: rules and fetch inject directly.
     if token == "rules":
         rules = await client.get_rules()
@@ -341,20 +390,9 @@ async def _resolve_mention(client: NexClient, token: str) -> str:
             return f"@{token}"
         return f"[Fetched: {url}]\n{content[:3000]}"
 
-    # Candidate-based sources: files, symbols, threads. Unique matches
-    # inject directly; ambiguous matches open the interactive picker.
-    if token.startswith("thread:"):
-        q = token[len("thread:"):].strip().lower()
-        threads = await client.list_threads()
-        if not threads:
-            return f"@{token}"
-        hits = [t for t in threads if q in (t.get("title") or "").lower()]
-        if not hits:
-            return f"@{token}"
-        candidates = [
-            ("thread", f"{t.get('title') or t['id']}", t) for t in hits
-        ]
-    elif token.startswith("symbol:"):
+    # Explicit symbol search: unique match auto-injects, ambiguous opens
+    # the picker.
+    if token.startswith("symbol:"):
         q = token[len("symbol:"):]
         syms = await client.search_symbols(q)
         if not syms:
@@ -367,30 +405,35 @@ async def _resolve_mention(client: NexClient, token: str) -> str:
             )
             for s in syms
         ]
-    else:
-        files = await client.search_files(token)
-        syms = await client.search_symbols(token)
-        if not files and not syms:
+        chosen = candidates if len(candidates) == 1 else await _mention_picker(client, token, candidates)
+        if not chosen:
             return f"@{token}"
-        candidates = [
-            ("file", f"{f.get('relative_path', f.get('path', '?'))}", f)
-            for f in (files or [])[:6]
-        ]
-        candidates += [
-            (
-                "symbol",
-                f"{s.get('file', '?')}:{s.get('line', '?')} {s.get('snippet', '').strip()[:44]}",
-                s,
-            )
-            for s in (syms or [])[:6]
-        ]
+        return "\n\n".join(await _mention_payloads(client, chosen))
 
-    if not candidates:
-        return f"@{token}"
-    chosen = candidates if len(candidates) == 1 else await _mention_picker(client, token, candidates)
-    if not chosen:
-        return f"@{token}"
+    # Explicit thread search.
+    if token.startswith("thread:"):
+        q = token[len("thread:"):].strip().lower()
+        threads = await client.list_threads()
+        if not threads:
+            return f"@{token}"
+        hits = [t for t in threads if q in (t.get("title") or "").lower()]
+        if not hits:
+            return f"@{token}"
+        candidates = [("thread", f"{t.get('title') or t['id']}", t) for t in hits]
+        chosen = candidates if len(candidates) == 1 else await _mention_picker(client, token, candidates)
+        if not chosen:
+            return f"@{token}"
+        return "\n\n".join(await _mention_payloads(client, chosen))
 
+    # Default: file paths only, auto-injected without prompting so chat
+    # stays smooth. Use @?query for an interactive picker.
+    files = await client.search_files(token)
+    if not files:
+        return f"@{token}"
+    return " ".join(f.get("path", "") for f in files[:3])
+
+
+async def _mention_payloads(client: NexClient, chosen: list) -> list[str]:
     parts = []
     for kind, label, payload in chosen:
         if kind == "file":
@@ -401,7 +444,7 @@ async def _resolve_mention(client: NexClient, token: str) -> str:
             )
         elif kind == "thread":
             parts.append(await _thread_payload(client, payload))
-    return "\n\n".join(parts)
+    return parts
 
 
 async def send_chat(client: NexClient, message: str):
@@ -528,8 +571,8 @@ async def send_chat(client: NexClient, message: str):
                     seen_approvals.add(tid)
                     name = p.get("tool_name", "?")
                     print(f"\n{C.YELLOW}🔧 [TOOL] {name}{C.END}", flush=True)
-                    answer = await asyncio.to_thread(input, "  allow? [y/N] ")
-                    allow = answer.strip().lower() in ("y", "yes")
+                    answer = (await _ask("  allow? [y/N] ")).strip()
+                    allow = answer.lower() in ("y", "yes")
                     await client.resolve_tool_call(
                         p.get("platform_thread_id", ""), tid, allow
                     )
@@ -569,6 +612,12 @@ async def read_stdin(client: NexClient):
 
         text = line.decode().strip()
         if not text:
+            continue
+
+        # Route input to an active interactive prompt (mention picker,
+        # tool approval) so it does not race with the command loop.
+        if _prompt_q is not None:
+            await _prompt_q.put(text)
             continue
 
         if text in ("/exit", "/quit"):
