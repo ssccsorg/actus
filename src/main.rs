@@ -331,18 +331,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── WebSocket health monitor ─────────────────────────────────────
-    // Periodically checks if events are still arriving from each Zed via
-    // its WebSocket. Reconnection is forced only when a turn is actively
-    // in flight (`pending_chat_queue` non-empty) and no events arrive for
-    // the timeout: an idle agent sends no events by design, so a quiet
-    // connection is healthy as long as no turn is running.
+    // Detects a half-open WebSocket where the read loop would otherwise
+    // block forever. Reconnection is forced only when a turn is actively
+    // in flight and no events arrive for a long window: LLM responses
+    // routinely pause for tens of seconds (thinking, slow providers), so
+    // the timeout must be generous or the monitor kills live turns.
     {
         let monitors = monitors.clone();
 
         tokio::spawn(async move {
-            tracing::info!("Health monitor started (check every 10s, timeout 15s)");
-            let check_interval = Duration::from_secs(10);
-            let timeout = Duration::from_secs(15);
+            tracing::info!("Health monitor started (check every 30s, timeout 120s)");
+            let check_interval = Duration::from_secs(30);
+            let timeout = Duration::from_secs(120);
 
             loop {
                 tokio::time::sleep(check_interval).await;

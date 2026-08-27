@@ -261,11 +261,12 @@ async def select_thread_prompt(client: NexClient, threads: list[dict]) -> str | 
     return None
 
 
-# ── Shared stdin prompt ────────────────────────────────────────────────
-# Interactive prompts (mention picker, tool approval) must not compete
-# with read_stdin's StreamReader for the same stdin. They register a queue
-# here; read_stdin routes the next line to the active prompt.
+# ── Interactive prompt ────────────────────────────────────────────────
+# Prompts (mention picker, tool approval) fire inside send_chat. read_stdin
+# never awaits send_chat inline, so it stays free to read stdin and route
+# the next line into the active prompt's queue.
 _prompt_q: "asyncio.Queue[str] | None" = None
+_chat_queue: "asyncio.Queue[str] | None" = None
 
 
 async def _ask(prompt: str) -> str:
@@ -277,6 +278,18 @@ async def _ask(prompt: str) -> str:
         return await q.get()
     finally:
         _prompt_q = None
+
+
+async def _chat_worker(client: NexClient):
+    """Send queued chat messages sequentially, keeping the stdin loop
+    free so interactive prompts can receive input. A failure in one chat
+    must not kill the worker, or every later message is silently lost."""
+    while True:
+        message = await _chat_queue.get()
+        try:
+            await send_chat(client, message)
+        except Exception as e:  # noqa: BLE001 - keep the worker alive
+            print(f"{C.RED}Chat error: {e}{C.END}", file=sys.stderr)
 
 
 # ── Send message (SSE streaming) ─────────────────────────────────────────
@@ -587,7 +600,7 @@ async def send_chat(client: NexClient, message: str):
 
 async def read_stdin(client: NexClient):
     """Read user input from stdin and handle commands."""
-    global _shutdown, current_thread_id, show_raw
+    global _shutdown, current_thread_id, show_raw, _chat_queue
 
     if not sys.stdin.isatty() or not sys.__stdin__ or not sys.__stdin__.isatty():
         return
@@ -615,7 +628,7 @@ async def read_stdin(client: NexClient):
             continue
 
         # Route input to an active interactive prompt (mention picker,
-        # tool approval) so it does not race with the command loop.
+        # tool approval) so it cannot deadlock while a chat is running.
         if _prompt_q is not None:
             await _prompt_q.put(text)
             continue
@@ -769,7 +782,9 @@ async def read_stdin(client: NexClient):
             print(f"{C.YELLOW}Unknown command: {text}{C.END}")
 
         else:
-            await send_chat(client, text)
+            # Enqueue the message; a dedicated worker sends chats
+            # sequentially so the stdin loop stays free for prompts.
+            await _chat_queue.put(text)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
@@ -797,7 +812,7 @@ def main():
                 os.environ.setdefault(key.strip(), val.strip())
 
     async def async_main():
-        global current_thread_id
+        global current_thread_id, _chat_queue
         client = NexClient(base_url)
 
         # Health check
@@ -840,6 +855,8 @@ def main():
                                     print(f"{C.GREEN}Agent:{C.END} {content}")
                         print()
 
+            _chat_queue = asyncio.Queue()
+            asyncio.create_task(_chat_worker(client))
             asyncio.create_task(read_stdin(client))
 
             # Wait until shutdown
