@@ -294,43 +294,44 @@ async def resolve_mentions(client: NexClient, message: str) -> str:
     return result
 
 
+async def _mention_picker(client: NexClient, token: str, candidates: list) -> list | None:
+    """Show a numbered menu of mention candidates; return the chosen ones
+    (or all for 'a', or None to skip)."""
+    icons = {"file": "📄", "symbol": "⚙", "thread": "💬"}
+    print(f"\n{C.BOLD}Mentions for `{token}`:{C.END}")
+    for i, (kind, label, _) in enumerate(candidates, 1):
+        print(f"  [{i}] {icons.get(kind, '•')} {label}")
+    print(f"  [a] all  [0] skip")
+    answer = (await asyncio.to_thread(input, "Select [0]: ")).strip()
+    if answer.lower() == "a":
+        return candidates
+    try:
+        n = int(answer)
+    except ValueError:
+        return None
+    if 1 <= n <= len(candidates):
+        return [candidates[n - 1]]
+    return None
+
+
+async def _thread_payload(client: NexClient, t: dict) -> str:
+    detail = await client.get_thread(t["id"])
+    msgs = (detail or {}).get("messages", [])
+    body = "\n".join(
+        f"{m.get('role', '?')}: {m.get('content', '')[:400]}" for m in msgs[-6:]
+    )
+    return f"[Thread: {t.get('title') or t['id']}]\n{body}"
+
+
 async def _resolve_mention(client: NexClient, token: str) -> str:
+    # Deterministic sources: rules and fetch inject directly.
     if token == "rules":
         rules = await client.get_rules()
         if not rules:
             return "@rules"
-        parts = []
-        for r in rules[:3]:
-            parts.append(f"[Rules: {r.get('path', '?')}]\n{r.get('content', '')}")
-        return "\n\n".join(parts)
-
-    if token.startswith("symbol:"):
-        q = token[len("symbol:"):]
-        syms = await client.search_symbols(q)
-        if not syms:
-            return f"@{token}"
-        lines = [
-            f"{s.get('file', '?')}:{s.get('line', '?')} {s.get('snippet', '').strip()}"
-            for s in syms[:8]
-        ]
-        return "Symbols matching `{}`:\n{}".format(q, "\n".join(lines))
-
-    if token.startswith("thread:"):
-        q = token[len("thread:"):].strip().lower()
-        threads = await client.list_threads()
-        if not threads:
-            return f"@{token}"
-        hit = next(
-            (t for t in threads if q in (t.get("title") or "").lower()), None
+        return "\n\n".join(
+            f"[Rules: {r.get('path', '?')}]\n{r.get('content', '')}" for r in rules[:3]
         )
-        if not hit:
-            return f"@{token}"
-        detail = await client.get_thread(hit["id"])
-        msgs = (detail or {}).get("messages", [])
-        body = "\n".join(
-            f"{m.get('role', '?')}: {m.get('content', '')[:400]}" for m in msgs[-6:]
-        )
-        return f"[Thread: {hit.get('title') or hit['id']}]\n{body}"
 
     if token.startswith("fetch:"):
         url = token[len("fetch:"):]
@@ -340,12 +341,67 @@ async def _resolve_mention(client: NexClient, token: str) -> str:
             return f"@{token}"
         return f"[Fetched: {url}]\n{content[:3000]}"
 
-    # Default: file path mention
-    results = await client.search_files(token)
-    if results:
-        paths = [r.get("path", "") for r in results[:3]]
-        return " ".join(paths)
-    return f"@{token}"
+    # Candidate-based sources: files, symbols, threads. Unique matches
+    # inject directly; ambiguous matches open the interactive picker.
+    if token.startswith("thread:"):
+        q = token[len("thread:"):].strip().lower()
+        threads = await client.list_threads()
+        if not threads:
+            return f"@{token}"
+        hits = [t for t in threads if q in (t.get("title") or "").lower()]
+        if not hits:
+            return f"@{token}"
+        candidates = [
+            ("thread", f"{t.get('title') or t['id']}", t) for t in hits
+        ]
+    elif token.startswith("symbol:"):
+        q = token[len("symbol:"):]
+        syms = await client.search_symbols(q)
+        if not syms:
+            return f"@{token}"
+        candidates = [
+            (
+                "symbol",
+                f"{s.get('file', '?')}:{s.get('line', '?')} {s.get('snippet', '').strip()[:44]}",
+                s,
+            )
+            for s in syms
+        ]
+    else:
+        files = await client.search_files(token)
+        syms = await client.search_symbols(token)
+        if not files and not syms:
+            return f"@{token}"
+        candidates = [
+            ("file", f"{f.get('relative_path', f.get('path', '?'))}", f)
+            for f in (files or [])[:6]
+        ]
+        candidates += [
+            (
+                "symbol",
+                f"{s.get('file', '?')}:{s.get('line', '?')} {s.get('snippet', '').strip()[:44]}",
+                s,
+            )
+            for s in (syms or [])[:6]
+        ]
+
+    if not candidates:
+        return f"@{token}"
+    chosen = candidates if len(candidates) == 1 else await _mention_picker(client, token, candidates)
+    if not chosen:
+        return f"@{token}"
+
+    parts = []
+    for kind, label, payload in chosen:
+        if kind == "file":
+            parts.append(payload.get("path", label))
+        elif kind == "symbol":
+            parts.append(
+                f"{payload.get('file', '?')}:{payload.get('line', '?')} {payload.get('snippet', '').strip()}"
+            )
+        elif kind == "thread":
+            parts.append(await _thread_payload(client, payload))
+    return "\n\n".join(parts)
 
 
 async def send_chat(client: NexClient, message: str):

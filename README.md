@@ -128,6 +128,8 @@ mirroring Zed's mention picker:
 
 Server endpoints: `/v1/symbols?q=`, `/v1/rules`, `/v1/fetch?url=`.
 Diagnostics mention is deferred (requires a language server).
+When a mention matches several candidates, the CLI opens a numbered
+picker (files and symbols grouped, `a` for all, `0` to skip).
 
 ## Agent Types
 
