@@ -168,6 +168,30 @@ class NexClient:
         except Exception:
             return None
 
+    async def pending_tool_calls(self) -> list[dict]:
+        try:
+            r = await self.client.get("/v1/agents/tool-calls/pending")
+            r.raise_for_status()
+            data = r.json()
+            return (data or {}).get("pending", []) if isinstance(data, dict) else []
+        except Exception:
+            return []
+
+    async def resolve_tool_call(self, platform_thread_id: str, tool_call_id: str, allow: bool) -> dict | None:
+        try:
+            r = await self.client.post(
+                "/v1/agents/tool-calls/resolve",
+                json={
+                    "platform_thread_id": platform_thread_id,
+                    "tool_call_id": tool_call_id,
+                    "allow": allow,
+                },
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            return None
+
 
 # ── Message display ──────────────────────────────────────────────────────
 
@@ -390,6 +414,8 @@ async def send_chat(client: NexClient, message: str):
     poll_interval = 0.3
     max_wait = 120.0  # 2 minutes max
     waited = 0.0
+    seen_approvals = set()
+    last_approval_check = 0.0
 
     async with aiohttp.ClientSession() as session:
         while waited < max_wait:
@@ -434,6 +460,23 @@ async def send_chat(client: NexClient, message: str):
 
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
+
+            # Prompt for pending tool-call authorizations (ask mode).
+            if waited - last_approval_check >= 1.0:
+                last_approval_check = waited
+                pending = await client.pending_tool_calls()
+                for p in pending:
+                    tid = p.get("tool_call_id", "")
+                    if not tid or tid in seen_approvals:
+                        continue
+                    seen_approvals.add(tid)
+                    name = p.get("tool_name", "?")
+                    print(f"\n{C.YELLOW}🔧 [TOOL] {name}{C.END}", flush=True)
+                    answer = await asyncio.to_thread(input, "  allow? [y/N] ")
+                    allow = answer.strip().lower() in ("y", "yes")
+                    await client.resolve_tool_call(
+                        p.get("platform_thread_id", ""), tid, allow
+                    )
 
             await asyncio.sleep(poll_interval)
             waited += poll_interval

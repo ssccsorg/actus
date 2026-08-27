@@ -4,7 +4,7 @@ pub mod backend;
 pub mod control;
 pub mod types;
 
-pub use crate::agent::{ThreadMessage, ThreadSession};
+use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
 
 /// Channel sender for WebSocket commands to Zed. Shared between
 /// `AppState` and `ZedManager` so cancel can send without acquiring the
@@ -59,6 +59,9 @@ pub struct ZedManager {
     /// Pending chat messages that need to be re-sent after reconnection.
     /// Stores (request_id, thread_id, message) tuples.
     pub pending_chat_queue: Vec<(String, String, String)>,
+    /// Tool-call authorizations awaiting a human decision, keyed by
+    /// tool_call_id (ask mode).
+    pub pending_authorizations: HashMap<String, PendingAuthorization>,
 }
 
 impl ZedManager {
@@ -93,6 +96,7 @@ impl ZedManager {
             last_ping_time: Instant::now(),
             last_sse_event_time: Instant::now(),
             pending_chat_queue: Vec::new(),
+            pending_authorizations: HashMap::new(),
         }
     }
 

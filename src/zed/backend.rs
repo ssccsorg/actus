@@ -11,7 +11,9 @@ use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 use tokio::sync::watch;
 
-use crate::agent::{AgentBackend, AgentKind, AgentStatus, SubmitReceipt, ThreadSession};
+use crate::agent::{
+    AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadSession,
+};
 use crate::zed::{WsCommandTx, ZedManager};
 
 /// One headless Zed agent instance behind the fabric interface.
@@ -159,5 +161,42 @@ impl AgentBackend for ZedBackend {
 
     async fn subscribe(&self) -> watch::Receiver<u64> {
         self.manager.read().await.thread_notify.subscribe()
+    }
+
+    async fn pending_tool_calls(&self) -> Vec<PendingAuthorization> {
+        self.manager
+            .read()
+            .await
+            .pending_authorizations
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    async fn resolve_tool_call(
+        &self,
+        platform_thread_id: &str,
+        tool_call_id: &str,
+        allow: bool,
+    ) -> Result<(), String> {
+        // Clear the pending entry first so a repeated resolve is a no-op.
+        {
+            let mut mgr = self.manager.write().await;
+            mgr.pending_authorizations.remove(tool_call_id);
+        }
+        let cmd = serde_json::json!({
+            "type": "resolve_tool_call_authorization",
+            "data": {
+                "acp_thread_id": platform_thread_id,
+                "tool_call_id": tool_call_id,
+                "allow": allow,
+            }
+        })
+        .to_string();
+        let guard = self.ws_tx.lock().await;
+        match &*guard {
+            Some(tx) => tx.send(cmd).map_err(|e| e.to_string()),
+            None => Err("WebSocket not connected".to_string()),
+        }
     }
 }

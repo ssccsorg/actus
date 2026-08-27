@@ -82,6 +82,13 @@ pub enum SyncEvent {
         request_id: String,
         status: String,
     },
+    /// Sent when the agent requests permission for a tool call (ask mode).
+    #[serde(rename = "tool_call_authorization_requested")]
+    ToolCallAuthorizationRequested {
+        acp_thread_id: String,
+        tool_call_id: String,
+        tool_name: String,
+    },
 }
 
 impl SyncEvent {
@@ -125,6 +132,18 @@ impl SyncEvent {
             SyncEvent::TurnCancelled { request_id, status } => (
                 "turn_cancelled".to_string(),
                 serde_json::json!({ "request_id": request_id, "status": status }),
+            ),
+            SyncEvent::ToolCallAuthorizationRequested {
+                acp_thread_id,
+                tool_call_id,
+                tool_name,
+            } => (
+                "tool_call_authorization_requested".to_string(),
+                serde_json::json!({
+                    "acp_thread_id": acp_thread_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                }),
             ),
         };
         OutgoingMessage { event_type, data }

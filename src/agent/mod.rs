@@ -55,6 +55,16 @@ pub struct AgentStatus {
     pub ready: bool,
 }
 
+/// A tool-call authorization awaiting a human decision (ask mode).
+#[derive(Clone, Debug, Serialize)]
+pub struct PendingAuthorization {
+    /// Platform-side thread id the tool call belongs to.
+    pub platform_thread_id: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Receipt returned by `AgentBackend::submit`.
 #[derive(Clone, Debug)]
 pub struct SubmitReceipt {
@@ -126,6 +136,17 @@ pub trait AgentBackend: Send + Sync {
     /// Watch channel that fires on every thread state change. Polling
     /// source for SSE consumers.
     async fn subscribe(&self) -> watch::Receiver<u64>;
+
+    /// Tool-call authorizations currently awaiting a human decision.
+    async fn pending_tool_calls(&self) -> Vec<PendingAuthorization>;
+
+    /// Resolve a pending tool-call authorization (approve or reject).
+    async fn resolve_tool_call(
+        &self,
+        platform_thread_id: &str,
+        tool_call_id: &str,
+        allow: bool,
+    ) -> Result<(), String>;
 }
 
 /// Registry of running agent backends. The default agent serves the

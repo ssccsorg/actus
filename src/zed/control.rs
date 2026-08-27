@@ -356,6 +356,38 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
             let error = data.get("error").and_then(|v| v.as_str()).unwrap_or("?");
             tracing::error!("Chat response error: {}", error);
         }
+        "tool_call_authorization_requested" => {
+            let acp_thread_id = data
+                .get("acp_thread_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tool_call_id = data
+                .get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tool_name = data
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string();
+            let mut mgr = zed_manager.write().await;
+            mgr.pending_authorizations.insert(
+                tool_call_id.clone(),
+                crate::agent::PendingAuthorization {
+                    platform_thread_id: acp_thread_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    created_at: chrono::Utc::now(),
+                },
+            );
+            tracing::info!(
+                "Tool authorization requested: {} (thread {})",
+                tool_name,
+                &acp_thread_id[..acp_thread_id.len().min(12)]
+            );
+        }
         _ => {
             tracing::debug!("Unhandled WS event type: {}", event_type);
         }

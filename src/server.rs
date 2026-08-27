@@ -656,6 +656,52 @@ async fn git_log(
     }
 }
 
+// ── Tool-call authorization endpoints ───────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AgentRouteQuery {
+    agent: Option<String>,
+}
+
+/// GET /v1/agents/tool-calls/pending — authorizations awaiting a decision.
+async fn pending_tool_calls_handler(
+    State(state): State<SharedState>,
+    Query(q): Query<AgentRouteQuery>,
+) -> Json<serde_json::Value> {
+    match agent_for(&state, q.agent.as_deref()).await {
+        Ok(agent) => {
+            let pending = agent.pending_tool_calls().await;
+            Json(serde_json::json!({"pending": pending, "count": pending.len()}))
+        }
+        Err(_) => Json(serde_json::json!({"pending": [], "count": 0})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ResolveToolCallRequest {
+    pub agent: Option<String>,
+    pub platform_thread_id: String,
+    pub tool_call_id: String,
+    pub allow: bool,
+}
+
+/// POST /v1/agents/tool-calls/resolve — approve or reject a pending tool call.
+async fn resolve_tool_call_handler(
+    State(state): State<SharedState>,
+    Json(req): Json<ResolveToolCallRequest>,
+) -> Json<serde_json::Value> {
+    match agent_for(&state, req.agent.as_deref()).await {
+        Ok(agent) => match agent
+            .resolve_tool_call(&req.platform_thread_id, &req.tool_call_id, req.allow)
+            .await
+        {
+            Ok(()) => Json(serde_json::json!({"status": "resolved", "allow": req.allow})),
+            Err(e) => Json(serde_json::json!({"status": "error", "error": e})),
+        },
+        Err(_) => Json(serde_json::json!({"status": "error", "error": "agent not found"})),
+    }
+}
+
 // ── Cancel endpoint ────────────────────────────────────────────────────
 
 async fn cancel_turn(State(state): State<SharedState>) -> Json<serde_json::Value> {
@@ -679,6 +725,8 @@ pub async fn run_http_server(addr: &str, state: SharedState) -> anyhow::Result<(
         .route("/v1/chat", post(chat_stream))
         .route("/v1/chat/async", post(chat_async))
         .route("/v1/cancel", post(cancel_turn))
+        .route("/v1/agents/tool-calls/pending", get(pending_tool_calls_handler))
+        .route("/v1/agents/tool-calls/resolve", post(resolve_tool_call_handler))
         .route("/v1/threads", get(list_threads))
         .route("/v1/threads/{thread_id}", get(get_thread))
         .route("/v1/threads/{thread_id}/poll", get(poll_thread))
