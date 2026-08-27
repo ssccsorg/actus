@@ -326,11 +326,10 @@ async fn main() -> anyhow::Result<()> {
 
     // ── WebSocket health monitor ─────────────────────────────────────
     // Periodically checks if events are still arriving from each Zed via
-    // its WebSocket. If no events arrive within 15 seconds, assumes the
-    // Zed side is stuck and forces reconnection by setting
-    // zed_connected = false. The WS read loop's health check detects
-    // this, breaks, and the connection loop accepts a new connection
-    // (Zed auto-reconnects).
+    // its WebSocket. Reconnection is forced only when a turn is actively
+    // in flight (`pending_chat_queue` non-empty) and no events arrive for
+    // the timeout: an idle agent sends no events by design, so a quiet
+    // connection is healthy as long as no turn is running.
     {
         let monitors = monitors.clone();
 
@@ -343,14 +342,18 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(check_interval).await;
 
                 for (mgr, ws_tx) in &monitors {
-                    let (connected, elapsed) = {
+                    let (connected, elapsed, active_turn) = {
                         let g = mgr.read().await;
-                        (g.zed_connected, g.last_sse_event_time.elapsed())
+                        (
+                            g.zed_connected,
+                            g.last_sse_event_time.elapsed(),
+                            !g.pending_chat_queue.is_empty(),
+                        )
                     };
 
-                    if connected && elapsed > timeout {
+                    if connected && active_turn && elapsed > timeout {
                         tracing::warn!(
-                            "Health monitor: no events for {}s, forcing reconnection",
+                            "Health monitor: no events for {}s during an active turn, forcing reconnection",
                             elapsed.as_secs()
                         );
                         // Force reconnection: clear zed_connected and the

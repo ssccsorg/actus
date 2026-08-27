@@ -390,9 +390,6 @@ async fn get_thread(
 pub struct PollQuery {
     /// Agent name to route to; defaults to the fabric default agent.
     agent: Option<String>,
-    /// The content length the client already has for the latest assistant message.
-    /// New content beyond this length is returned as the delta.
-    since: Option<usize>,
     /// The turn_completed value the client last observed.
     /// If omitted, defaults to 0. Poll returns `completed: true` when
     /// thread.turn_completed exceeds this value (i.e., a new turn finished).
@@ -401,11 +398,12 @@ pub struct PollQuery {
 
 #[derive(Serialize)]
 pub struct PollResponse {
-    /// Delta content since the last known content length, if any.
+    /// Full content of the current turn's assistant message. Clients diff
+    /// against what they have already displayed.
     pub new_content: Option<String>,
     /// Whether the thread's current turn is complete.
     pub completed: bool,
-    /// Total content length of the latest assistant message (for the next poll).
+    /// Total content length of the current assistant message.
     pub content_len: usize,
 }
 
@@ -413,14 +411,15 @@ pub struct PollResponse {
 ///
 /// Alternative to SSE for clients that cannot maintain a persistent connection
 /// or when WebSocket events from Zed are unreliable. The client calls this
-/// endpoint at regular intervals (e.g., every 500ms), passing `since` as the
-/// content length returned by the previous response. If the assistant message
-/// has grown, the delta is returned in `new_content`.
+/// endpoint at regular intervals (e.g., every 500ms).
 ///
-/// Delta baselines are scoped to the current turn: each completed turn
-/// produces exactly one assistant message, so the message being served is
-/// `assistant_messages[turn]`. This keeps `since` relative to one message;
-/// previous turns' content is never re-served as a delta.
+/// The response serves the full content of the current turn's assistant
+/// message (each completed turn produces exactly one assistant message, so
+/// the message served is `assistant_messages[turn]`). Clients diff the
+/// content locally against what they have already displayed; this stays
+/// correct when the model edits its message mid-stream, because a replaced
+/// message is served in full instead of as an invalid slice. The `since`
+/// parameter is accepted for backward compatibility and ignored.
 async fn poll_thread(
     State(state): State<SharedState>,
     axum::extract::Path(thread_id): axum::extract::Path<String>,
@@ -429,7 +428,6 @@ async fn poll_thread(
     let agent = agent_for(&state, query.agent.as_deref()).await?;
     let thread = agent.thread(&thread_id).await.ok_or(StatusCode::NOT_FOUND)?;
 
-    let since = query.since.unwrap_or(0);
     let known_turn = query.turn.unwrap_or(0);
 
     // The current turn's assistant message, if the response has started.
@@ -442,19 +440,11 @@ async fn poll_thread(
 
     let completed = thread.turn_completed > known_turn;
     match current {
-        Some(msg) => {
-            let since = since.min(msg.content.len());
-            let delta = &msg.content[since..];
-            Ok(Json(PollResponse {
-                new_content: if delta.is_empty() {
-                    None
-                } else {
-                    Some(delta.to_string())
-                },
-                completed,
-                content_len: msg.content.len(),
-            }))
-        }
+        Some(msg) => Ok(Json(PollResponse {
+            new_content: Some(msg.content.clone()),
+            completed,
+            content_len: msg.content.len(),
+        })),
         None => Ok(Json(PollResponse {
             new_content: None,
             completed,

@@ -304,6 +304,7 @@ async def send_chat(client: NexClient, message: str):
             pass
 
     content_len = 0
+    shown = ""  # full content of the current turn's message already displayed
     poll_interval = 0.3
     max_wait = 120.0  # 2 minutes max
     waited = 0.0
@@ -327,7 +328,22 @@ async def send_chat(client: NexClient, message: str):
                     completed = data.get("completed", False)
 
                     if new_content:
-                        print(new_content, end="", flush=True)
+                        # The server serves the full message content; diff
+                        # locally so model edits replace instead of
+                        # appending invalid slices.
+                        if new_content.startswith(shown):
+                            delta = new_content[len(shown):]
+                            shown = new_content
+                            if delta:
+                                print(delta, end="", flush=True)
+                        else:
+                            # The model rewrote its message mid-stream.
+                            # An append-only terminal cannot erase the old
+                            # text, so mark the revision to distinguish it
+                            # from duplicated output.
+                            shown = new_content
+                            print(f"\n{C.DIM}[revised]{C.END}\n", end="", flush=True)
+                            print(shown, end="", flush=True)
 
                     if completed:
                         print(f"\n{C.GREEN}✓ Complete{C.END}")
