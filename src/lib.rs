@@ -3,6 +3,7 @@
 // modules directly.
 
 pub mod agent;
+pub mod context;
 pub mod files;
 pub mod git;
 pub mod server;

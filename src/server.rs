@@ -17,6 +17,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 
 use crate::agent::{AgentBackend, AgentRegistry, AgentStatus};
+use crate::context;
 use crate::files;
 use crate::git;
 pub use crate::zed::WsCommandTx;
@@ -521,6 +522,89 @@ async fn mention_files_handler(
     }))
 }
 
+// ── Context mention endpoints ──────────────────────────────────────────
+
+/// GET /v1/symbols?q= — definition-pattern symbol search for @ mentions.
+#[derive(Deserialize)]
+pub struct SymbolQuery {
+    q: String,
+    #[serde(default)]
+    max: Option<usize>,
+}
+
+async fn search_symbols_handler(
+    State(state): State<SharedState>,
+    params: Query<SymbolQuery>,
+) -> Json<serde_json::Value> {
+    let symbols = context::search_symbols(&state.workdir, &params.q, params.max.unwrap_or(20));
+    Json(serde_json::json!({
+        "symbols": symbols,
+        "count": symbols.len(),
+    }))
+}
+
+/// GET /v1/rules — project rule files (AGENTS.md, *.mdc) as mention context.
+async fn rules_handler(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let rules = context::find_rules(&state.workdir);
+    Json(serde_json::json!({
+        "rules": rules,
+        "count": rules.len(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct FetchQuery {
+    url: String,
+}
+
+/// Strip HTML tags crudely; good enough for mention context injection.
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// GET /v1/fetch?url= — fetch a URL and return its text for @ mention.
+async fn fetch_handler(Query(q): Query<FetchQuery>) -> Json<serde_json::Value> {
+    let url = q.url.trim().to_string();
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "url must start with http(s)://"
+        }));
+    }
+    match reqwest::get(&url).await {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(resp) => match resp.text().await {
+                Ok(text) => {
+                    let text = strip_html(&text);
+                    let content = if text.len() > 12_000 {
+                        let mut end = 12_000;
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &text[..end])
+                    } else {
+                        text
+                    };
+                    Json(serde_json::json!({"ok": true, "url": url, "content": content}))
+                }
+                Err(e) => Json(serde_json::json!({"ok": false, "error": e.to_string()})),
+            },
+            Err(e) => Json(serde_json::json!({"ok": false, "error": e.to_string()})),
+        },
+        Err(e) => Json(serde_json::json!({"ok": false, "error": e.to_string()})),
+    }
+}
+
 // ── Git endpoints ──────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -600,6 +684,9 @@ pub async fn run_http_server(addr: &str, state: SharedState) -> anyhow::Result<(
         .route("/v1/threads/{thread_id}/poll", get(poll_thread))
         .route("/v1/files", get(search_files_handler))
         .route("/v1/files/mention", get(mention_files_handler))
+        .route("/v1/symbols", get(search_symbols_handler))
+        .route("/v1/rules", get(rules_handler))
+        .route("/v1/fetch", get(fetch_handler))
         .route("/v1/git/status", get(git_status))
         .route("/v1/git/diff", get(git_diff))
         .route("/v1/git/log", get(git_log))

@@ -113,6 +113,22 @@ tool calls (headless task execution); `ask` waits for a human or approval
 bridge; `never` rejects them. The mode is carried to the fork via the
 `ZED_TOOL_APPROVAL` environment variable.
 
+## `@` Mention Context
+
+Typing `@` in the CLI injects context into the message before it is sent,
+mirroring Zed's mention picker:
+
+| Form | Source | Example |
+|---|---|---|
+| `@path/to/file` | file search, paths injected | `@src/server.rs` |
+| `@rules` | project rule files (AGENTS.md, *.mdc) | `@rules` |
+| `@symbol:query` | definition-pattern symbol search | `@symbol:search_symbols` |
+| `@thread:query` | conversation thread content | `@thread:thread-title` |
+| `@fetch:URL` | fetched URL text | `@fetch:https://example.com` |
+
+Server endpoints: `/v1/symbols?q=`, `/v1/rules`, `/v1/fetch?url=`.
+Diagnostics mention is deferred (requires a language server).
+
 ## Agent Types
 
 | Agent | Role | Protocol |

@@ -138,6 +138,36 @@ class NexClient:
         except Exception:
             return None
 
+    async def get_rules(self) -> list[dict] | None:
+        try:
+            r = await self.client.get("/v1/rules")
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict):
+                return data.get("rules", [])
+            return data if isinstance(data, list) else None
+        except Exception:
+            return None
+
+    async def search_symbols(self, q: str) -> list[dict] | None:
+        try:
+            r = await self.client.get("/v1/symbols", params={"q": q})
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict):
+                return data.get("symbols", [])
+            return data if isinstance(data, list) else None
+        except Exception:
+            return None
+
+    async def fetch_url(self, url: str) -> dict | None:
+        try:
+            r = await self.client.get("/v1/fetch", params={"url": url})
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            return None
+
 
 # ── Message display ──────────────────────────────────────────────────────
 
@@ -210,36 +240,88 @@ async def select_thread_prompt(client: NexClient, threads: list[dict]) -> str | 
 # ── Send message (SSE streaming) ─────────────────────────────────────────
 
 async def resolve_mentions(client: NexClient, message: str) -> str:
-    """Resolve @mentions in message to full file paths before sending."""
+    """Resolve @mentions to context before sending.
+
+    Supported forms:
+      @path/to/file    file path mention (searched, paths injected)
+      @rules           project rule files (AGENTS.md, *.mdc)
+      @symbol:query    definition-pattern symbol search
+      @thread:query    conversation thread content
+      @fetch:URL       fetched URL text
+    """
     import re
 
-    # Find all @mention tokens
-    pattern = re.compile(r'@([\w./_-]+)')
+    pattern = re.compile(r"@([\w./_-]+(?::[^\s]+)?)")
     matches = list(pattern.finditer(message))
     if not matches:
         return message
 
-    # Resolve each mention async
     resolved = {}
     for m in matches:
-        word = m.group(1)
-        if word in resolved:
+        token = m.group(1)
+        if token in resolved:
             continue
-        results = await client.search_files(word)
-        if results:
-            paths = [r.get("path", "") for r in results[:3]]
-            resolved[word] = " ".join(paths)
-        else:
-            resolved[word] = m.group(0)
+        resolved[token] = await _resolve_mention(client, token)
 
-    # Replace in reverse order to preserve positions
     result = message
     for m in reversed(matches):
-        word = m.group(1)
-        replacement = resolved[word]
-        result = result[:m.start()] + replacement + result[m.end():]
-
+        token = m.group(1)
+        result = result[:m.start()] + resolved[token] + result[m.end():]
     return result
+
+
+async def _resolve_mention(client: NexClient, token: str) -> str:
+    if token == "rules":
+        rules = await client.get_rules()
+        if not rules:
+            return "@rules"
+        parts = []
+        for r in rules[:3]:
+            parts.append(f"[Rules: {r.get('path', '?')}]\n{r.get('content', '')}")
+        return "\n\n".join(parts)
+
+    if token.startswith("symbol:"):
+        q = token[len("symbol:"):]
+        syms = await client.search_symbols(q)
+        if not syms:
+            return f"@{token}"
+        lines = [
+            f"{s.get('file', '?')}:{s.get('line', '?')} {s.get('snippet', '').strip()}"
+            for s in syms[:8]
+        ]
+        return "Symbols matching `{}`:\n{}".format(q, "\n".join(lines))
+
+    if token.startswith("thread:"):
+        q = token[len("thread:"):].strip().lower()
+        threads = await client.list_threads()
+        if not threads:
+            return f"@{token}"
+        hit = next(
+            (t for t in threads if q in (t.get("title") or "").lower()), None
+        )
+        if not hit:
+            return f"@{token}"
+        detail = await client.get_thread(hit["id"])
+        msgs = (detail or {}).get("messages", [])
+        body = "\n".join(
+            f"{m.get('role', '?')}: {m.get('content', '')[:400]}" for m in msgs[-6:]
+        )
+        return f"[Thread: {hit.get('title') or hit['id']}]\n{body}"
+
+    if token.startswith("fetch:"):
+        url = token[len("fetch:"):]
+        data = await client.fetch_url(url)
+        content = (data or {}).get("content", "")
+        if not content:
+            return f"@{token}"
+        return f"[Fetched: {url}]\n{content[:3000]}"
+
+    # Default: file path mention
+    results = await client.search_files(token)
+    if results:
+        paths = [r.get("path", "") for r in results[:3]]
+        return " ".join(paths)
+    return f"@{token}"
 
 
 async def send_chat(client: NexClient, message: str):
