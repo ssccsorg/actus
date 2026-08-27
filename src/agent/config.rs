@@ -10,6 +10,29 @@ use serde::Deserialize;
 
 use crate::agent::AgentKind;
 
+/// One MCP (Model Context Protocol) server attached to an agent. Matches
+/// Zed's `context_servers` settings entries: either a local stdio process
+/// (`command`/`args`/`env`) or a remote HTTP endpoint (`url`/`headers`).
+#[derive(Clone, Debug, Deserialize)]
+pub struct McpServer {
+    pub name: String,
+    /// Stdio transport: executable path.
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// HTTP transport: remote MCP endpoint.
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// Tool call timeout in seconds (stdio only).
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
 /// Resolved declaration of one agent platform instance. All fields are
 /// concrete: `load_config` fills anything the file omits from defaults.
 #[derive(Clone, Debug)]
@@ -26,6 +49,8 @@ pub struct AgentSpec {
     pub bin: PathBuf,
     /// WebSocket port the agent process connects back to.
     pub ws_port: u16,
+    /// MCP servers attached to this agent.
+    pub mcp: Vec<McpServer>,
 }
 
 /// Values every agent inherits when the config file omits them.
@@ -61,6 +86,8 @@ struct AgentSpecFile {
     bin: Option<PathBuf>,
     #[serde(default)]
     ws_port: Option<u16>,
+    #[serde(default)]
+    mcp: Vec<McpServer>,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +120,7 @@ pub fn load_config(file: Option<&Path>, defaults: &AgentDefaults) -> Result<Vec<
             api_key: None,
             bin: None,
             ws_port: None,
+            mcp: Vec::new(),
         }],
     };
 
@@ -132,6 +160,7 @@ pub fn load_config(file: Option<&Path>, defaults: &AgentDefaults) -> Result<Vec<
             api_key: f.api_key.unwrap_or_else(|| defaults.api_key.clone()),
             bin: f.bin.unwrap_or_else(|| defaults.bin.clone()),
             ws_port,
+            mcp: f.mcp,
         });
     }
     Ok(specs)

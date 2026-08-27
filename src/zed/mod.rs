@@ -370,6 +370,7 @@ pub fn ensure_zed_settings(
     base_url: &str,
     model_name: &str,
     model_display: &str,
+    mcp: &[crate::agent::config::McpServer],
 ) -> anyhow::Result<()> {
     use std::fs;
     use std::io::Write;
@@ -400,6 +401,42 @@ pub fn ensure_zed_settings(
                 "tool_use": true,
             }],
         });
+    }
+
+    // MCP servers: map each declaration to Zed's `context_servers` entry.
+    // Stdio servers become `{ command, args, env }`; HTTP servers become
+    // `{ url, headers }`. The headless agent's context server registry
+    // starts these and exposes their tools to the model.
+    if !mcp.is_empty() {
+        let mut servers = serde_json::Map::new();
+        for s in mcp {
+            let content = if let Some(url) = &s.url {
+                let mut obj = serde_json::Map::new();
+                obj.insert("url".to_string(), serde_json::json!(url));
+                if !s.headers.is_empty() {
+                    obj.insert("headers".to_string(), serde_json::json!(s.headers));
+                }
+                serde_json::Value::Object(obj)
+            } else {
+                let mut obj = serde_json::Map::new();
+                if let Some(cmd) = &s.command {
+                    obj.insert("command".to_string(), serde_json::json!(cmd));
+                }
+                if !s.args.is_empty() {
+                    obj.insert("args".to_string(), serde_json::json!(s.args));
+                }
+                if !s.env.is_empty() {
+                    obj.insert("env".to_string(), serde_json::json!(s.env));
+                }
+                if let Some(t) = s.timeout {
+                    obj.insert("timeout".to_string(), serde_json::json!(t));
+                }
+                serde_json::Value::Object(obj)
+            };
+            servers.insert(s.name.clone(), content);
+        }
+        settings["context_servers"] = serde_json::Value::Object(servers);
+        tracing::info!("Wrote {} MCP server(s) to settings", mcp.len());
     }
 
     let mut f = fs::File::create(&settings_file)?;

@@ -122,3 +122,47 @@ fn malformed_toml_rejected() {
     let err = load_config(Some(&path), &defaults()).unwrap_err();
     assert!(err.contains("cannot parse"), "unexpected: {}", err);
 }
+
+#[test]
+fn mcp_servers_parsed_stdio_and_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        r#"
+[[agents]]
+name = "zed"
+ws_port = 8080
+
+[[agents.mcp]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "./"]
+env = { "FOO" = "bar" }
+
+[[agents.mcp]]
+name = "cloudflare-api"
+url = "https://mcp.cloudflare.com/mcp"
+"#,
+    );
+    let specs = load_config(Some(&path), &defaults()).unwrap();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].mcp.len(), 2);
+
+    let fs = &specs[0].mcp[0];
+    assert_eq!(fs.name, "filesystem");
+    assert_eq!(fs.command.as_deref(), Some("npx"));
+    assert_eq!(fs.args.len(), 3);
+    assert_eq!(fs.env.get("FOO").map(String::as_str), Some("bar"));
+    assert!(fs.url.is_none());
+
+    let cf = &specs[0].mcp[1];
+    assert_eq!(cf.name, "cloudflare-api");
+    assert_eq!(cf.url.as_deref(), Some("https://mcp.cloudflare.com/mcp"));
+    assert!(cf.command.is_none());
+}
+
+#[test]
+fn no_mcp_by_default() {
+    let specs = load_config(None, &defaults()).unwrap();
+    assert!(specs[0].mcp.is_empty());
+}

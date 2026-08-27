@@ -153,6 +153,9 @@ async fn main() -> anyhow::Result<()> {
     let mut children: Vec<tokio::process::Child> = Vec::new();
     // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
     let mut monitors: Vec<(Arc<RwLock<ZedManager>>, WsCommandTx)> = Vec::new();
+    // Per-agent user data dirs stay alive for the process lifetime; Zed
+    // reads settings at startup and watches them while running.
+    let mut _user_data_dirs: Vec<tempfile::TempDir> = Vec::new();
 
     let default_name = if specs.iter().any(|s| s.name == "zed") {
         "zed".to_string()
@@ -172,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
                     &spec.base_url,
                     &spec.model,
                     &spec.model_display,
+                    &spec.mcp,
                 )?;
                 let threads_dir = threads_root.join(&spec.name);
                 std::fs::create_dir_all(&threads_dir)?;
@@ -209,6 +213,7 @@ async fn main() -> anyhow::Result<()> {
                     &ws_host,
                 )
                 .await?;
+                _user_data_dirs.push(user_data_dir);
                 tracing::info!(
                     "Agent '{}' launched (PID {:?}, WS ws://{}, threads {})",
                     spec.name,
