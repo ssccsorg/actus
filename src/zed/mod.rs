@@ -245,10 +245,13 @@ impl ZedManager {
     }
 
     /// Notify SSE consumers that thread state has changed.
+    ///
+    /// `send_modify` takes the watch channel's internal write lock once
+    /// and increments in place. The previous borrow-then-send pattern
+    /// held the read lock while requesting the write lock, which
+    /// deadlocked on the non-reentrant RwLock inside `watch`.
     pub fn notify_thread_change(&self) {
-        let _ = self
-            .thread_notify
-            .send(self.thread_notify.borrow().wrapping_add(1));
+        self.thread_notify.send_modify(|v| *v = v.wrapping_add(1));
     }
 
     /// Send a cancel_current_turn command to Zed via WebSocket.
