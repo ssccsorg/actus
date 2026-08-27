@@ -250,7 +250,9 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
             let mut mgr = zed_manager.write().await;
             tracing::info!("Thread created: {}", acp_id);
 
-            // Map request_id → local thread_id, and acp_thread_id → local thread_id
+            // Map request_id → local thread_id, and acp_thread_id →
+            // local thread_id. The local thread is the canonical record;
+            // no acp_id-keyed mirror thread is created.
             if let Some(local_id) = mgr.pending_requests.get(&rid).cloned() {
                 mgr.thread_id_map
                     .insert(acp_id.clone(), local_id.clone());
@@ -260,9 +262,13 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
                 if let Some(waiter) = mgr.thread_waiters.remove(&local_id) {
                     waiter.notify_one();
                 }
+            } else {
+                tracing::warn!(
+                    "thread_created for unknown request_id: {} (acp {})",
+                    &rid[..rid.len().min(12)],
+                    &acp_id[..acp_id.len().min(12)]
+                );
             }
-            mgr.get_or_create_thread(Some(&acp_id));
-            mgr.pending_requests.insert(rid, acp_id);
             mgr.notify_thread_change();
             mgr.save_threads();
         }
@@ -295,15 +301,19 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
             );
 
             let mut mgr = zed_manager.write().await;
-            mgr.add_message_full(
-                &acp_id, &role, &content, msg_id.clone(),
-                entry_type.clone(), tool_name.clone(), tool_status.clone(),
-            );
-            // Mirror to the local thread
+            // Write to the canonical local thread. The acp_id → local_id
+            // mapping is established by thread_created (or rebuilt from
+            // persisted threads), which always precedes message_added on
+            // the same WebSocket.
             if let Some(local_id) = mgr.thread_id_map.get(&acp_id).cloned() {
                 mgr.add_message_full(
                     &local_id, &role, &content, msg_id,
                     entry_type, tool_name, tool_status,
+                );
+            } else {
+                tracing::warn!(
+                    "message_added for unknown acp_thread_id: {}",
+                    &acp_id[..acp_id.len().min(12)]
                 );
             }
             mgr.notify_thread_change();

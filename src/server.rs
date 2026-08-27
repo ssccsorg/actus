@@ -204,17 +204,18 @@ async fn chat_stream(
                 "thread_id": tid.clone(),
             })).unwrap()));
 
-        // When resuming, start last_content at the current assistant content
-        // so we only emit new deltas, not old messages.
+        // The current turn's assistant message (index turn_id) is the only
+        // source of deltas; previous turns' content is never re-emitted.
         let mut last_content = agent_stream
             .thread(&tid)
             .await
-            .and_then(|t| {
+            .map(|t| {
                 t.messages
                     .iter()
-                    .rev()
-                    .find(|m| m.role == "assistant")
+                    .filter(|m| m.role == "assistant")
+                    .nth(turn_id as usize)
                     .map(|m| m.content.clone())
+                    .unwrap_or_default()
             })
             .unwrap_or_default();
         let mut done = false;
@@ -256,20 +257,27 @@ async fn chat_stream(
                     );
                 }
 
-                // Find last assistant message (with tool metadata)
+                // Find the current turn's assistant message (with tool metadata).
                 let last_msg = thread
                     .messages
                     .iter()
-                    .rev()
-                    .find(|m| m.role == "assistant");
+                    .filter(|m| m.role == "assistant")
+                    .nth(turn_id as usize);
                 let assistant_content = last_msg.map(|m| m.content.as_str()).unwrap_or("");
                 let entry_type = last_msg.and_then(|m| m.entry_type.as_deref());
                 let tool_name = last_msg.and_then(|m| m.tool_name.as_deref());
                 let tool_status = last_msg.and_then(|m| m.tool_status.as_deref());
 
-                // Yield delta
-                if assistant_content.len() > last_content.len() {
-                    let delta = &assistant_content[last_content.len()..];
+                // Yield delta. Robust to model edits: when the message
+                // content does not extend the previously emitted content
+                // (rewritten mid-stream), emit the full new content
+                // instead of an invalid slice.
+                if assistant_content != last_content.as_str() {
+                    let delta = if assistant_content.starts_with(&last_content) {
+                        &assistant_content[last_content.len()..]
+                    } else {
+                        assistant_content
+                    };
                     last_content = assistant_content.to_string();
 
                     tracing::debug!("SSE stream {}: yielding {} bytes delta", tid, delta.len());
@@ -408,6 +416,11 @@ pub struct PollResponse {
 /// endpoint at regular intervals (e.g., every 500ms), passing `since` as the
 /// content length returned by the previous response. If the assistant message
 /// has grown, the delta is returned in `new_content`.
+///
+/// Delta baselines are scoped to the current turn: each completed turn
+/// produces exactly one assistant message, so the message being served is
+/// `assistant_messages[turn]`. This keeps `since` relative to one message;
+/// previous turns' content is never re-served as a delta.
 async fn poll_thread(
     State(state): State<SharedState>,
     axum::extract::Path(thread_id): axum::extract::Path<String>,
@@ -419,34 +432,34 @@ async fn poll_thread(
     let since = query.since.unwrap_or(0);
     let known_turn = query.turn.unwrap_or(0);
 
-    // Find the latest assistant message for delta computation
-    let last_msg = thread.messages.iter().rev().find(|m| m.role == "assistant");
+    // The current turn's assistant message, if the response has started.
+    let assistants: Vec<_> = thread
+        .messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .collect();
+    let current = assistants.get(known_turn as usize);
 
-    match last_msg {
-        Some(msg) if msg.content.len() > since => {
-            let delta = msg.content[since..].to_string();
-            Ok(Json(PollResponse {
-                new_content: Some(delta),
-                completed: thread.turn_completed > known_turn,
-                content_len: msg.content.len(),
-            }))
-        }
+    let completed = thread.turn_completed > known_turn;
+    match current {
         Some(msg) => {
-            // No new content; report completion or no-change
+            let since = since.min(msg.content.len());
+            let delta = &msg.content[since..];
             Ok(Json(PollResponse {
-                new_content: None,
-                completed: thread.turn_completed > known_turn,
+                new_content: if delta.is_empty() {
+                    None
+                } else {
+                    Some(delta.to_string())
+                },
+                completed,
                 content_len: msg.content.len(),
             }))
         }
-        None => {
-            // No assistant message exists yet
-            Ok(Json(PollResponse {
-                new_content: None,
-                completed: thread.turn_completed > known_turn,
-                content_len: 0,
-            }))
-        }
+        None => Ok(Json(PollResponse {
+            new_content: None,
+            completed,
+            content_len: 0,
+        })),
     }
 }
 
