@@ -336,6 +336,7 @@ pub async fn launch_zed(
     user_data_dir: &Path,
     session_id: &str,
     ws_host: &str,
+    tool_approval: &str,
 ) -> anyhow::Result<tokio::process::Child> {
     tracing::info!("Launching Zed headless...");
 
@@ -352,6 +353,7 @@ pub async fn launch_zed(
         .env("HELIX_SESSION_ID", session_id)
         .env("ZED_STATELESS", "1")
         .env("ZED_WORK_DIR", workdir)
+        .env("ZED_TOOL_APPROVAL", tool_approval)
         .env("RUST_LOG", "info")
         .stdout(std::process::Stdio::null())
         .stderr(stderr_log)

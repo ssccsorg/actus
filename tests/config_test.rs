@@ -1,6 +1,6 @@
 // Integration tests for agent config loading (issue #7).
 
-use actus::agent::config::{load_config, AgentDefaults};
+use actus::agent::config::{load_config, AgentDefaults, ToolApproval};
 use actus::agent::AgentKind;
 use std::path::PathBuf;
 
@@ -33,6 +33,29 @@ fn no_file_yields_single_default_zed() {
     assert_eq!(specs[0].api_key, "sk-test");
     assert_eq!(specs[0].bin, PathBuf::from("/bin/zed"));
     assert_eq!(specs[0].ws_port, 8080);
+    assert_eq!(specs[0].tool_approval, ToolApproval::Always);
+}
+
+#[test]
+fn tool_approval_modes_parsed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        r#"
+[[agents]]
+name = "zed"
+tool_approval = "never"
+ws_port = 8080
+
+[[agents]]
+name = "asker"
+tool_approval = "ask"
+ws_port = 8081
+"#,
+    );
+    let specs = load_config(Some(&path), &defaults()).unwrap();
+    assert_eq!(specs[0].tool_approval, ToolApproval::Never);
+    assert_eq!(specs[1].tool_approval, ToolApproval::Ask);
 }
 
 #[test]

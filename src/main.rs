@@ -211,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
                     user_data_dir.path(),
                     &session_id,
                     &ws_host,
+                    spec.tool_approval.as_str(),
                 )
                 .await?;
                 _user_data_dirs.push(user_data_dir);

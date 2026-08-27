@@ -81,6 +81,17 @@ base_url = "https://api.deepseek.com/v1"
 api_key = "sk-..."
 bin = "helix/.bin/helix-zed-headless-arm64"
 ws_port = 8080
+tool_approval = "always"  # always | ask | never (drives the fork's approval policy)
+
+  # MCP servers attached to this agent (stdio or http)
+  [[agents.mcp]]
+  name = "filesystem"
+  command = "npx"
+  args = ["-y", "@modelcontextprotocol/server-filesystem", "./"]
+
+  [[agents.mcp]]
+  name = "cloudflare-api"
+  url = "https://mcp.cloudflare.com/mcp"
 
 [[agents]]
 name = "research"
@@ -93,7 +104,14 @@ ws_port = 8081
 Each agent inherits any omitted field from the defaults. Every `zed`
 agent needs a unique `ws_port`; thread state is persisted per agent under
 `~/.actus/threads/{name}/`. Chat and thread endpoints accept an `agent`
-field to route to a specific agent.
+field to route to a specific agent. MCP servers declared under an agent
+are injected into the agent's `context_servers` settings and started by
+the headless agent, exposing their tools to the model.
+
+`tool_approval` sets the tool call approval policy. `always` auto-approves
+tool calls (headless task execution); `ask` waits for a human or approval
+bridge; `never` rejects them. The mode is carried to the fork via the
+`ZED_TOOL_APPROVAL` environment variable.
 
 ## Agent Types
 

@@ -1,0 +1,82 @@
+diff --git a/crates/agent/src/agent.rs b/crates/agent/src/agent.rs
+index 5434e92..90440fd 100644
+--- a/crates/agent/src/agent.rs
++++ b/crates/agent/src/agent.rs
+@@ -2194,24 +2194,59 @@ impl NativeAgentConnection {
+                                 context: _,
+                                 kind,
+                             }) => {
+-                                let outcome_task = acp_thread.update(cx, |thread, cx| {
+-                                    thread.request_tool_call_authorization(
+-                                        tool_call, options, kind, cx,
+-                                    )
+-                                })??;
+-                                cx.background_spawn(async move {
+-                                    if let acp_thread::RequestPermissionOutcome::Selected(outcome) =
+-                                        outcome_task.await
+-                                    {
+-                                        response
+-                                            .send(outcome)
+-                                            .map_err(|_| {
+-                                                anyhow!("authorization receiver was dropped")
+-                                            })
+-                                            .log_err();
+-                                    }
+-                                })
+-                                .detach();
++                                // Headless approval policy, driven by the
++                                // external runtime through ZED_TOOL_APPROVAL:
++                                // "always" resolves with AllowOnce, "never"
++                                // with RejectOnce, anything else falls
++                                // through to the normal authorization
++                                // request (ask mode, UI or bridge).
++                                let auto_outcome =
++                                    match std::env::var("ZED_TOOL_APPROVAL").ok().as_deref() {
++                                        Some("always") => options
++                                            .first_option_of_kind(
++                                                acp::PermissionOptionKind::AllowOnce,
++                                            )
++                                            .map(|option| {
++                                                acp_thread::SelectedPermissionOutcome::new(
++                                                    option.option_id.clone(),
++                                                    option.kind,
++                                                )
++                                            }),
++                                        Some("never") => options
++                                            .first_option_of_kind(
++                                                acp::PermissionOptionKind::RejectOnce,
++                                            )
++                                            .map(|option| {
++                                                acp_thread::SelectedPermissionOutcome::new(
++                                                    option.option_id.clone(),
++                                                    option.kind,
++                                                )
++                                            }),
++                                        _ => None,
++                                    };
++                                if let Some(outcome) = auto_outcome {
++                                    let _ = response.send(outcome);
++                                } else {
++                                    let outcome_task = acp_thread.update(cx, |thread, cx| {
++                                        thread.request_tool_call_authorization(
++                                            tool_call, options, kind, cx,
++                                        )
++                                    })??;
++                                    cx.background_spawn(async move {
++                                        if let acp_thread::RequestPermissionOutcome::Selected(
++                                            outcome,
++                                        ) = outcome_task.await
++                                        {
++                                            response
++                                                .send(outcome)
++                                                .map_err(|_| {
++                                                    anyhow!("authorization receiver was dropped")
++                                                })
++                                                .log_err();
++                                        }
++                                    })
++                                    .detach();
++                                }
+                             }
+                             ThreadEvent::ToolCallAuthorizationResolved {
+                                 tool_call_id,

@@ -6,9 +6,30 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentKind;
+
+/// Tool call approval policy for an agent. `Always` auto-approves every
+/// tool call (headless task execution); `Ask` waits for a human or a
+/// future approval bridge; `Never` rejects tool calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolApproval {
+    Always,
+    Ask,
+    Never,
+}
+
+impl ToolApproval {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolApproval::Always => "always",
+            ToolApproval::Ask => "ask",
+            ToolApproval::Never => "never",
+        }
+    }
+}
 
 /// One MCP (Model Context Protocol) server attached to an agent. Matches
 /// Zed's `context_servers` settings entries: either a local stdio process
@@ -49,6 +70,8 @@ pub struct AgentSpec {
     pub bin: PathBuf,
     /// WebSocket port the agent process connects back to.
     pub ws_port: u16,
+    /// Tool call approval policy; drives the fork's ZED_TOOL_APPROVAL env.
+    pub tool_approval: ToolApproval,
     /// MCP servers attached to this agent.
     pub mcp: Vec<McpServer>,
 }
@@ -87,6 +110,8 @@ struct AgentSpecFile {
     #[serde(default)]
     ws_port: Option<u16>,
     #[serde(default)]
+    tool_approval: Option<ToolApproval>,
+    #[serde(default)]
     mcp: Vec<McpServer>,
 }
 
@@ -120,6 +145,7 @@ pub fn load_config(file: Option<&Path>, defaults: &AgentDefaults) -> Result<Vec<
             api_key: None,
             bin: None,
             ws_port: None,
+            tool_approval: None,
             mcp: Vec::new(),
         }],
     };
@@ -160,6 +186,7 @@ pub fn load_config(file: Option<&Path>, defaults: &AgentDefaults) -> Result<Vec<
             api_key: f.api_key.unwrap_or_else(|| defaults.api_key.clone()),
             bin: f.bin.unwrap_or_else(|| defaults.bin.clone()),
             ws_port,
+            tool_approval: f.tool_approval.unwrap_or(ToolApproval::Always),
             mcp: f.mcp,
         });
     }
