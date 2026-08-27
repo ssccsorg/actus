@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+use actus::agent::config::{load_config, AgentDefaults};
+use actus::agent::AgentKind;
 use actus::agent::AgentRegistry;
 use actus::server::run_http_server;
 use actus::server::{AppState, WsCommandTx};
@@ -102,7 +104,6 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let workdir = std::fs::canonicalize(&args.workdir)?;
-    let ws_host = format!("127.0.0.1:{}", args.ws_port);
 
     // Read model/provider config from args or env
     let provider = std::env::var("LLM_PROVIDER").unwrap_or(args.provider);
@@ -110,82 +111,140 @@ async fn main() -> anyhow::Result<()> {
     let model_name = std::env::var("LLM_MODEL").unwrap_or_else(|_| format!("{}-chat", provider));
     let model_display = std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone());
 
-    // Bootstrap Zed user data dir with LLM settings
-    let user_data_dir = tempfile::tempdir()?;
-    ensure_zed_settings(
-        user_data_dir.path(),
-        &api_key,
-        &provider,
-        &base_url,
-        &model_name,
-        &model_display,
-    )?;
+    // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
+    // Missing file (or no override) means a single default zed agent.
+    let config_path = std::env::var("ACTUS_CONFIG")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".actus").join("config.toml")));
+    let config_file = match config_path {
+        Some(p) if p.exists() => Some(p),
+        _ => None,
+    };
 
-    // Create threads directory for persistence
-    let threads_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
-        .join(".")
-        .join("threads");
-    std::fs::create_dir_all(&threads_dir)?;
-
-    let session_id = format!(
-        "ses_actus-{}",
-        uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
+    let defaults = AgentDefaults {
+        provider: provider.clone(),
+        model: model_name.clone(),
+        model_display: model_display.clone(),
+        base_url: base_url.clone(),
+        api_key: api_key.clone(),
+        bin: bin_path.clone(),
+        ws_port: args.ws_port,
+    };
+    let specs = load_config(config_file.as_deref(), &defaults).map_err(anyhow::Error::msg)?;
+    tracing::info!(
+        "Config: {} agent(s) from {}",
+        specs.len(),
+        config_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "defaults".to_string())
     );
 
-    tracing::info!("Starting  server");
-    tracing::info!("  Binary:     {}", bin_path.display());
-    tracing::info!("  Workdir:    {}", workdir.display());
-    tracing::info!("  User data:  {}", user_data_dir.path().display());
-    tracing::info!("  Session:    {}", session_id);
-    tracing::info!("  Provider:   {} ({})", provider, base_url);
-    tracing::info!("  Model:      {} ({})", model_name, model_display);
-    tracing::info!("  HTTP API:   http://127.0.0.1:{}", args.http_port);
-    tracing::info!("  WebSocket:  ws://{}", ws_host);
+    // Threads root: ~/.actus/threads/{agent_name}/
+    let threads_root = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
+        .join(".actus")
+        .join("threads");
+    std::fs::create_dir_all(&threads_root)?;
 
-    // Create shared command channel (separate from ZedManager RwLock)
-    // to avoid lock contention between SSE handlers and cancel/command endpoints.
-    let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-
-    // Start WebSocket server (Zed connects to us)
-    let zed_manager = Arc::new(RwLock::new(ZedManager::new(
-        session_id.clone(),
-        ws_host.clone(),
-        &threads_dir,
-    )));
-
-    let ws_zed_manager = zed_manager.clone();
-    let ws_host_clone = ws_host.clone();
-    let ws_tx_clone = ws_tx.clone();
-    let ws_server = tokio::spawn(async move {
-        run_ws_server(&ws_host_clone, ws_zed_manager, ws_tx_clone).await
-    });
-
-    // Wait for WebSocket server to be ready
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    // Launch Zed headless and keep the child handle for graceful shutdown
-    let mut zed_child = launch_zed(
-        &bin_path,
-        &workdir,
-        user_data_dir.path(),
-        &session_id,
-        &ws_host,
-    )
-    .await?;
-    tracing::info!("Zed PID: {:?}", zed_child.id());
-
-    // Build the execution fabric: one Zed backend as the default agent.
-    // Future platform adapters register here the same way.
-    let backend = Arc::new(ZedBackend {
-        manager: zed_manager.clone(),
-        ws_tx: ws_tx.clone(),
-    });
+    // Launch every configured agent and register it in the fabric.
     let mut registry = AgentRegistry::new();
-    registry.register(backend, true);
+    let mut children: Vec<tokio::process::Child> = Vec::new();
+    // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
+    let mut monitors: Vec<(Arc<RwLock<ZedManager>>, WsCommandTx)> = Vec::new();
+
+    let default_name = if specs.iter().any(|s| s.name == "zed") {
+        "zed".to_string()
+    } else {
+        specs[0].name.clone()
+    };
+
+    for spec in &specs {
+        match spec.kind {
+            AgentKind::Zed => {
+                let ws_host = format!("127.0.0.1:{}", spec.ws_port);
+                let user_data_dir = tempfile::tempdir()?;
+                ensure_zed_settings(
+                    user_data_dir.path(),
+                    &spec.api_key,
+                    &spec.provider,
+                    &spec.base_url,
+                    &spec.model,
+                    &spec.model_display,
+                )?;
+                let threads_dir = threads_root.join(&spec.name);
+                std::fs::create_dir_all(&threads_dir)?;
+                let session_id = format!(
+                    "ses_actus-{}-{}",
+                    spec.name,
+                    &uuid::Uuid::new_v4().to_string()[..8]
+                );
+                let manager = Arc::new(RwLock::new(ZedManager::new(
+                    session_id.clone(),
+                    ws_host.clone(),
+                    &threads_dir,
+                )));
+                let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
+                monitors.push((manager.clone(), ws_tx.clone()));
+
+                // Per-agent WebSocket server (Zed connects back here).
+                tokio::spawn({
+                    let host = ws_host.clone();
+                    let mgr = manager.clone();
+                    let tx = ws_tx.clone();
+                    async move {
+                        if let Err(e) = run_ws_server(&host, mgr, tx).await {
+                            tracing::error!("WS server for agent failed: {}", e);
+                        }
+                    }
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                let child = launch_zed(
+                    &spec.bin,
+                    &workdir,
+                    user_data_dir.path(),
+                    &session_id,
+                    &ws_host,
+                )
+                .await?;
+                tracing::info!(
+                    "Agent '{}' launched (PID {:?}, WS ws://{}, threads {})",
+                    spec.name,
+                    child.id(),
+                    ws_host,
+                    threads_dir.display()
+                );
+                children.push(child);
+
+                let backend = Arc::new(ZedBackend {
+                    manager: manager.clone(),
+                    ws_tx: ws_tx.clone(),
+                });
+                registry.register(backend, spec.name == default_name);
+            }
+            AgentKind::LangGraph | AgentKind::Native => {
+                tracing::warn!(
+                    "Agent '{}': kind {:?} has no adapter yet, skipping",
+                    spec.name,
+                    spec.kind
+                );
+            }
+        }
+    }
+
+    if registry.default_agent().is_none() {
+        anyhow::bail!("no agent could be launched from config");
+    }
+
+    tracing::info!("Starting actus server");
+    tracing::info!("  HTTP API:   http://127.0.0.1:{}", args.http_port);
+    tracing::info!("  Workdir:    {}", workdir.display());
+    tracing::info!("  Threads:    {}", threads_root.display());
 
     // Build app state and start HTTP server
-    let state = Arc::new(AppState::new(registry, ws_tx.clone(), workdir.clone()));
+    let state = Arc::new(AppState::new(registry, workdir.clone()));
 
     let http_server = tokio::spawn({
         let state = state.clone();
@@ -210,12 +269,13 @@ async fn main() -> anyhow::Result<()> {
     })
     };
 
-    // Wait for agent to be ready before starting CLI
+    // Wait for the default agent to be ready before starting the CLI.
+    let default_backend = state.agents.default_agent();
     for i in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let ready = {
-            let mgr = zed_manager.read().await;
-            mgr.agent_ready
+        let ready = match &default_backend {
+            Some(agent) => agent.status().await.ready,
+            None => false,
         };
         if ready {
             tracing::info!("Agent ready after {}s", i + 1);
@@ -227,11 +287,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Graceful shutdown ────────────────────────────────────────────
-    // Handle SIGTERM/SIGINT: save threads, terminate Zed, exit cleanly.
+    // Handle SIGTERM/SIGINT: save threads per agent, exit cleanly.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     {
-        let zed_manager = zed_manager.clone();
+        let monitors = monitors.clone();
 
         tokio::spawn(async move {
             let mut sigterm = tokio::signal::unix::signal(
@@ -248,16 +308,16 @@ async fn main() -> anyhow::Result<()> {
 
             tracing::info!("Shutdown signal received, cleaning up...");
 
-            // Cancel current turn if active
-            {
-                let mgr = zed_manager.read().await;
-                mgr.cancel_current_turn().ok();
-            }
-
-            // Save threads
-            {
-                let mgr = zed_manager.read().await;
-                mgr.save_threads();
+            // Cancel active turns and persist threads for every agent.
+            for (mgr, _tx) in &monitors {
+                {
+                    let g = mgr.read().await;
+                    g.cancel_current_turn().ok();
+                }
+                {
+                    let g = mgr.read().await;
+                    g.save_threads();
+                }
             }
 
             let _ = shutdown_tx.send(());
@@ -265,14 +325,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── WebSocket health monitor ─────────────────────────────────────
-    // Periodically checks if events are still arriving from Zed via the
-    // WebSocket. If no events arrive within 15 seconds, assumes the Zed
-    // side is stuck and forces reconnection by setting zed_connected = false.
-    // The WS read loop's health check detects this, breaks, and the
-    // connection loop accepts a new connection (Zed auto-reconnects).
+    // Periodically checks if events are still arriving from each Zed via
+    // its WebSocket. If no events arrive within 15 seconds, assumes the
+    // Zed side is stuck and forces reconnection by setting
+    // zed_connected = false. The WS read loop's health check detects
+    // this, breaks, and the connection loop accepts a new connection
+    // (Zed auto-reconnects).
     {
-        let zed_manager = zed_manager.clone();
-        let ws_tx = ws_tx.clone();
+        let monitors = monitors.clone();
 
         tokio::spawn(async move {
             tracing::info!("Health monitor started (check every 10s, timeout 15s)");
@@ -282,26 +342,29 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 tokio::time::sleep(check_interval).await;
 
-                let (connected, elapsed) = {
-                    let mgr = zed_manager.read().await;
-                    (mgr.zed_connected, mgr.last_sse_event_time.elapsed())
-                };
+                for (mgr, ws_tx) in &monitors {
+                    let (connected, elapsed) = {
+                        let g = mgr.read().await;
+                        (g.zed_connected, g.last_sse_event_time.elapsed())
+                    };
 
-                if connected && elapsed > timeout {
-                    tracing::warn!(
-                        "Health monitor: no events from Zed for {}s, forcing reconnection",
-                        elapsed.as_secs()
-                    );
-                    // Force reconnection: clear zed_connected and ws_tx.
-                    // The WS read loop's periodic check will break, and
-                    // the connection loop will accept a new connection.
-                    {
-                        let mut mgr = zed_manager.write().await;
-                        mgr.zed_connected = false;
-                    }
-                    {
-                        let mut guard = ws_tx.lock().await;
-                        *guard = None;
+                    if connected && elapsed > timeout {
+                        tracing::warn!(
+                            "Health monitor: no events for {}s, forcing reconnection",
+                            elapsed.as_secs()
+                        );
+                        // Force reconnection: clear zed_connected and the
+                        // shared command channel. The WS read loop's
+                        // periodic check breaks, and the connection loop
+                        // accepts a new connection (Zed auto-reconnects).
+                        {
+                            let mut g = mgr.write().await;
+                            g.zed_connected = false;
+                        }
+                        {
+                            let mut guard = ws_tx.lock().await;
+                            *guard = None;
+                        }
                     }
                 }
             }
@@ -322,14 +385,9 @@ async fn main() -> anyhow::Result<()> {
 
         // Wait for CLI, server, or shutdown signal
         tokio::select! {
-            r = ws_server => {
-                cli.kill().await.ok();
-                zed_child.kill().await.ok();
-                r.unwrap()?
-            },
             r = http_server => {
                 cli.kill().await.ok();
-                zed_child.kill().await.ok();
+                for c in children.iter_mut() { c.kill().await.ok(); }
                 r.unwrap()?
             },
             result = cli.wait() => {
@@ -340,7 +398,7 @@ async fn main() -> anyhow::Result<()> {
             },
             _ = shutdown_rx => {
                 cli.kill().await.ok();
-                zed_child.kill().await.ok();
+                for c in children.iter_mut() { c.kill().await.ok(); }
                 tracing::info!("Shutdown complete");
             },
         }
@@ -348,16 +406,12 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("No CLI found, running server only");
         // Wait for servers or shutdown signal
         tokio::select! {
-            r = ws_server => {
-                zed_child.kill().await.ok();
-                r.unwrap()?
-            },
             r = http_server => {
-                zed_child.kill().await.ok();
+                for c in children.iter_mut() { c.kill().await.ok(); }
                 r.unwrap()?
             },
             _ = shutdown_rx => {
-                zed_child.kill().await.ok();
+                for c in children.iter_mut() { c.kill().await.ok(); }
                 tracing::info!("Shutdown complete");
             },
         }

@@ -129,8 +129,18 @@ impl AgentBackend for ZedBackend {
     }
 
     async fn cancel(&self) -> Result<(), String> {
-        let mgr = self.manager.read().await;
-        mgr.cancel_current_turn()
+        let cmd = serde_json::json!({
+            "type": "cancel_current_turn",
+            "data": {}
+        })
+        .to_string();
+        // Send through the shared channel: it is cleared on disconnect,
+        // so a stale manager-side sender cannot silently drop the cancel.
+        let guard = self.ws_tx.lock().await;
+        match &*guard {
+            Some(tx) => tx.send(cmd).map_err(|e| e.to_string()),
+            None => Err("WebSocket not connected".to_string()),
+        }
     }
 
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession> {

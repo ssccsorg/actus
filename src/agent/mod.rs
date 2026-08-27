@@ -13,6 +13,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+pub mod config;
+
 /// Supported agent platform kinds. Adding a platform means adding a kind
 /// and an `AgentBackend` adapter; the rest of actus is unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -64,6 +64,37 @@ HTTP handlers talk only to the `AgentBackend` trait, so a new platform
 implementing the trait and registering it. `/v1/health` reports per-agent
 status in the `agents` map.
 
+## Configuration
+
+Agents are declared in `~/.actus/config.toml` (or `ACTUS_CONFIG`). When
+the file is absent, a single default `zed` agent is derived from the CLI
+flags and environment (`LLM_API_KEY`, `LLM_PROVIDER`, `LLM_BASE_URL`,
+`LLM_MODEL`).
+
+```toml
+[[agents]]
+name = "zed"             # default agent; routed when no agent is named
+kind = "zed"             # zed | langgraph | native (only zed has an adapter yet)
+provider = "deepseek"
+model = "deepseek-chat"
+base_url = "https://api.deepseek.com/v1"
+api_key = "sk-..."
+bin = "helix/.bin/helix-zed-headless-arm64"
+ws_port = 8080
+
+[[agents]]
+name = "research"
+kind = "zed"
+provider = "anthropic"
+model = "claude-sonnet-4"
+ws_port = 8081
+```
+
+Each agent inherits any omitted field from the defaults. Every `zed`
+agent needs a unique `ws_port`; thread state is persisted per agent under
+`~/.actus/threads/{name}/`. Chat and thread endpoints accept an `agent`
+field to route to a specific agent.
+
 ## Agent Types
 
 | Agent | Role | Protocol |

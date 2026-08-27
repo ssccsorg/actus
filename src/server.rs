@@ -24,31 +24,38 @@ pub use crate::zed::WsCommandTx;
 // ── App State ──────────────────────────────────────────────────────────
 
 pub struct AppState {
-    /// Running agent backends. Handlers talk only to the default agent
-    /// through the `AgentBackend` trait until per-agent routing lands.
+    /// Running agent backends. Handlers route by agent name or fall back
+    /// to the default agent.
     pub agents: AgentRegistry,
-    pub ws_tx: WsCommandTx,
     pub workdir: PathBuf,
 }
 
 impl AppState {
-    pub fn new(agents: AgentRegistry, ws_tx: WsCommandTx, workdir: PathBuf) -> Self {
-        Self {
-            agents,
-            ws_tx,
-            workdir,
-        }
+    pub fn new(agents: AgentRegistry, workdir: PathBuf) -> Self {
+        Self { agents, workdir }
     }
 }
 
 type SharedState = Arc<AppState>;
 
-/// Default agent serving the chat and thread endpoints.
+/// Default agent serving endpoints that do not name an agent.
 async fn default_agent(state: &SharedState) -> Result<Arc<dyn AgentBackend>, StatusCode> {
     state
         .agents
         .default_agent()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Resolve the requested agent, falling back to the default when no name
+/// is given. Unknown names yield 404.
+async fn agent_for(
+    state: &SharedState,
+    name: Option<&str>,
+) -> Result<Arc<dyn AgentBackend>, StatusCode> {
+    match name {
+        Some(n) if !n.is_empty() => state.agents.get(n).ok_or(StatusCode::NOT_FOUND),
+        _ => default_agent(state).await,
+    }
 }
 
 // ── Models ─────────────────────────────────────────────────────────────
@@ -69,6 +76,9 @@ pub struct ChatRequest {
     pub thread_id: Option<String>,
     #[serde(default)]
     pub require_approval: bool,
+    /// Agent name to route to; defaults to the fabric default agent.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -110,8 +120,12 @@ pub struct ThreadDetailResponse {
     pub completed: bool,
     pub turn_completed: u64,
 }
-
 // ── Handlers ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AgentQuery {
+    pub agent: Option<String>,
+}
 
 async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
     let agents = state.agents.statuses().await;
@@ -137,7 +151,7 @@ async fn chat_async(
     State(state): State<SharedState>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, StatusCode> {
-    let agent = default_agent(&state).await?;
+    let agent = agent_for(&state, req.agent.as_deref()).await?;
     let receipt = agent
         .submit(req.thread_id.as_deref(), &req.message)
         .await
@@ -155,7 +169,7 @@ async fn chat_stream(
     State(state): State<SharedState>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    let agent = default_agent(&state).await?;
+    let agent = agent_for(&state, req.agent.as_deref()).await?;
 
     // Submit through the fabric: thread creation, context injection,
     // command send, and the resume wait happen inside the adapter.
@@ -305,9 +319,12 @@ async fn chat_stream(
     Ok(Sse::new(stream))
 }
 
-async fn list_threads(State(state): State<SharedState>) -> Json<ThreadListResponse> {
+async fn list_threads(
+    State(state): State<SharedState>,
+    Query(q): Query<AgentQuery>,
+) -> Json<ThreadListResponse> {
     let mut threads: Vec<ThreadSummary> = Vec::new();
-    if let Ok(agent) = default_agent(&state).await {
+    if let Ok(agent) = agent_for(&state, q.agent.as_deref()).await {
         let sessions = agent.threads().await;
         threads = sessions
             .iter()
@@ -326,8 +343,9 @@ async fn list_threads(State(state): State<SharedState>) -> Json<ThreadListRespon
 async fn get_thread(
     State(state): State<SharedState>,
     Path(thread_id): Path<String>,
+    Query(q): Query<AgentQuery>,
 ) -> Result<Json<ThreadDetailResponse>, StatusCode> {
-    let agent = default_agent(&state).await?;
+    let agent = agent_for(&state, q.agent.as_deref()).await?;
     match agent.thread(&thread_id).await {
         Some(thread) => {
             let messages: Vec<serde_json::Value> = thread
@@ -362,6 +380,8 @@ async fn get_thread(
 
 #[derive(Deserialize)]
 pub struct PollQuery {
+    /// Agent name to route to; defaults to the fabric default agent.
+    agent: Option<String>,
     /// The content length the client already has for the latest assistant message.
     /// New content beyond this length is returned as the delta.
     since: Option<usize>,
@@ -393,7 +413,7 @@ async fn poll_thread(
     axum::extract::Path(thread_id): axum::extract::Path<String>,
     Query(query): Query<PollQuery>,
 ) -> Result<Json<PollResponse>, StatusCode> {
-    let agent = default_agent(&state).await?;
+    let agent = agent_for(&state, query.agent.as_deref()).await?;
     let thread = agent.thread(&thread_id).await.ok_or(StatusCode::NOT_FOUND)?;
 
     let since = query.since.unwrap_or(0);
@@ -551,26 +571,16 @@ async fn git_log(
 
 // ── Cancel endpoint ────────────────────────────────────────────────────
 
-async fn cancel_turn(
-    State(state): State<SharedState>,
-) -> Json<serde_json::Value> {
-    let tx_guard = state.ws_tx.lock().await;
-    match &*tx_guard {
-        Some(tx) => {
-            let cmd = serde_json::json!({
-                "type": "cancel_current_turn",
-                "data": {}
-            });
-            if tx.send(cmd.to_string()).is_ok() {
-                Json(serde_json::json!({"status": "cancelled"}))
-            } else {
-                tracing::error!("Cancel failed: WebSocket channel closed");
-                Json(serde_json::json!({"status": "error", "error": "WebSocket not connected"}))
-            }
-        }
-        None => {
-            Json(serde_json::json!({"status": "error", "error": "WebSocket not connected"}))
-        }
+async fn cancel_turn(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    match default_agent(&state).await {
+        Ok(agent) => match agent.cancel().await {
+            Ok(()) => Json(serde_json::json!({ "status": "cancelled" })),
+            Err(e) => Json(serde_json::json!({ "status": "error", "error": e })),
+        },
+        Err(_) => Json(serde_json::json!({
+            "status": "error",
+            "error": "no agent registered"
+        })),
     }
 }
 
