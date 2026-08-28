@@ -524,6 +524,11 @@ async def send_chat(client: NexClient, message: str):
     if not message:
         return
 
+    # Whether we were already in a thread. A fresh thread (no prior
+    # current_thread_id) prints a header; a resumed thread already showed
+    # its history, so repeating the header is noise.
+    had_thread = bool(current_thread_id)
+
     # Resolve @mentions to file paths
     resolved = await resolve_mentions(client, message)
     if resolved != message:
@@ -557,7 +562,8 @@ async def send_chat(client: NexClient, message: str):
             print(f"{C.RED}Request failed: {e}{C.END}")
             return
 
-    print(f"\n{C.CYAN}Thread: {current_thread_id}{C.END}\n")
+    if not had_thread and current_thread_id:
+        print(f"\n{C.CYAN}Thread: {current_thread_id}{C.END}\n")
 
     # Step 2: Get current thread state to know the starting turn
     known_turn = 0
