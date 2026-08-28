@@ -210,10 +210,17 @@ impl ZedManager {
         self.add_message_full(thread_id, role, content, message_id, None, None, None)
     }
 
-    /// Append a message to a thread, replacing the last message when the
-    /// id matches (streaming updates in place). The metadata trio mirrors
-    /// the fields of the wire `message_added` event, so the signature is
-    /// intentionally wide.
+    /// Append a message to a thread, replacing an existing message with the
+    /// same id when present (streaming updates in place). The metadata trio
+    /// mirrors the fields of the wire `message_added` event, so the
+    /// signature is intentionally wide.
+    ///
+    /// Matching is by id anywhere in the thread, not just the last message:
+    /// Zed emits updates for several interleaved messages in one turn
+    /// (thinking, tool call, then the answer), so the same id reappears
+    /// non-consecutively. Comparing only against the tail used to append a
+    /// duplicate every time, swelling a single turn into dozens of
+    /// messages and breaking poll/SSE turn indexing.
     #[allow(clippy::too_many_arguments)]
     pub fn add_message_full(
         &mut self,
@@ -227,13 +234,18 @@ impl ZedManager {
     ) {
         if let Some(thread) = self.threads.get_mut(thread_id) {
             if let Some(ref mid) = message_id {
-                if let Some(last) = thread.messages.last_mut() {
-                    if last.message_id.as_deref() == Some(mid) {
-                        last.content = content.to_string();
-                        self.notify_thread_change();
-                        self.save_threads();
-                        return;
-                    }
+                if let Some(existing) = thread
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.message_id.as_deref() == Some(mid))
+                {
+                    existing.content = content.to_string();
+                    existing.entry_type = entry_type;
+                    existing.tool_name = tool_name;
+                    existing.tool_status = tool_status;
+                    self.notify_thread_change();
+                    self.save_threads();
+                    return;
                 }
             }
 
@@ -322,6 +334,31 @@ impl ZedManager {
                                 thread.title = Some(truncated);
                             }
                         }
+                    }
+                    // Repair a historical bug where streaming updates to the
+                    // same message id were appended instead of replaced
+                    // (Zed emits thinking, tool call, and answer messages
+                    // with interleaved ids), swelling a turn into dozens of
+                    // duplicate entries. Keep the last occurrence of each id
+                    // and drop the earlier duplicates; user messages and
+                    // id-less entries are kept as-is.
+                    for thread in threads.values_mut() {
+                        let mut seen: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        let mut kept: Vec<ThreadMessage> = Vec::with_capacity(thread.messages.len());
+                        for m in std::mem::take(&mut thread.messages) {
+                            match &m.message_id {
+                                Some(id) if !seen.insert(id.clone()) => {
+                                    tracing::warn!(
+                                        "Dropping duplicate message id {} in thread {}",
+                                        id,
+                                        thread.id
+                                    );
+                                }
+                                _ => kept.push(m),
+                            }
+                        }
+                        thread.messages = kept;
                     }
                     // Repair a historical index drift: an errored or
                     // cancelled turn used to bump turn_completed without

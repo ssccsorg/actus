@@ -288,7 +288,17 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("assistant")
                 .to_string();
-            let msg_id = data.get("message_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            // Message ids are only unique within one ACP thread: Zed starts
+            // numbering from 1 again for each new thread, and a local actus
+            // thread accumulates messages from several ACP threads over
+            // its lifetime (each resume creates a fresh ACP thread). Scope
+            // the id with the acp_thread_id so in-place streaming updates
+            // never collide with a previous thread's message of the same
+            // id.
+            let msg_id = data
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("{}:{}", acp_id, s));
             let entry_type = data.get("entry_type").and_then(|v| v.as_str()).map(|s| s.to_string());
             let tool_name = data.get("tool_name").and_then(|v| v.as_str()).map(|s| s.to_string());
             let tool_status = data.get("tool_status").and_then(|v| v.as_str()).map(|s| s.to_string());

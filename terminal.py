@@ -548,8 +548,12 @@ async def send_chat(client: NexClient, message: str):
     # would wait for a turn that never comes (or read past the message
     # array). Capturing pre-submit keeps known_turn one behind the turn we
     # are about to start, so `completed = turn_completed > known_turn`
-    # fires exactly when this turn ends.
+    # fires exactly when this turn ends. The last assistant message is
+    # seeded into `shown` so a resumed thread never re-prints the previous
+    # turn's content.
     known_turn = 0
+    shown = ""
+    current_msg_id = None
     if current_thread_id:
         async with aiohttp.ClientSession() as session:
             try:
@@ -560,6 +564,11 @@ async def send_chat(client: NexClient, message: str):
                     if resp.status == 200:
                         data = await resp.json()
                         known_turn = data.get("turn_completed", 0)
+                        for m in reversed(data.get("messages", [])):
+                            if m.get("role") == "assistant":
+                                shown = m.get("content", "")
+                                current_msg_id = m.get("message_id")
+                                break
             except Exception:
                 pass
 
@@ -587,10 +596,10 @@ async def send_chat(client: NexClient, message: str):
         print(f"\n{C.CYAN}Thread: {current_thread_id}{C.END}\n")
 
     content_len = 0
-    shown = ""  # full content of the current turn's message already displayed
     poll_interval = 0.3
     max_wait = 120.0  # 2 minutes max
     waited = 0.0
+    shown_prev = False
     seen_approvals = set()
     last_approval_check = 0.0
 
@@ -611,8 +620,26 @@ async def send_chat(client: NexClient, message: str):
                     new_content = data.get("new_content")
                     content_len = data.get("content_len", content_len)
                     completed = data.get("completed", False)
+                    msg_id = data.get("message_id")
+                    entry_type = data.get("entry_type")
+                    tool_name = data.get("tool_name")
+                    tool_status = data.get("tool_status")
 
                     if new_content:
+                        # A new message id means the model moved on to the
+                        # next message in the turn: a tool call, a new
+                        # thinking block, or the final answer. Reset the
+                        # diff base so the new message prints in full.
+                        if msg_id != current_msg_id:
+                            current_msg_id = msg_id
+                            shown = ""
+                            if entry_type == "tool_call":
+                                print(f"\n{C.YELLOW}🔧 {tool_name or 'tool call'} [{tool_status or 'running'}]{C.END}", end="", flush=True)
+                            elif new_content.lstrip().startswith("<thinking>"):
+                                print(f"\n{C.DIM}💭 thinking{C.END}\n", end="", flush=True)
+                            elif shown_prev:
+                                print()
+
                         # The server serves the full message content; diff
                         # locally so model edits replace instead of
                         # appending invalid slices.
@@ -629,6 +656,9 @@ async def send_chat(client: NexClient, message: str):
                             shown = new_content
                             print(f"\n{C.DIM}[revised]{C.END}\n", end="", flush=True)
                             print(shown, end="", flush=True)
+                        shown_prev = True
+                    else:
+                        shown_prev = False
 
                     if completed:
                         print(f"\n{C.GREEN}✓ Complete{C.END}")

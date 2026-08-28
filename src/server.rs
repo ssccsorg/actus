@@ -208,16 +208,19 @@ async fn chat_stream(
                 "thread_id": tid.clone(),
             })).unwrap()));
 
-        // The current turn's assistant message (index turn_id) is the only
-        // source of deltas; previous turns' content is never re-emitted.
+        // The most recent assistant message is the only source of deltas.
+        // A turn emits several messages (thinking, tool calls, answer), so
+        // index-by-turn lookup is not possible; seeding last_content from
+        // the latest message means a resumed thread never re-emits old
+        // content.
         let mut last_content = agent_stream
             .thread(&tid)
             .await
             .map(|t| {
                 t.messages
                     .iter()
-                    .filter(|m| m.role == "assistant")
-                    .nth(turn_id as usize)
+                    .rev()
+                    .find(|m| m.role == "assistant")
                     .map(|m| m.content.clone())
                     .unwrap_or_default()
             })
@@ -261,12 +264,12 @@ async fn chat_stream(
                     );
                 }
 
-                // Find the current turn's assistant message (with tool metadata).
+                // Find the most recent assistant message (with tool metadata).
                 let last_msg = thread
                     .messages
                     .iter()
-                    .filter(|m| m.role == "assistant")
-                    .nth(turn_id as usize);
+                    .rev()
+                    .find(|m| m.role == "assistant");
                 let assistant_content = last_msg.map(|m| m.content.as_str()).unwrap_or("");
                 let entry_type = last_msg.and_then(|m| m.entry_type.as_deref());
                 let tool_name = last_msg.and_then(|m| m.tool_name.as_deref());
@@ -416,13 +419,21 @@ pub struct PollQuery {
 
 #[derive(Serialize)]
 pub struct PollResponse {
-    /// Full content of the current turn's assistant message. Clients diff
+    /// Full content of the most recent assistant message. Clients diff
     /// against what they have already displayed.
     pub new_content: Option<String>,
     /// Whether the thread's current turn is complete.
     pub completed: bool,
     /// Total content length of the current assistant message.
     pub content_len: usize,
+    /// Identity of the served message, so clients can detect that a new
+    /// message (thinking, tool call, answer) replaced the previous one.
+    pub message_id: Option<String>,
+    /// Metadata for rendering: entry_type (text/tool_call), tool_name,
+    /// tool_status. Lets the CLI show the agent's tool activity.
+    pub entry_type: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_status: Option<String>,
 }
 
 /// Poll for new thread state.
@@ -431,16 +442,14 @@ pub struct PollResponse {
 /// or when WebSocket events from Zed are unreliable. The client calls this
 /// endpoint at regular intervals (e.g., every 500ms).
 ///
-/// The response serves the full content of the current turn's assistant
-/// message. Each completed turn produces exactly one assistant message, and
-/// errored/cancelled turns now record a `[error]`/`[cancelled]` message, so
-/// `assistant_messages[turn]` stays aligned with `turn_completed`; persisted
-/// threads whose counter drifted past the message count are repaired on
-/// load. Clients diff the content locally against what they have already
-/// displayed; this stays correct when the model edits its message
-/// mid-stream, because a replaced message is served in full instead of as
-/// an invalid slice. The `since` parameter is accepted for backward
-/// compatibility and ignored.
+/// The response serves the full content of the most recent assistant
+/// message. A single turn emits several assistant messages in order
+/// (thinking, tool calls, then the answer), so indexing by turn number is
+/// not possible; instead the client diffs each served message against what
+/// it has already displayed and uses message_id to detect a brand-new
+/// message. Persisted threads whose turn counter drifted past the message
+/// count are repaired on load. The `since` parameter is accepted for
+/// backward compatibility and ignored.
 async fn poll_thread(
     State(state): State<SharedState>,
     axum::extract::Path(thread_id): axum::extract::Path<String>,
@@ -451,13 +460,16 @@ async fn poll_thread(
 
     let known_turn = query.turn.unwrap_or(0);
 
-    // The current turn's assistant message, if the response has started.
-    let assistants: Vec<_> = thread
+    // The most recent assistant message. Pre-fix code addressed messages by
+    // turn index (`assistants[known_turn]`), which broke as soon as one
+    // turn produced several assistant messages (thinking, tool calls,
+    // answer): the index landed on an arbitrary message from an earlier
+    // turn, so the client saw stale content and never the actual answer.
+    let current = thread
         .messages
         .iter()
-        .filter(|m| m.role == "assistant")
-        .collect();
-    let current = assistants.get(known_turn as usize);
+        .rev()
+        .find(|m| m.role == "assistant");
 
     let completed = thread.turn_completed > known_turn;
     match current {
@@ -465,11 +477,19 @@ async fn poll_thread(
             new_content: Some(msg.content.clone()),
             completed,
             content_len: msg.content.len(),
+            message_id: msg.message_id.clone(),
+            entry_type: msg.entry_type.clone(),
+            tool_name: msg.tool_name.clone(),
+            tool_status: msg.tool_status.clone(),
         })),
         None => Ok(Json(PollResponse {
             new_content: None,
             completed,
             content_len: 0,
+            message_id: None,
+            entry_type: None,
+            tool_name: None,
+            tool_status: None,
         })),
     }
 }

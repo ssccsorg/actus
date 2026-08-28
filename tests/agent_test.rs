@@ -284,6 +284,152 @@ fn load_threads_repairs_turn_counter_drift() {
     assert_eq!(repaired.turn_completed, 2, "tool_call entries must be excluded");
 }
 
+/// Streaming updates to the same message id must replace the existing
+/// message in place, wherever it sits in the thread. Zed emits updates for
+/// interleaved messages (thinking, tool call, answer), so the same id
+/// reappears non-consecutively; appending a duplicate each time swells a
+/// turn into dozens of messages and breaks poll/SSE.
+#[test]
+fn add_message_full_replaces_by_id_anywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mgr = zed_manager(dir.path());
+    let tid = mgr.get_or_create_thread(None);
+
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "thinking v1",
+        Some("acp:1".to_string()),
+        Some("text".to_string()),
+        None,
+        None,
+    );
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "tool pending",
+        Some("acp:2".to_string()),
+        Some("tool_call".to_string()),
+        Some("list".to_string()),
+        Some("Pending".to_string()),
+    );
+    // Re-emission of the earlier id must update in place, not append.
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "thinking v2",
+        Some("acp:1".to_string()),
+        Some("text".to_string()),
+        None,
+        None,
+    );
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "tool done",
+        Some("acp:2".to_string()),
+        Some("tool_call".to_string()),
+        Some("list".to_string()),
+        Some("Completed".to_string()),
+    );
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "answer",
+        Some("acp:3".to_string()),
+        Some("text".to_string()),
+        None,
+        None,
+    );
+
+    let msgs = &mgr.threads.get(&tid).unwrap().messages;
+    assert_eq!(msgs.len(), 3, "updates must replace, not append");
+    assert_eq!(msgs[0].content, "thinking v2");
+    assert_eq!(msgs[0].message_id.as_deref(), Some("acp:1"));
+    assert_eq!(msgs[1].content, "tool done");
+    assert_eq!(msgs[1].tool_status.as_deref(), Some("Completed"));
+    assert_eq!(msgs[2].content, "answer");
+}
+
+/// Two different ACP threads can both number their messages from 1; the
+/// scoped id (`acp_thread_id:message_id`) must keep them distinct so a
+/// later thread's message never overwrites an earlier thread's message of
+/// the same numeric id.
+#[test]
+fn scoped_message_ids_do_not_collide_across_acp_threads() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mgr = zed_manager(dir.path());
+    let tid = mgr.get_or_create_thread(None);
+
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "first thread answer",
+        Some("acp-thread-a:1".to_string()),
+        Some("text".to_string()),
+        None,
+        None,
+    );
+    // A new ACP thread reuses the numeric id 1; the scoped ids differ.
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "second thread answer",
+        Some("acp-thread-b:1".to_string()),
+        Some("text".to_string()),
+        None,
+        None,
+    );
+
+    let msgs = &mgr.threads.get(&tid).unwrap().messages;
+    assert_eq!(msgs.len(), 2, "same numeric id from different ACP threads must coexist");
+    assert_eq!(msgs[0].content, "first thread answer");
+    assert_eq!(msgs[1].content, "second thread answer");
+}
+
+/// A streaming update to a message from the current ACP thread must match
+/// only that thread's message, never a same-numeric-id message from an
+/// earlier thread.
+#[test]
+fn scoped_id_update_targets_only_its_acp_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mgr = zed_manager(dir.path());
+    let tid = mgr.get_or_create_thread(None);
+
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "old thread thinking",
+        Some("acp-old:1".to_string()),
+        Some("text".to_string()),
+        None,
+        None,
+    );
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "new thread thinking v1",
+        Some("acp-new:1".to_string()),
+        Some("text".to_string()),
+        None,
+        None,
+    );
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "new thread thinking v2",
+        Some("acp-new:1".to_string()),
+        Some("text".to_string()),
+        None,
+        None,
+    );
+
+    let msgs = &mgr.threads.get(&tid).unwrap().messages;
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0].content, "old thread thinking");
+    assert_eq!(msgs[1].content, "new thread thinking v2");
+}
+
 #[tokio::test]
 async fn threads_empty_when_no_state() {
     let backend = zed_backend();
