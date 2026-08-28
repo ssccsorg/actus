@@ -173,6 +173,12 @@ impl AgentBackend for ZedBackend {
             .collect()
     }
 
+    async fn create_thread(&self) -> Result<String, String> {
+        let mut mgr = self.manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        Ok(tid)
+    }
+
     async fn resolve_tool_call(
         &self,
         platform_thread_id: &str,

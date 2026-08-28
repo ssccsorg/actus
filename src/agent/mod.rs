@@ -147,6 +147,9 @@ pub trait AgentBackend: Send + Sync {
         tool_call_id: &str,
         allow: bool,
     ) -> Result<(), String>;
+
+    /// Create a fresh thread immediately (without sending a message).
+    async fn create_thread(&self) -> Result<String, String>;
 }
 
 /// Registry of running agent backends. The default agent serves the

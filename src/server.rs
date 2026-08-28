@@ -328,6 +328,20 @@ async fn chat_stream(
     Ok(Sse::new(stream))
 }
 
+/// POST /v1/threads — create a fresh thread immediately (no message).
+async fn create_thread_handler(
+    State(state): State<SharedState>,
+    Query(q): Query<AgentQuery>,
+) -> Json<serde_json::Value> {
+    match agent_for(&state, q.agent.as_deref()).await {
+        Ok(agent) => match agent.create_thread().await {
+            Ok(tid) => Json(serde_json::json!({"status": "created", "thread_id": tid})),
+            Err(e) => Json(serde_json::json!({"status": "error", "error": e})),
+        },
+        Err(_) => Json(serde_json::json!({"status": "error", "error": "agent not found"})),
+    }
+}
+
 async fn list_threads(
     State(state): State<SharedState>,
     Query(q): Query<AgentQuery>,
@@ -728,6 +742,7 @@ pub async fn run_http_server(addr: &str, state: SharedState) -> anyhow::Result<(
         .route("/v1/agents/tool-calls/pending", get(pending_tool_calls_handler))
         .route("/v1/agents/tool-calls/resolve", post(resolve_tool_call_handler))
         .route("/v1/threads", get(list_threads))
+        .route("/v1/threads", post(create_thread_handler))
         .route("/v1/threads/{thread_id}", get(get_thread))
         .route("/v1/threads/{thread_id}/poll", get(poll_thread))
         .route("/v1/files", get(search_files_handler))

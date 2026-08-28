@@ -43,7 +43,6 @@ import aiohttp
 
 # ── Globals ──────────────────────────────────────────────────────────────
 
-_shutdown = False
 current_thread_id = None
 show_raw = False
 
@@ -192,6 +191,18 @@ class NexClient:
         except Exception:
             return None
 
+    async def create_thread(self) -> str | None:
+        """Create a fresh thread immediately (no message)."""
+        try:
+            r = await self.client.post("/v1/threads")
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict):
+                return data.get("thread_id")
+            return None
+        except Exception:
+            return None
+
 
 # ── Message display ──────────────────────────────────────────────────────
 
@@ -217,8 +228,8 @@ def print_banner(h: dict):
 # ── Thread selection ─────────────────────────────────────────────────────
 
 async def select_thread_prompt(client: NexClient, threads: list[dict]) -> str | None:
-    """Let user select a thread from the list, or None for new thread."""
-    loop = asyncio.get_event_loop()
+    """Let user select a thread from the list, or None for new thread.
+    Returns "quit" to exit the program."""
 
     # Filter out ACP-internal threads (no user messages = no title)
     user_threads = [t for t in threads if t.get("title")]
@@ -238,10 +249,13 @@ async def select_thread_prompt(client: NexClient, threads: list[dict]) -> str | 
 
     default = 1 if len(user_threads) == 1 else 0
     print("  [0] New thread")
+    print("  [q] Quit")
 
     prompt = f"Select thread [{default}]: "
-    result = await loop.run_in_executor(None, lambda: input(prompt))
-    result = result.strip()
+    result = (await _readline(prompt) or "").strip().lower()
+
+    if result == "q":
+        return "quit"
 
     if not result:
         choice = default
@@ -267,6 +281,44 @@ async def select_thread_prompt(client: NexClient, threads: list[dict]) -> str | 
 # the next line into the active prompt's queue.
 _prompt_q: "asyncio.Queue[str] | None" = None
 _chat_queue: "asyncio.Queue[str] | None" = None
+_stdin_reader: "asyncio.StreamReader | None" = None
+
+
+async def _make_reader() -> "asyncio.StreamReader | None":
+    """Set up a single StreamReader over stdin for the whole session."""
+    global _stdin_reader
+    if not sys.stdin.isatty() or not sys.__stdin__ or not sys.__stdin__.isatty():
+        return None
+    loop = asyncio.get_event_loop()
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    try:
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    except (OSError, AttributeError):
+        return None
+    _stdin_reader = reader
+    return reader
+
+
+async def _readline(prompt: str = "") -> str | None:
+    """Print the prompt and read one line from the shared stdin reader.
+    Lines are routed to an active prompt queue (mention picker, tool
+    approval). Returns None on EOF."""
+    if _stdin_reader is None:
+        return None
+    if prompt:
+        print(prompt, end="", flush=True)
+    while True:
+        line = await _stdin_reader.readline()
+        if not line:
+            return None
+        text = line.decode().strip()
+        if not text:
+            continue
+        if _prompt_q is not None:
+            await _prompt_q.put(text)
+            continue
+        return text
 
 
 async def _ask(prompt: str) -> str:
@@ -598,49 +650,33 @@ async def send_chat(client: NexClient, message: str):
 
 # ── Stdin reader ─────────────────────────────────────────────────────────
 
-async def read_stdin(client: NexClient):
-    """Read user input from stdin and handle commands."""
-    global _shutdown, current_thread_id, show_raw, _chat_queue
+async def chat_session(client: NexClient) -> str | None:
+    """Interactive chat loop for the current thread.
 
-    if not sys.stdin.isatty() or not sys.__stdin__ or not sys.__stdin__.isatty():
-        return
+    Returns "quit" to exit the program, "exit" to return to the thread
+    selection screen, or None."""
+    global current_thread_id, show_raw, _chat_queue
 
-    loop = asyncio.get_event_loop()
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
+    while True:
+        text = await _readline()
+        if text is None:
+            return None
 
-    try:
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-    except (OSError, AttributeError):
-        return
+        if text == "/exit":
+            print("Returning to thread selection.")
+            return "exit"
 
-    while not _shutdown:
-        try:
-            line = await reader.readline()
-        except Exception:
-            break
-        if not line:
-            await asyncio.sleep(0.1)
-            continue
-
-        text = line.decode().strip()
-        if not text:
-            continue
-
-        # Route input to an active interactive prompt (mention picker,
-        # tool approval) so it cannot deadlock while a chat is running.
-        if _prompt_q is not None:
-            await _prompt_q.put(text)
-            continue
-
-        if text in ("/exit", "/quit"):
+        if text == "/quit":
             print("Exiting.")
-            _shutdown = True
-            return
+            return "quit"
 
         elif text == "/new":
-            current_thread_id = None
-            print(f"{C.CYAN}New thread mode (next message creates a fresh thread){C.END}")
+            tid = await client.create_thread()
+            if tid:
+                current_thread_id = tid
+                print(f"{C.CYAN}New thread created: {current_thread_id}{C.END}")
+            else:
+                print(f"{C.YELLOW}Could not create a new thread.{C.END}")
 
         elif text == "/thread":
             if current_thread_id:
@@ -767,8 +803,9 @@ async def read_stdin(client: NexClient):
 
         elif text == "/help":
             print(f"{C.BOLD}Commands:{C.END}")
-            print("  /exit, /quit   - exit")
-            print("  /new           - start a new thread")
+            print("  /exit          - back to thread selection")
+            print("  /quit          - exit the program")
+            print("  /new           - create a new thread immediately")
             print("  /thread        - show current thread ID")
             print("  /switch <id>   - switch to a different thread")
             print("  /raw           - toggle raw JSON display")
@@ -825,18 +862,24 @@ def main():
             print(f"  {C.DIM}Workdir:{C.END} {workdir}")
             print()
             if h.get("zed_connected") and h.get("agent_ready"):
-                print(f"{C.BOLD}Enter a message. /exit to quit.{C.END}")
+                print(f"{C.BOLD}Enter a message. /exit returns to thread selection.{C.END}")
                 print(f"{C.DIM}Example: \"What's in this directory?\"{C.END}")
 
-            # Thread selection on startup
-            threads = await client.list_threads()
-            if threads:
-                selected = await select_thread_prompt(client, threads)
-                if selected:
-                    current_thread_id = selected
+            _chat_queue = asyncio.Queue()
+            asyncio.create_task(_chat_worker(client))
+            await _make_reader()
+
+            # Session loop: thread selection → chat → back to selection.
+            while True:
+                current_thread_id = None
+                threads = await client.list_threads()
+                choice = await select_thread_prompt(client, threads or [])
+                if choice == "quit":
+                    break
+                if choice:
+                    current_thread_id = choice
                     print(f"{C.CYAN}Resumed thread: {current_thread_id}{C.END}")
-                    # Display existing messages in the selected thread
-                    thread_data = await client.get_thread(selected)
+                    thread_data = await client.get_thread(choice)
                     if thread_data:
                         msgs = thread_data.get("messages", [])
                         for msg in msgs:
@@ -854,14 +897,19 @@ def main():
                                 else:
                                     print(f"{C.GREEN}Agent:{C.END} {content}")
                         print()
+                else:
+                    # New thread: create it immediately.
+                    tid = await client.create_thread()
+                    if tid:
+                        current_thread_id = tid
+                        print(f"{C.CYAN}New thread created: {current_thread_id}{C.END}")
+                    else:
+                        print(f"{C.YELLOW}Could not create a new thread.{C.END}")
 
-            _chat_queue = asyncio.Queue()
-            asyncio.create_task(_chat_worker(client))
-            asyncio.create_task(read_stdin(client))
-
-            # Wait until shutdown
-            while not _shutdown:
-                await asyncio.sleep(1)
+                action = await chat_session(client)
+                if action == "quit":
+                    break
+                print(f"\n{C.DIM}Returning to thread selection.{C.END}\n")
 
         await client.close()
 
