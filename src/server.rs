@@ -432,12 +432,15 @@ pub struct PollResponse {
 /// endpoint at regular intervals (e.g., every 500ms).
 ///
 /// The response serves the full content of the current turn's assistant
-/// message (each completed turn produces exactly one assistant message, so
-/// the message served is `assistant_messages[turn]`). Clients diff the
-/// content locally against what they have already displayed; this stays
-/// correct when the model edits its message mid-stream, because a replaced
-/// message is served in full instead of as an invalid slice. The `since`
-/// parameter is accepted for backward compatibility and ignored.
+/// message. Each completed turn produces exactly one assistant message, and
+/// errored/cancelled turns now record a `[error]`/`[cancelled]` message, so
+/// `assistant_messages[turn]` stays aligned with `turn_completed`; persisted
+/// threads whose counter drifted past the message count are repaired on
+/// load. Clients diff the content locally against what they have already
+/// displayed; this stays correct when the model edits its message
+/// mid-stream, because a replaced message is served in full instead of as
+/// an invalid slice. The `since` parameter is accepted for backward
+/// compatibility and ignored.
 async fn poll_thread(
     State(state): State<SharedState>,
     axum::extract::Path(thread_id): axum::extract::Path<String>,

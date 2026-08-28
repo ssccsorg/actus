@@ -194,6 +194,96 @@ fn prepare_message_clears_stale_acp_mapping() {
     assert_eq!(msg2, "again2");
 }
 
+/// Persisted threads whose turn_completed drifted past the assistant
+/// message count (an errored or cancelled turn bumped the counter without
+/// adding a message) must be repaired on load, or poll/SSE index past the
+/// end of the message array and the client sees `completed: true` with no
+/// content.
+#[test]
+fn load_threads_repairs_turn_counter_drift() {
+    use actus::agent::ThreadMessage;
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let threads_file = dir.path().join("threads.json");
+
+    // Two completed turns (two assistant messages) but a drifted counter.
+    let thread = actus::agent::ThreadSession {
+        id: "t1".to_string(),
+        title: Some("drift".to_string()),
+        messages: vec![
+            ThreadMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                message_id: None,
+                entry_type: None,
+                tool_name: None,
+                tool_status: None,
+                timestamp: chrono::Utc::now(),
+            },
+            ThreadMessage {
+                role: "assistant".to_string(),
+                content: "hello".to_string(),
+                message_id: None,
+                entry_type: Some("text".to_string()),
+                tool_name: None,
+                tool_status: None,
+                timestamp: chrono::Utc::now(),
+            },
+            ThreadMessage {
+                role: "user".to_string(),
+                content: "again".to_string(),
+                message_id: None,
+                entry_type: None,
+                tool_name: None,
+                tool_status: None,
+                timestamp: chrono::Utc::now(),
+            },
+            ThreadMessage {
+                role: "assistant".to_string(),
+                content: "again hello".to_string(),
+                message_id: None,
+                entry_type: Some("text".to_string()),
+                tool_name: None,
+                tool_status: None,
+                timestamp: chrono::Utc::now(),
+            },
+        ],
+        created_at: chrono::Utc::now(),
+        completed: true,
+        acp_thread_id: None,
+        turn_completed: 4, // drifted: only 2 assistant messages exist
+    };
+    let mut map = std::collections::HashMap::new();
+    map.insert("t1".to_string(), thread);
+    let mut f = std::fs::File::create(&threads_file).unwrap();
+    f.write_all(serde_json::to_string_pretty(&map).unwrap().as_bytes())
+        .unwrap();
+
+    let loaded = ZedManager::load_threads(&threads_file);
+    let repaired = loaded.get("t1").expect("thread loaded");
+    assert_eq!(repaired.turn_completed, 2, "counter must be repaired to message count");
+
+    // Tool-call assistant messages must not count toward the turn counter.
+    let mut map2 = map.clone();
+    let thread = map2.get_mut("t1").unwrap();
+    thread.messages.push(ThreadMessage {
+        role: "assistant".to_string(),
+        content: "".to_string(),
+        message_id: None,
+        entry_type: Some("tool_call".to_string()),
+        tool_name: Some("search".to_string()),
+        tool_status: None,
+        timestamp: chrono::Utc::now(),
+    });
+    let mut f = std::fs::File::create(&threads_file).unwrap();
+    f.write_all(serde_json::to_string_pretty(&map2).unwrap().as_bytes())
+        .unwrap();
+    let loaded = ZedManager::load_threads(&threads_file);
+    let repaired = loaded.get("t1").unwrap();
+    assert_eq!(repaired.turn_completed, 2, "tool_call entries must be excluded");
+}
+
 #[tokio::test]
 async fn threads_empty_when_no_state() {
     let backend = zed_backend();

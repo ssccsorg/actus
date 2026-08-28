@@ -364,15 +364,26 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
             let mut mgr = zed_manager.write().await;
             // The turn ended in an error: drop the pending entry so the
             // health monitor does not treat this turn as active forever,
-            // and release consumers waiting on this turn. Without the
-            // turn_completed bump, SSE and poll clients hang until the
-            // 120s timeout even though the turn is over.
+            // and release consumers waiting on this turn. The turn still
+            // records an assistant message so the poll/SSE index
+            // (`assistant_messages[turn_completed]`) stays aligned: a
+            // turn that bumps turn_completed without adding a message
+            // makes the next poll read past the end of the array.
             let local_id = mgr.pending_requests.get(&request_id).cloned();
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
                 mgr.pending_requests.remove(&request_id);
             }
             if let Some(local_id) = local_id {
+                mgr.add_message_full(
+                    &local_id,
+                    "assistant",
+                    &format!("[error] {}", error),
+                    None,
+                    Some("error".to_string()),
+                    None,
+                    None,
+                );
                 if let Some(thread) = mgr.threads.get_mut(&local_id) {
                     thread.completed = true;
                     thread.turn_completed = thread.turn_completed.wrapping_add(1);
@@ -392,13 +403,24 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
             // A cancelled turn never fires message_completed; drop the
             // pending entry so reconnection does not resend it and the
             // health monitor does not stall on it, and release consumers
-            // waiting on this turn the same way an error does.
+            // waiting on this turn the same way an error does. Record a
+            // cancellation message so the assistant-message index stays
+            // aligned with turn_completed.
             let local_id = mgr.pending_requests.get(&request_id).cloned();
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
                 mgr.pending_requests.remove(&request_id);
             }
             if let Some(local_id) = local_id {
+                mgr.add_message_full(
+                    &local_id,
+                    "assistant",
+                    &format!("[cancelled] {}", status),
+                    None,
+                    Some("cancelled".to_string()),
+                    None,
+                    None,
+                );
                 if let Some(thread) = mgr.threads.get_mut(&local_id) {
                     thread.completed = true;
                     thread.turn_completed = thread.turn_completed.wrapping_add(1);

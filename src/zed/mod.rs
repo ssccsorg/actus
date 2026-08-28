@@ -323,6 +323,32 @@ impl ZedManager {
                             }
                         }
                     }
+                    // Repair a historical index drift: an errored or
+                    // cancelled turn used to bump turn_completed without
+                    // adding an assistant message, so persisted threads
+                    // can have turn_completed > assistant-message count.
+                    // Poll and SSE address assistant messages by turn
+                    // index, so the counter must not point past them.
+                    for thread in threads.values_mut() {
+                        let text_assistants = thread
+                            .messages
+                            .iter()
+                            .filter(|m| {
+                                m.role == "assistant"
+                                    && m.entry_type.as_deref() != Some("tool_call")
+                            })
+                            .count();
+                        if thread.turn_completed > text_assistants as u64 {
+                            tracing::warn!(
+                                "Repairing turn_completed {} -> {} ({} assistant msgs) for thread {}",
+                                thread.turn_completed,
+                                text_assistants,
+                                text_assistants,
+                                thread.id
+                            );
+                            thread.turn_completed = text_assistants as u64;
+                        }
+                    }
                     tracing::info!("Loaded {} threads from {}", threads.len(), path.display());
                     threads
                 }

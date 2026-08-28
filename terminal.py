@@ -542,7 +542,28 @@ async def send_chat(client: NexClient, message: str):
     if show_raw:
         print(f"\n{C.DIM}[ASYNC REQ] {json.dumps(body)}{C.END}")
 
-    # Step 1: Send message via async endpoint
+    # Step 1: Capture the starting turn BEFORE submitting. Reading it
+    # after the async submit races with a fast completion: if the turn
+    # already finished, turn_completed is the new value and the poll below
+    # would wait for a turn that never comes (or read past the message
+    # array). Capturing pre-submit keeps known_turn one behind the turn we
+    # are about to start, so `completed = turn_completed > known_turn`
+    # fires exactly when this turn ends.
+    known_turn = 0
+    if current_thread_id:
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(
+                    f"{client.base_url}/v1/threads/{current_thread_id}",
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        known_turn = data.get("turn_completed", 0)
+            except Exception:
+                pass
+
+    # Step 2: Send message via async endpoint
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(
@@ -564,20 +585,6 @@ async def send_chat(client: NexClient, message: str):
 
     if not had_thread and current_thread_id:
         print(f"\n{C.CYAN}Thread: {current_thread_id}{C.END}\n")
-
-    # Step 2: Get current thread state to know the starting turn
-    known_turn = 0
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(
-                f"{client.base_url}/v1/threads/{current_thread_id}",
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    known_turn = data.get("turn_completed", 0)
-        except Exception:
-            pass
 
     content_len = 0
     shown = ""  # full content of the current turn's message already displayed
