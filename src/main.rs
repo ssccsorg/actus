@@ -73,10 +73,28 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // Environment values from a `.env` file may carry surrounding quotes
+    // (`LLM_MODEL="deepseek-v4-flash"`). Strip them defensively here so a
+    // quoted value never leaks into Zed's settings.json or credentials,
+    // where a `"deepseek-v4-flash"` model name or quoted key fails the
+    // lookup and aborts every turn.
+    let unquote = |s: &str| -> String {
+        let t = s.trim();
+        if t.len() >= 2
+            && ((t.starts_with('"') && t.ends_with('"'))
+                || (t.starts_with('\'') && t.ends_with('\'')))
+        {
+            t[1..t.len() - 1].to_string()
+        } else {
+            t.to_string()
+        }
+    };
+
     // Resolve API key
     let api_key = args
         .api_key
         .or_else(|| std::env::var("LLM_API_KEY").ok())
+        .map(|k| unquote(&k))
         .ok_or_else(|| anyhow::anyhow!("API key required: set LLM_API_KEY or --api-key"))?;
 
     // Resolve binary path
@@ -106,10 +124,13 @@ async fn main() -> anyhow::Result<()> {
     let workdir = std::fs::canonicalize(&args.workdir)?;
 
     // Read model/provider config from args or env
-    let provider = std::env::var("LLM_PROVIDER").unwrap_or(args.provider);
-    let base_url = std::env::var("LLM_BASE_URL").unwrap_or(args.base_url);
-    let model_name = std::env::var("LLM_MODEL").unwrap_or_else(|_| format!("{}-chat", provider));
-    let model_display = std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone());
+    let provider = unquote(&std::env::var("LLM_PROVIDER").unwrap_or(args.provider));
+    let base_url = unquote(&std::env::var("LLM_BASE_URL").unwrap_or(args.base_url));
+    let model_name =
+        unquote(&std::env::var("LLM_MODEL").unwrap_or_else(|_| format!("{}-chat", provider)));
+    let model_display = unquote(
+        &std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone()),
+    );
 
     // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
     // Missing file (or no override) means a single default zed agent.

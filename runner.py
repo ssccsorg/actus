@@ -113,7 +113,19 @@ def main():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip())
+                key = k.strip()
+                value = v.strip()
+                # Strip surrounding quotes so `KEY="value"` yields `value`,
+                # not `"value"`. A quoted LLM_MODEL leaks the quotes into
+                # Zed's settings.json and the model lookup fails, aborting
+                # every turn.
+                if (
+                    len(value) >= 2
+                    and value[0] == value[-1]
+                    and value[0] in ('"', "'")
+                ):
+                    value = value[1:-1]
+                os.environ.setdefault(key, value)
 
     # Resolve API key
     api_key = args.api_key or os.environ.get("LLM_API_KEY", "")
