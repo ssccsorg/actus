@@ -12,6 +12,20 @@ use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
 /// handlers).
 pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
 
+/// Truncate `s` to at most `max` bytes without splitting a UTF-8
+/// character. Returns the original string when it is already short
+/// enough; otherwise the longest prefix that ends on a char boundary.
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // Zed manager — WebSocket connection, session management, and settings bootstrap
 
 use std::collections::{HashMap, HashSet};
@@ -177,9 +191,9 @@ impl ZedManager {
         let past = &history[..history.len() - 1];
         let mut ctx = String::from("[Previous conversation]\n");
         for msg in past {
-            // Truncate very long messages to avoid token waste
-            let truncated = if msg.len() > 2000 { &msg[..2000] } else { msg };
-            ctx.push_str(truncated);
+            // Truncate very long messages to avoid token waste; the cut
+            // must land on a UTF-8 char boundary or the slice panics.
+            ctx.push_str(truncate_utf8(msg, 2000));
             ctx.push_str("\n\n");
         }
         ctx.push_str("[Continue from above]\n");
@@ -236,11 +250,10 @@ impl ZedManager {
     pub fn set_title(&mut self, thread_id: &str, title: &str) {
         if let Some(thread) = self.threads.get_mut(thread_id) {
             if thread.title.is_none() {
-                let truncated = if title.len() > 80 {
-                    format!("{}...", &title[..80])
-                } else {
-                    title.to_string()
-                };
+                let mut truncated = truncate_utf8(title, 80).to_string();
+                if title.len() > 80 {
+                    truncated.push_str("...");
+                }
                 thread.title = Some(truncated);
                 self.notify_thread_change();
                 self.save_threads();
@@ -297,11 +310,10 @@ impl ZedManager {
                                 thread.messages.iter().find(|m| m.role == "user")
                             {
                                 let content = first_user.content.trim();
-                                let truncated = if content.len() > 80 {
-                                    format!("{}...", &content[..80])
-                                } else {
-                                    content.to_string()
-                                };
+                                let mut truncated = truncate_utf8(content, 80).to_string();
+                                if content.len() > 80 {
+                                    truncated.push_str("...");
+                                }
                                 thread.title = Some(truncated);
                             }
                         }

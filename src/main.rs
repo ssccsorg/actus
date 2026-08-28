@@ -268,7 +268,6 @@ async fn main() -> anyhow::Result<()> {
             std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|p| p.join("terminal.py"))),
-            Some(PathBuf::from("apps//terminal.py")),
             Some(PathBuf::from("terminal.py")),
         ];
         candidates.into_iter().flatten().find(|p| p.exists())
