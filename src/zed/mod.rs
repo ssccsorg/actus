@@ -210,6 +210,11 @@ impl ZedManager {
         self.add_message_full(thread_id, role, content, message_id, None, None, None)
     }
 
+    /// Append a message to a thread, replacing the last message when the
+    /// id matches (streaming updates in place). The metadata trio mirrors
+    /// the fields of the wire `message_added` event, so the signature is
+    /// intentionally wide.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_message_full(
         &mut self,
         thread_id: &str,

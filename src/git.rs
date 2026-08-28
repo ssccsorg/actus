@@ -130,7 +130,7 @@ pub fn get_log(workdir: &Path, max_count: usize) -> Result<Option<Vec<GitCommit>
         return Ok(None);
     }
 
-    let count = max_count.min(100).max(1).to_string();
+    let count = max_count.clamp(1, 100).to_string();
     let output = git(&[
         "log",
         &format!("--max-count={}", count),

@@ -129,8 +129,11 @@ def main():
             print(f"{C.RED}Binary not found: {bin_path}. Remove --no-build or build first.{C.END}")
             sys.exit(1)
 
-    # Kill any stale server on our ports before starting
-    subprocess.run(["pkill", "-f", "actus"], capture_output=True, timeout=5)
+    # Kill any stale server on our ports before starting. The pattern must
+    # match the compiled binary only, never the runner itself: the runner's
+    # own command line contains the actus directory path, so a bare
+    # "actus" pattern would kill this process.
+    subprocess.run(["pkill", "-f", str(ACTUS_BIN)], capture_output=True, timeout=5)
     time.sleep(1)
 
     # Build and start Rust server

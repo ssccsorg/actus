@@ -84,8 +84,21 @@ impl AgentBackend for ZedBackend {
         {
             let guard = self.ws_tx.lock().await;
             match &*guard {
-                Some(tx) => tx.send(cmd.clone()).map_err(|e| e.to_string())?,
-                None => return Err("WebSocket not connected".to_string()),
+                Some(tx) => {
+                    if let Err(e) = tx.send(cmd.clone()) {
+                        // The request never reached the agent; drop the
+                        // mapping so it does not leak and the health
+                        // monitor does not treat this as an active turn.
+                        let mut mgr = self.manager.write().await;
+                        mgr.pending_requests.remove(&request_id);
+                        return Err(e.to_string());
+                    }
+                }
+                None => {
+                    let mut mgr = self.manager.write().await;
+                    mgr.pending_requests.remove(&request_id);
+                    return Err("WebSocket not connected".to_string());
+                }
             }
         }
 

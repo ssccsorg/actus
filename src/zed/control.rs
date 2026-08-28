@@ -331,9 +331,11 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
                 .unwrap_or("")
                 .to_string();
             let mut mgr = zed_manager.write().await;
-            // Clean up pending queue so reconnection doesn't resend this
+            // Clean up pending queue and request mapping so reconnection
+            // does not resend this and the maps do not grow unboundedly.
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
+                mgr.pending_requests.remove(&request_id);
             }
             if let Some(thread) = mgr.threads.get_mut(&acp_id) {
                 thread.completed = true;
@@ -361,9 +363,20 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
                 .to_string();
             let mut mgr = zed_manager.write().await;
             // The turn ended in an error: drop the pending entry so the
-            // health monitor does not treat this turn as active forever.
+            // health monitor does not treat this turn as active forever,
+            // and release consumers waiting on this turn. Without the
+            // turn_completed bump, SSE and poll clients hang until the
+            // 120s timeout even though the turn is over.
+            let local_id = mgr.pending_requests.get(&request_id).cloned();
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
+                mgr.pending_requests.remove(&request_id);
+            }
+            if let Some(local_id) = local_id {
+                if let Some(thread) = mgr.threads.get_mut(&local_id) {
+                    thread.completed = true;
+                    thread.turn_completed = thread.turn_completed.wrapping_add(1);
+                }
             }
             mgr.notify_thread_change();
             tracing::error!("Chat response error (req {}): {}", &request_id[..request_id.len().min(12)], error);
@@ -378,9 +391,18 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
             let mut mgr = zed_manager.write().await;
             // A cancelled turn never fires message_completed; drop the
             // pending entry so reconnection does not resend it and the
-            // health monitor does not stall on it.
+            // health monitor does not stall on it, and release consumers
+            // waiting on this turn the same way an error does.
+            let local_id = mgr.pending_requests.get(&request_id).cloned();
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
+                mgr.pending_requests.remove(&request_id);
+            }
+            if let Some(local_id) = local_id {
+                if let Some(thread) = mgr.threads.get_mut(&local_id) {
+                    thread.completed = true;
+                    thread.turn_completed = thread.turn_completed.wrapping_add(1);
+                }
             }
             mgr.notify_thread_change();
             tracing::info!("Turn cancelled (req {}, status {})", &request_id[..request_id.len().min(12)], status);

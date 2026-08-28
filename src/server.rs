@@ -160,7 +160,10 @@ async fn chat_async(
 
     Ok(Json(ChatResponse {
         task_id: uuid::Uuid::new_v4().to_string(),
-        status: "approved".to_string(),
+        // The message is accepted for execution, not yet approved; the
+        // hardcoded "approved" from the earlier approval design was
+        // misleading because approval only applies in ask mode.
+        status: "submitted".to_string(),
         thread_id: receipt.thread_id,
     }))
 }
@@ -235,7 +238,7 @@ async fn chat_stream(
             }
 
             // Log every 10th poll so we can see the loop is alive
-            if poll_count % 10 == 0 {
+            if poll_count.is_multiple_of(10) {
                 tracing::debug!("SSE pool {}: iter #{}", tid, poll_count);
             }
 
@@ -251,7 +254,7 @@ async fn chat_stream(
                     .find(|m| m.role == "assistant")
                     .map(|m| (m.content.len(), m.entry_type.as_deref().unwrap_or("")));
 
-                if poll_count % 100 == 0 || msg_count > 1 {
+                if poll_count.is_multiple_of(100) || msg_count > 1 {
                     tracing::debug!(
                         "SSE pool {}: msgs={}, turn={}/{}, last_assistant_len={:?}, last_content_len={}",
                         poll_count, msg_count, turn_comp, turn_id, last_assistant, last_content.len()
@@ -304,7 +307,7 @@ async fn chat_stream(
                     done = true;
                 }
             } else {
-                if poll_count % 50 == 0 {
+                if poll_count.is_multiple_of(50) {
                     tracing::debug!("SSE stream {}: thread not found after {} polls", tid, poll_count);
                 }
             }
