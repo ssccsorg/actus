@@ -59,6 +59,7 @@ cleanup() {
     pkill -f "$SCRIPT_DIR/target/debug/" 2>/dev/null || true
     pkill -f "$SCRIPT_DIR/helix/.bin/" 2>/dev/null || true
     pkill -f "$SCRIPT_DIR/../telos/target/telos-release/" 2>/dev/null || true
+    pkill -f "$SCRIPT_DIR/runner.py" 2>/dev/null || true
     sleep 1
 }
 
