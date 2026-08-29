@@ -23,7 +23,7 @@ pub struct OutgoingMessage {
 /// Events that Zed sends to actus via WebSocket.
 /// Per WEBSOCKET_PROTOCOL_SPEC — Zed is stateless and only knows
 /// about acp_thread_id.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "data")]
 pub enum SyncEvent {
     /// Sent when Zed creates a new ACP thread in response to a chat_message.
