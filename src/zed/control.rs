@@ -189,7 +189,10 @@ async fn handle_ws_message(
 }
 
 /// Dispatch a received JSON event to the appropriate handler.
-async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
+///
+/// Public so integration tests can drive the event loop directly without
+/// a WebSocket connection.
+pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
     tracing::debug!("WS event: {}", &text[..text.len().min(200)]);
 
     let msg: serde_json::Value = match serde_json::from_str(text) {
@@ -341,17 +344,52 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
                 .unwrap_or("")
                 .to_string();
             let mut mgr = zed_manager.write().await;
-            // Clean up pending queue and request mapping so reconnection
-            // does not resend this and the maps do not grow unboundedly.
+            // Consume the request mapping instead of deleting it: a
+            // duplicate completion (interrupt race, wrapper replay) for
+            // the same request_id finds the empty sentinel and is dropped,
+            // so turn_completed cannot be bumped twice for one turn.
+            let sentinel_consumed = !request_id.is_empty()
+                && mgr.pending_requests.get(&request_id).map(|v| v.is_empty()).unwrap_or(false);
+            if sentinel_consumed {
+                tracing::warn!(
+                    "Duplicate message_completed for consumed request_id {} — ignoring",
+                    &request_id[..request_id.len().min(12)]
+                );
+                mgr.notify_thread_change();
+                return;
+            }
+            // Clean up pending queue so reconnection does not resend this.
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
-                mgr.pending_requests.remove(&request_id);
-            }
-            if let Some(thread) = mgr.threads.get_mut(&acp_id) {
-                thread.completed = true;
-                thread.turn_completed = thread.turn_completed.wrapping_add(1);
+                mgr.pending_requests.insert(request_id.clone(), String::new());
             }
             if let Some(local_id) = mgr.thread_id_map.get(&acp_id).cloned() {
+                // Empty completion: the turn ended with no assistant
+                // message at all (no text, no tool call, no error). The
+                // last message is still the user's, so record an error
+                // instead of letting consumers see a silent success with
+                // zero content.
+                let last_is_user = mgr
+                    .threads
+                    .get(&local_id)
+                    .and_then(|t| t.messages.last())
+                    .map(|m| m.role == "user")
+                    .unwrap_or(false);
+                if last_is_user {
+                    tracing::warn!(
+                        "message_completed with empty response for thread {} — marking error",
+                        &acp_id[..acp_id.len().min(12)]
+                    );
+                    mgr.add_message_full(
+                        &local_id,
+                        "assistant",
+                        "[error] empty response",
+                        None,
+                        Some("error".to_string()),
+                        None,
+                        None,
+                    );
+                }
                 if let Some(thread) = mgr.threads.get_mut(&local_id) {
                     thread.completed = true;
                     thread.turn_completed = thread.turn_completed.wrapping_add(1);
@@ -372,17 +410,24 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
                 .unwrap_or("")
                 .to_string();
             let mut mgr = zed_manager.write().await;
-            // The turn ended in an error: drop the pending entry so the
-            // health monitor does not treat this turn as active forever,
-            // and release consumers waiting on this turn. The turn still
-            // records an assistant message so the poll/SSE index
-            // (`assistant_messages[turn_completed]`) stays aligned: a
-            // turn that bumps turn_completed without adding a message
-            // makes the next poll read past the end of the array.
+            // Drop a duplicate error for an already-consumed request_id,
+            // and record the turn so the poll/SSE index stays aligned. The
+            // pending entry is consumed so a later message_completed for
+            // the same request is also dropped.
+            let sentinel_consumed = !request_id.is_empty()
+                && mgr.pending_requests.get(&request_id).map(|v| v.is_empty()).unwrap_or(false);
+            if sentinel_consumed {
+                tracing::warn!(
+                    "Duplicate chat_response_error for consumed request_id {} — ignoring",
+                    &request_id[..request_id.len().min(12)]
+                );
+                mgr.notify_thread_change();
+                return;
+            }
             let local_id = mgr.pending_requests.get(&request_id).cloned();
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
-                mgr.pending_requests.remove(&request_id);
+                mgr.pending_requests.insert(request_id.clone(), String::new());
             }
             if let Some(local_id) = local_id {
                 mgr.add_message_full(
@@ -410,16 +455,25 @@ async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
                 .to_string();
             let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("?");
             let mut mgr = zed_manager.write().await;
-            // A cancelled turn never fires message_completed; drop the
-            // pending entry so reconnection does not resend it and the
-            // health monitor does not stall on it, and release consumers
-            // waiting on this turn the same way an error does. Record a
-            // cancellation message so the assistant-message index stays
-            // aligned with turn_completed.
+            // A cancelled turn never fires message_completed; consume the
+            // pending entry so reconnection does not resend it, the health
+            // monitor does not stall on it, and a later completion for the
+            // same request is dropped. Record a cancellation message so the
+            // assistant-message index stays aligned with turn_completed.
+            let sentinel_consumed = !request_id.is_empty()
+                && mgr.pending_requests.get(&request_id).map(|v| v.is_empty()).unwrap_or(false);
+            if sentinel_consumed {
+                tracing::warn!(
+                    "Duplicate turn_cancelled for consumed request_id {} — ignoring",
+                    &request_id[..request_id.len().min(12)]
+                );
+                mgr.notify_thread_change();
+                return;
+            }
             let local_id = mgr.pending_requests.get(&request_id).cloned();
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
-                mgr.pending_requests.remove(&request_id);
+                mgr.pending_requests.insert(request_id.clone(), String::new());
             }
             if let Some(local_id) = local_id {
                 mgr.add_message_full(

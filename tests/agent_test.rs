@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use actus::agent::{AgentBackend, AgentKind, AgentRegistry};
 use actus::zed::backend::ZedBackend;
+use actus::zed::control::handle_zed_event;
 use actus::zed::{WsCommandTx, ZedManager};
 use tokio::sync::RwLock;
 
@@ -435,4 +436,113 @@ async fn threads_empty_when_no_state() {
     let backend = zed_backend();
     assert!(backend.threads().await.is_empty());
     assert!(backend.thread("missing").await.is_none());
+}
+
+/// A consumed request mapping must drop duplicate completion events: the
+/// sentinel (empty string) replaces the thread id on first consumption, so
+/// a replayed message_completed for the same request_id cannot bump
+/// turn_completed twice.
+#[tokio::test]
+async fn duplicate_completion_consumed_by_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+
+    // Set up the local thread and ACP mapping as the submit path would.
+    {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "hello", None);
+        mgr.add_message(&tid, "assistant", "hi there", Some("acp:1".to_string()));
+        mgr.thread_id_map.insert("acp-1".to_string(), tid.clone());
+        mgr.pending_requests.insert("req-1".to_string(), tid.clone());
+    }
+
+    // First completion: consumes the mapping, bumps the counter.
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-1","request_id":"req-1"}}"#,
+    )
+    .await;
+
+    // Duplicate completion: sentinel present, must be ignored.
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-1","request_id":"req-1"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    let tid = mgr.thread_id_map.get("acp-1").unwrap().clone();
+    let thread = mgr.threads.get(&tid).unwrap();
+    assert_eq!(thread.turn_completed, 1, "duplicate must not bump the counter");
+    // The mapping is consumed, not deleted, so the sentinel is observable.
+    assert_eq!(mgr.pending_requests.get("req-1").map(String::as_str), Some(""));
+}
+
+/// A completion with no assistant output must record an error message so
+/// consumers do not see a silent success with zero content.
+#[tokio::test]
+async fn empty_completion_records_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+
+    {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "hello", None);
+        mgr.thread_id_map.insert("acp-2".to_string(), tid.clone());
+        mgr.pending_requests.insert("req-2".to_string(), tid.clone());
+    }
+
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-2","request_id":"req-2"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    let tid = mgr.thread_id_map.get("acp-2").unwrap().clone();
+    let thread = mgr.threads.get(&tid).unwrap();
+    let last = thread.messages.last().unwrap();
+    assert_eq!(last.role, "assistant");
+    assert_eq!(last.entry_type.as_deref(), Some("error"));
+    assert!(last.content.contains("empty response"));
+    assert_eq!(thread.turn_completed, 1);
+}
+
+/// An error then a completion for the same request must not double-bump:
+/// chat_response_error consumes the mapping, so the follow-up completion
+/// is dropped by the sentinel.
+#[tokio::test]
+async fn error_then_completion_consumes_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+
+    {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "hello", None);
+        mgr.thread_id_map.insert("acp-3".to_string(), tid.clone());
+        mgr.pending_requests.insert("req-3".to_string(), tid.clone());
+    }
+
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"chat_response_error","data":{"request_id":"req-3","error":"boom"}}"#,
+    )
+    .await;
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-3","request_id":"req-3"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    let tid = mgr.thread_id_map.get("acp-3").unwrap().clone();
+    let thread = mgr.threads.get(&tid).unwrap();
+    assert_eq!(thread.turn_completed, 1, "error+completion must bump once");
+    // The error message, not an empty-response error, is the last entry.
+    let last = thread.messages.last().unwrap();
+    assert_eq!(last.entry_type.as_deref(), Some("error"));
+    assert!(last.content.contains("boom"));
 }
