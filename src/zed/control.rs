@@ -256,14 +256,27 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
             // Map request_id → local thread_id, and acp_thread_id →
             // local thread_id. The local thread is the canonical record;
             // no acp_id-keyed mirror thread is created.
-            if let Some(local_id) = mgr.pending_requests.get(&rid).cloned() {
-                mgr.thread_id_map
-                    .insert(acp_id.clone(), local_id.clone());
-                if let Some(local_thread) = mgr.threads.get_mut(&local_id) {
-                    local_thread.acp_thread_id = Some(acp_id.clone());
-                }
-                if let Some(waiter) = mgr.thread_waiters.remove(&local_id) {
-                    waiter.notify_one();
+            //
+            // A consumed request mapping (empty sentinel) means this
+            // thread_created is a stale replay after the turn already
+            // ended; skip it rather than mapping to an empty local id.
+            let local_id = mgr.pending_requests.get(&rid).cloned();
+            if let Some(ref lid) = local_id {
+                if !lid.is_empty() {
+                    mgr.thread_id_map
+                        .insert(acp_id.clone(), lid.clone());
+                    if let Some(local_thread) = mgr.threads.get_mut(lid) {
+                        local_thread.acp_thread_id = Some(acp_id.clone());
+                    }
+                    if let Some(waiter) = mgr.thread_waiters.remove(lid) {
+                        waiter.notify_one();
+                    }
+                } else {
+                    tracing::warn!(
+                        "thread_created for consumed request_id {} (acp {}) — stale replay, ignoring",
+                        &rid[..rid.len().min(12)],
+                        &acp_id[..acp_id.len().min(12)]
+                    );
                 }
             } else {
                 tracing::warn!(
@@ -361,7 +374,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
             // Clean up pending queue so reconnection does not resend this.
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
-                mgr.pending_requests.insert(request_id.clone(), String::new());
+                mgr.consume_request(&request_id);
             }
             if let Some(local_id) = mgr.thread_id_map.get(&acp_id).cloned() {
                 // Empty completion: the turn ended with no assistant
@@ -430,7 +443,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
             let local_id = mgr.pending_requests.get(&request_id).cloned();
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
-                mgr.pending_requests.insert(request_id.clone(), String::new());
+                mgr.consume_request(&request_id);
             }
             if let Some(local_id) = local_id {
                 mgr.add_message_full(
@@ -478,7 +491,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
             let local_id = mgr.pending_requests.get(&request_id).cloned();
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
-                mgr.pending_requests.insert(request_id.clone(), String::new());
+                mgr.consume_request(&request_id);
             }
             if let Some(local_id) = local_id {
                 mgr.add_message_full(

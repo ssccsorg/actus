@@ -83,6 +83,10 @@ pub struct ZedManager {
     /// match this snapshot is a replay and is dropped instead of being
     /// treated as new content.
     pub prior_message_content: HashMap<String, String>,
+    /// Consumed request ids (empty-string values in `pending_requests`)
+    /// kept for duplicate detection. Bounded so the map cannot grow without
+    /// limit on a long-running process.
+    pub sentinel_cap: usize,
 }
 
 impl ZedManager {
@@ -119,6 +123,7 @@ impl ZedManager {
             pending_chat_queue: Vec::new(),
             pending_authorizations: HashMap::new(),
             prior_message_content: HashMap::new(),
+            sentinel_cap: 512,
         }
     }
 
@@ -221,7 +226,9 @@ impl ZedManager {
     /// Record the (scoped message id → content) snapshot of the most
     /// recent assistant messages in a thread. Called when a turn ends so a
     /// follow-up turn's replay of these entries can be recognized and
-    /// dropped.
+    /// dropped. Only the trailing assistant block is snapshotted; the
+    /// trailing block ends at the last user message, which is the turn
+    /// boundary.
     pub fn record_prior_entries(&mut self, thread_id: &str) {
         let Some(thread) = self.threads.get(thread_id) else {
             return;
@@ -234,6 +241,35 @@ impl ZedManager {
         {
             if let Some(id) = &m.message_id {
                 self.prior_message_content.insert(id.clone(), m.content.clone());
+            }
+        }
+    }
+
+    /// Consume a request mapping by replacing the thread id with an empty
+    /// sentinel, keeping it for duplicate detection. Old sentinels are
+    /// pruned once the cap is reached so the map stays bounded; the most
+    /// recent sentinel is always kept because a duplicate event for the
+    /// current turn is the one most likely to arrive.
+    pub fn consume_request(&mut self, request_id: &str) {
+        if request_id.is_empty() {
+            return;
+        }
+        self.pending_requests.insert(request_id.to_string(), String::new());
+        if self.pending_requests.len() > self.sentinel_cap {
+            // Drop enough consumed entries (empty values) to get back under
+            // the cap. The entry just inserted is always kept; active
+            // (non-empty) entries are never pruned.
+            let keep = request_id.to_string();
+            let excess = self.pending_requests.len() - self.sentinel_cap;
+            let mut stale: Vec<String> = self
+                .pending_requests
+                .iter()
+                .filter(|(k, v)| v.is_empty() && **k != keep)
+                .map(|(k, _)| k.clone())
+                .take(excess)
+                .collect();
+            for k in stale.drain(..) {
+                self.pending_requests.remove(&k);
             }
         }
     }

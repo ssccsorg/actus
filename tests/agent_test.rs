@@ -636,3 +636,94 @@ async fn replay_of_prior_turn_entry_is_dropped() {
     let last_asst = assistant_msgs.last().unwrap();
     assert!(last_asst.content.contains("second"));
 }
+
+/// consume_request must bound the sentinel map: once the cap is exceeded,
+/// old consumed entries are pruned while the most recent sentinel and all
+/// active (non-empty) mappings survive.
+#[test]
+fn consume_request_prunes_old_sentinels() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mgr = zed_manager(dir.path());
+    mgr.sentinel_cap = 4;
+
+    // Fill with active mappings plus consumed sentinels past the cap.
+    mgr.pending_requests.insert("active-1".to_string(), "tid-a".to_string());
+    for i in 0..6 {
+        mgr.consume_request(&format!("req-{}", i));
+    }
+
+    assert!(
+        mgr.pending_requests.len() <= mgr.sentinel_cap,
+        "map must stay bounded (len {})",
+        mgr.pending_requests.len()
+    );
+    // The active mapping is never pruned.
+    assert_eq!(mgr.pending_requests.get("active-1").map(String::as_str), Some("tid-a"));
+    // The most recent sentinel survives for duplicate detection.
+    assert_eq!(mgr.pending_requests.get("req-5").map(String::as_str), Some(""));
+}
+
+/// A thread_created for a request whose mapping was already consumed (empty
+/// sentinel) is a stale replay and must not map to an empty local id.
+#[tokio::test]
+async fn thread_created_after_consumption_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+
+    {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "hello", None);
+        mgr.pending_requests.insert("req-6".to_string(), tid.clone());
+        // Turn already ended: mapping consumed to the empty sentinel.
+        mgr.consume_request("req-6");
+    }
+
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"thread_created","data":{"acp_thread_id":"acp-6","request_id":"req-6"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    // The stale acp id must not be mapped to an empty local id.
+    assert!(
+        !mgr.thread_id_map.contains_key("acp-6"),
+        "consumed request must not create a mapping"
+    );
+}
+
+/// chat_response_error then thread_created for the same request: the error
+/// consumes the mapping, so the late thread_created is a stale replay and
+/// is ignored, leaving no empty mapping.
+#[tokio::test]
+async fn error_then_thread_created_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+
+    {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "hello", None);
+        mgr.thread_id_map.insert("acp-7".to_string(), tid.clone());
+        mgr.pending_requests.insert("req-7".to_string(), tid.clone());
+    }
+
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"chat_response_error","data":{"request_id":"req-7","error":"boom"}}"#,
+    )
+    .await;
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"thread_created","data":{"acp_thread_id":"acp-7b","request_id":"req-7"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    assert!(
+        !mgr.thread_id_map.contains_key("acp-7b"),
+        "late thread_created after error must be ignored"
+    );
+    assert_eq!(mgr.pending_requests.get("req-7").map(String::as_str), Some(""));
+}
