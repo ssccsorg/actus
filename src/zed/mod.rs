@@ -76,6 +76,13 @@ pub struct ZedManager {
     /// Tool-call authorizations awaiting a human decision, keyed by
     /// tool_call_id (ask mode).
     pub pending_authorizations: HashMap<String, PendingAuthorization>,
+    /// Snapshot of (scoped message id → content) from the most recent
+    /// completed turn of each thread. Zed's flush_streaming_throttle
+    /// resends ALL ACP thread entries on turn completion and replays prior
+    /// turn entries on follow-up turns; a resend whose id and content both
+    /// match this snapshot is a replay and is dropped instead of being
+    /// treated as new content.
+    pub prior_message_content: HashMap<String, String>,
 }
 
 impl ZedManager {
@@ -111,6 +118,7 @@ impl ZedManager {
             last_sse_event_time: Instant::now(),
             pending_chat_queue: Vec::new(),
             pending_authorizations: HashMap::new(),
+            prior_message_content: HashMap::new(),
         }
     }
 
@@ -210,6 +218,26 @@ impl ZedManager {
         self.add_message_full(thread_id, role, content, message_id, None, None, None)
     }
 
+    /// Record the (scoped message id → content) snapshot of the most
+    /// recent assistant messages in a thread. Called when a turn ends so a
+    /// follow-up turn's replay of these entries can be recognized and
+    /// dropped.
+    pub fn record_prior_entries(&mut self, thread_id: &str) {
+        let Some(thread) = self.threads.get(thread_id) else {
+            return;
+        };
+        for m in thread
+            .messages
+            .iter()
+            .rev()
+            .take_while(|m| m.role == "assistant")
+        {
+            if let Some(id) = &m.message_id {
+                self.prior_message_content.insert(id.clone(), m.content.clone());
+            }
+        }
+    }
+
     /// Append a message to a thread, replacing an existing message with the
     /// same id when present (streaming updates in place). The metadata trio
     /// mirrors the fields of the wire `message_added` event, so the
@@ -221,6 +249,10 @@ impl ZedManager {
     /// non-consecutively. Comparing only against the tail used to append a
     /// duplicate every time, swelling a single turn into dozens of
     /// messages and breaking poll/SSE turn indexing.
+    ///
+    /// A brand-new id whose (id, content) pair exactly matches the prior
+    /// turn's snapshot is a replay of a previous turn's entry and is
+    /// dropped; the wrapper replays entries when a new turn starts.
     #[allow(clippy::too_many_arguments)]
     pub fn add_message_full(
         &mut self,
@@ -234,19 +266,43 @@ impl ZedManager {
     ) {
         if let Some(thread) = self.threads.get_mut(thread_id) {
             if let Some(ref mid) = message_id {
-                if let Some(existing) = thread
-                    .messages
-                    .iter_mut()
-                    .find(|m| m.message_id.as_deref() == Some(mid))
+                // Same-turn streaming update: the id exists in the thread
+                // and was not part of the prior turn's snapshot, so this is
+                // cumulative content for the current message; replace it.
+                let is_prior = self.prior_message_content.contains_key(mid);
+                if !is_prior {
+                    if let Some(existing) = thread
+                        .messages
+                        .iter_mut()
+                        .find(|m| m.message_id.as_deref() == Some(mid))
+                    {
+                        existing.content = content.to_string();
+                        existing.entry_type = entry_type;
+                        existing.tool_name = tool_name;
+                        existing.tool_status = tool_status;
+                        self.notify_thread_change();
+                        self.save_threads();
+                        return;
+                    }
+                } else if self
+                    .prior_message_content
+                    .get(mid)
+                    .map(|prior| prior == content)
+                    .unwrap_or(false)
                 {
-                    existing.content = content.to_string();
-                    existing.entry_type = entry_type;
-                    existing.tool_name = tool_name;
-                    existing.tool_status = tool_status;
-                    self.notify_thread_change();
-                    self.save_threads();
+                    // The id belongs to the prior turn and the content is
+                    // unchanged: a wrapper replay of that turn's entry.
+                    // Drop it rather than duplicating it.
+                    tracing::debug!(
+                        "Dropping replay of prior turn entry id {} (content unchanged)",
+                        mid
+                    );
                     return;
                 }
+                // The id belongs to the prior turn but the content differs:
+                // the wrapper restarted and renumbered, or the new turn
+                // legitimately reuses the id. Append as new content; do not
+                // overwrite the prior turn's entry.
             }
 
             thread.messages.push(ThreadMessage {

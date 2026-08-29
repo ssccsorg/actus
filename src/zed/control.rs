@@ -394,6 +394,9 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                     thread.completed = true;
                     thread.turn_completed = thread.turn_completed.wrapping_add(1);
                 }
+                // Snapshot this turn's entries so a follow-up turn's replay
+                // of them is recognized and dropped.
+                mgr.record_prior_entries(&local_id);
             }
             mgr.notify_thread_change();
             mgr.save_threads();
@@ -443,6 +446,8 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                     thread.completed = true;
                     thread.turn_completed = thread.turn_completed.wrapping_add(1);
                 }
+                // Snapshot the error entry so a follow-up replay is dropped.
+                mgr.record_prior_entries(&local_id);
             }
             mgr.notify_thread_change();
             tracing::error!("Chat response error (req {}): {}", &request_id[..request_id.len().min(12)], error);
@@ -489,6 +494,9 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                     thread.completed = true;
                     thread.turn_completed = thread.turn_completed.wrapping_add(1);
                 }
+                // Snapshot the cancellation entry so a follow-up replay is
+                // dropped.
+                mgr.record_prior_entries(&local_id);
             }
             mgr.notify_thread_change();
             tracing::info!("Turn cancelled (req {}, status {})", &request_id[..request_id.len().min(12)], status);

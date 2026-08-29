@@ -546,3 +546,93 @@ async fn error_then_completion_consumes_once() {
     assert_eq!(last.entry_type.as_deref(), Some("error"));
     assert!(last.content.contains("boom"));
 }
+
+/// A follow-up turn's replay of a previous turn's entry (same scoped id and
+/// content) must be dropped: after turn completion the entries are
+/// snapshotted, and a new turn receiving the same (id, content) is a
+/// wrapper replay, not new content.
+#[tokio::test]
+async fn replay_of_prior_turn_entry_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+
+    // Simulate turn 1: thinking + tool call + answer, then completion.
+    {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "first", None);
+        mgr.thread_id_map.insert("acp-4".to_string(), tid.clone());
+        mgr.pending_requests.insert("req-4".to_string(), tid.clone());
+    }
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"1","role":"assistant","content":"<thinking>first</thinking>","entry_type":"text"}}"#,
+    )
+    .await;
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"2","role":"assistant","content":"**Tool Call: ls**","entry_type":"tool_call","tool_name":"ls","tool_status":"Completed"}}"#,
+    )
+    .await;
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"3","role":"assistant","content":"answer one","entry_type":"text"}}"#,
+    )
+    .await;
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-4","request_id":"req-4"}}"#,
+    )
+    .await;
+
+    let msg_count_after_turn1 = {
+        let mgr = manager.read().await;
+        let tid = mgr.thread_id_map.get("acp-4").unwrap().clone();
+        mgr.threads.get(&tid).unwrap().messages.len()
+    };
+
+    // Turn 2 starts: the wrapper replays turn 1 entries before new content.
+    {
+        let mut mgr = manager.write().await;
+        let tid = mgr.thread_id_map.get("acp-4").unwrap().clone();
+        mgr.add_message(&tid, "user", "second", None);
+        mgr.pending_requests.insert("req-5".to_string(), tid.clone());
+    }
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"1","role":"assistant","content":"<thinking>first</thinking>","entry_type":"text"}}"#,
+    )
+    .await;
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"2","role":"assistant","content":"**Tool Call: ls**","entry_type":"tool_call","tool_name":"ls","tool_status":"Completed"}}"#,
+    )
+    .await;
+    // Genuinely new content under a reused id: must be accepted.
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"3","role":"assistant","content":"<thinking>second</thinking>","entry_type":"text"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    let tid = mgr.thread_id_map.get("acp-4").unwrap().clone();
+    let thread = mgr.threads.get(&tid).unwrap();
+    // Turn 1 messages (user first + 3 assistant) plus the turn 2 user and
+    // one new-id-3 content; the two replayed ids 1 and 2 are dropped.
+    let assistant_msgs: Vec<_> = thread
+        .messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .collect();
+    assert_eq!(
+        assistant_msgs.len(),
+        4,
+        "replays must be dropped; new content accepted (got {})",
+        assistant_msgs.len()
+    );
+    assert!(msg_count_after_turn1 < thread.messages.len());
+    // The last assistant message carries the new turn's content.
+    let last_asst = assistant_msgs.last().unwrap();
+    assert!(last_asst.content.contains("second"));
+}
