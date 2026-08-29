@@ -727,3 +727,187 @@ async fn error_then_thread_created_ignored() {
     );
     assert_eq!(mgr.pending_requests.get("req-7").map(String::as_str), Some(""));
 }
+
+/// turn_cancelled consumes the mapping, records a cancellation message, and
+/// bumps the counter once; a duplicate cancel is dropped by the sentinel.
+#[tokio::test]
+async fn turn_cancelled_consumes_and_ignores_duplicate() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+
+    {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "hello", None);
+        mgr.thread_id_map.insert("acp-8".to_string(), tid.clone());
+        mgr.pending_requests.insert("req-8".to_string(), tid.clone());
+    }
+
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"turn_cancelled","data":{"request_id":"req-8","status":"cancelled"}}"#,
+    )
+    .await;
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"turn_cancelled","data":{"request_id":"req-8","status":"cancelled"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    let tid = mgr.thread_id_map.get("acp-8").unwrap().clone();
+    let thread = mgr.threads.get(&tid).unwrap();
+    assert_eq!(thread.turn_completed, 1, "duplicate cancel must bump once");
+    let last = thread.messages.last().unwrap();
+    assert_eq!(last.entry_type.as_deref(), Some("cancelled"));
+    assert!(last.content.contains("cancelled"));
+    assert_eq!(mgr.pending_requests.get("req-8").map(String::as_str), Some(""));
+}
+
+/// thread_created maps the acp id to the local thread and wakes the waiter;
+/// message_added stores tool metadata on the scoped message id.
+#[tokio::test]
+async fn thread_created_and_tool_metadata_flow() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+
+    let tid = {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "hello", None);
+        mgr.pending_requests.insert("req-9".to_string(), tid.clone());
+        tid
+    };
+
+    // thread_created: maps acp-9 to the local thread.
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"thread_created","data":{"acp_thread_id":"acp-9","request_id":"req-9"}}"#,
+    )
+    .await;
+    {
+        let mgr = manager.read().await;
+        assert_eq!(
+            mgr.thread_id_map.get("acp-9").map(String::as_str),
+            Some(tid.as_str())
+        );
+        assert_eq!(
+            mgr.threads.get(&tid).unwrap().acp_thread_id.as_deref(),
+            Some("acp-9")
+        );
+    }
+
+    // message_added with tool metadata: scoped id + metadata stored.
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-9","message_id":"7","role":"assistant","content":"**Tool Call: grep**","entry_type":"tool_call","tool_name":"grep","tool_status":"In Progress"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    let thread = mgr.threads.get(&tid).unwrap();
+    let tool = thread
+        .messages
+        .iter()
+        .find(|m| m.message_id.as_deref() == Some("acp-9:7"))
+        .expect("scoped tool message stored");
+    assert_eq!(tool.entry_type.as_deref(), Some("tool_call"));
+    assert_eq!(tool.tool_name.as_deref(), Some("grep"));
+    assert_eq!(tool.tool_status.as_deref(), Some("In Progress"));
+}
+
+/// message_added for an unknown acp thread warns and stores nothing.
+#[tokio::test]
+async fn message_added_unknown_thread_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+
+    handle_zed_event(
+        &manager,
+        r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-ghost","message_id":"1","role":"assistant","content":"x"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    assert!(mgr.threads.values().all(|t| t.messages.is_empty()));
+}
+
+/// cancel without a sender fails; with a sender it submits the command.
+#[tokio::test]
+async fn cancel_submits_when_connected() {
+    let backend = zed_backend();
+
+    // No sender: cancel fails with not connected.
+    let err = backend.cancel().await.expect_err("must fail without sender");
+    assert!(err.contains("not connected"), "unexpected: {}", err);
+
+    // With a sender: the command reaches the channel.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    {
+        let mut guard = backend.ws_tx.lock().await;
+        *guard = Some(tx);
+    }
+    backend.cancel().await.expect("cancel must send");
+    let cmd = rx.recv().await.expect("command queued");
+    assert!(cmd.contains("cancel_current_turn"), "unexpected: {}", cmd);
+}
+
+/// create_thread creates a fresh thread and returns its id.
+#[tokio::test]
+async fn create_thread_creates_fresh_thread() {
+    let backend = zed_backend();
+    let tid = backend.create_thread().await.expect("thread created");
+    let thread = backend.thread(&tid).await.expect("thread exists");
+    assert!(thread.messages.is_empty());
+    assert_eq!(thread.turn_completed, 0);
+}
+
+/// resolve_tool_call clears the pending entry and sends the command when
+/// connected; without a sender it fails.
+#[tokio::test]
+async fn resolve_tool_call_sends_when_connected() {
+    let backend = zed_backend();
+    let tid = backend.create_thread().await.unwrap();
+    let mgr = backend.manager.clone();
+    {
+        let mut mgr = mgr.write().await;
+        mgr.pending_authorizations.insert(
+            "tool-1".to_string(),
+            actus::agent::PendingAuthorization {
+                platform_thread_id: "acp-9".to_string(),
+                tool_call_id: "tool-1".to_string(),
+                tool_name: "grep".to_string(),
+                created_at: chrono::Utc::now(),
+            },
+        );
+    }
+
+    // No sender: fails and keeps the pending entry intact.
+    let err = backend
+        .resolve_tool_call("acp-9", "tool-1", true)
+        .await
+        .expect_err("must fail without sender");
+    assert!(err.contains("not connected"), "unexpected: {}", err);
+
+    // With a sender: the entry is cleared and the command is sent.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    {
+        let mut guard = backend.ws_tx.lock().await;
+        *guard = Some(tx);
+    }
+    backend
+        .resolve_tool_call("acp-9", "tool-1", true)
+        .await
+        .expect("resolve must send");
+    let cmd = rx.recv().await.expect("command queued");
+    assert!(cmd.contains("resolve_tool_call_authorization"), "unexpected: {}", cmd);
+    assert!(cmd.contains("\"allow\":true"), "unexpected: {}", cmd);
+    {
+        let mgr = backend.manager.read().await;
+        assert!(
+            !mgr.pending_authorizations.contains_key("tool-1"),
+            "pending entry must be cleared"
+        );
+    }
+    drop(tid);
+}
