@@ -597,7 +597,12 @@ async def send_chat(client: NexClient, message: str):
 
     content_len = 0
     poll_interval = 0.3
-    max_wait = 120.0  # 2 minutes max
+    # Long turns (code review, multi-tool research) routinely take several
+    # minutes of thinking plus tool execution. The poll returns as soon as
+    # the turn completes, so this is a safety ceiling, not the expected
+    # path; 30 minutes keeps a genuinely stuck agent from hanging the CLI
+    # forever without killing live turns.
+    max_wait = 1800.0  # 30 minutes max
     waited = 0.0
     shown_prev = False
     seen_approvals = set()
@@ -708,7 +713,7 @@ async def send_chat(client: NexClient, message: str):
     finally:
         await session.close()
 
-    print(f"\n{C.YELLOW}⚠ Timeout after 120s{C.END}\n")
+    print(f"\n{C.YELLOW}⚠ Timeout after {int(max_wait)}s{C.END}\n")
 
 
 # ── Stdin reader ─────────────────────────────────────────────────────────

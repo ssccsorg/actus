@@ -354,15 +354,17 @@ async fn main() -> anyhow::Result<()> {
     // Detects a half-open WebSocket where the read loop would otherwise
     // block forever. Reconnection is forced only when a turn is actively
     // in flight and no events arrive for a long window: LLM responses
-    // routinely pause for tens of seconds (thinking, slow providers), so
-    // the timeout must be generous or the monitor kills live turns.
+    // routinely pause for tens of seconds (thinking, slow providers) and
+    // long turns (code review, multi-tool research) pause for minutes, so
+    // the timeout must be generous or the monitor kills live turns. The
+    // 30-minute ceiling matches the CLI poll and SSE stream.
     {
         let monitors = monitors.clone();
 
         tokio::spawn(async move {
-            tracing::info!("Health monitor started (check every 30s, timeout 120s)");
+            tracing::info!("Health monitor started (check every 30s, timeout 1800s)");
             let check_interval = Duration::from_secs(30);
-            let timeout = Duration::from_secs(120);
+            let timeout = Duration::from_secs(1800);
 
             loop {
                 tokio::time::sleep(check_interval).await;

@@ -230,7 +230,10 @@ async fn chat_stream(
 
         let mut poll_count = 0u64;
         let start = std::time::Instant::now();
-        let max_wait = Duration::from_secs(120); // 2 min max before timeout
+        // Long turns (code review, multi-tool research) take minutes; the
+        // stream ends on turn completion, so this is a stuck-agent safety
+        // ceiling, not the expected path. 30 minutes matches the CLI poll.
+        let max_wait = Duration::from_secs(1800); // 30 min max before timeout
         while !done {
             // Wait for notification or poll at 100ms intervals
             tokio::select! {
