@@ -20,10 +20,10 @@ RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
 # Respect pre-configured ZED_BIN (e.g. CI sets ZED_BIN=/bin/true)
 if [ -z "${ZED_BIN:-}" ]; then
-    # Prefer the sibling telos build (latest upstream zed extraction).
-    TELOS_BIN="$SCRIPT_DIR/../telos/target/telos-release/zed"
-    if [ -f "$TELOS_BIN" ]; then
-        ZED_BIN="$TELOS_BIN"
+    # Prefer the sibling telos headless build (minimal agent core).
+    TELOS_HEADLESS="$SCRIPT_DIR/../telos/target/telos-release/telos-headless"
+    if [ -f "$TELOS_HEADLESS" ]; then
+        ZED_BIN="$TELOS_HEADLESS"
     else
         ACTUS_ARCH="$(uname -m)"
         case "$ACTUS_ARCH" in
@@ -53,8 +53,12 @@ warn() { echo -e "${WARN} $*" >&2; }
 step() { echo -e "\n${INFO} ${BOLD}$*${END}"; }
 
 cleanup() {
-    pkill -f "target/debug/" 2>/dev/null || true
-    pkill -f "helix-zed-headless" 2>/dev/null || true
+    # Kill only the processes this repo's flows spawn. Scoping to the
+    # explicit binary paths avoids clobbering sibling cargo builds whose
+    # rustc command lines also contain "target/debug".
+    pkill -f "$SCRIPT_DIR/target/debug/" 2>/dev/null || true
+    pkill -f "$SCRIPT_DIR/helix/.bin/" 2>/dev/null || true
+    pkill -f "$SCRIPT_DIR/../telos/target/telos-release/" 2>/dev/null || true
     sleep 1
 }
 
@@ -108,7 +112,7 @@ test_static_shell() {
 test_health() {
     step "Test: Health endpoint"
     local h
-    h=$(curl -s http://127.0.0.1:$HTTP_PORT/health 2>/dev/null || echo '{"status":"error"}')
+    h=$(curl -s --max-time 5 http://127.0.0.1:$HTTP_PORT/health 2>/dev/null || echo '{"status":"error"}')
     if echo "$h" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='ok' else 1)" 2>/dev/null; then
         pass "Server health: ok"
         local zed agent threads
@@ -126,7 +130,7 @@ test_health() {
 test_files() {
     step "Test: File search"
     local r
-    r=$(curl -s "http://127.0.0.1:$HTTP_PORT/v1/files?q=run.sh&max=3" 2>/dev/null)
+    r=$(curl -s --max-time 5 "http://127.0.0.1:$HTTP_PORT/v1/files?q=run.sh&max=3" 2>/dev/null)
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
     if [ "$count" -gt 0 ]; then
@@ -139,7 +143,7 @@ test_files() {
 test_file_mention() {
     step "Test: File mention"
     local r
-    r=$(curl -s "http://127.0.0.1:$HTTP_PORT/v1/files/mention?q=run.sh" 2>/dev/null)
+    r=$(curl -s --max-time 5 "http://127.0.0.1:$HTTP_PORT/v1/files/mention?q=run.sh" 2>/dev/null)
     local length
     length=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('mention','')))" 2>/dev/null || echo "0")
     if [ "$length" -gt 0 ]; then
@@ -152,7 +156,7 @@ test_file_mention() {
 test_threads() {
     step "Test: Thread listing"
     local r
-    r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/threads 2>/dev/null)
+    r=$(curl -s --max-time 5 http://127.0.0.1:$HTTP_PORT/v1/threads 2>/dev/null)
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('threads',[])))" 2>/dev/null || echo "0")
     pass "Threads: $count"
@@ -162,7 +166,7 @@ test_threads() {
     first_id=$(echo "$r" | python3 -c "import sys,json; ts=json.load(sys.stdin).get('threads',[]); print(ts[0]['id'] if ts else '')" 2>/dev/null)
     if [ -n "$first_id" ]; then
         local detail
-        detail=$(curl -s "http://127.0.0.1:$HTTP_PORT/v1/threads/$first_id" 2>/dev/null)
+        detail=$(curl -s --max-time 5 "http://127.0.0.1:$HTTP_PORT/v1/threads/$first_id" 2>/dev/null)
         local has_id
         has_id=$(echo "$detail" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'id' in d else 1)" 2>/dev/null && echo "1" || echo "0")
         if [ "$has_id" = "1" ]; then
@@ -183,7 +187,7 @@ test_git_status() {
     # top-level ok flag. Retry briefly: the server may still be settling
     # when the first request arrives.
     for _ in 1 2 3 4 5; do
-        r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/git/status 2>/dev/null)
+        r=$(curl -s --max-time 5 http://127.0.0.1:$HTTP_PORT/v1/git/status 2>/dev/null)
         ok=$(echo "$r" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('ok') else 1)" 2>/dev/null && echo "1" || echo "0")
         [ "$ok" = "1" ] && break
         sleep 1
@@ -198,7 +202,7 @@ test_git_status() {
 test_git_log() {
     step "Test: Git log"
     local r
-    r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/git/log?max=3 2>/dev/null)
+    r=$(curl -s --max-time 5 http://127.0.0.1:$HTTP_PORT/v1/git/log?max=3 2>/dev/null)
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('commits',[])))" 2>/dev/null || echo "0")
     if [ "$count" -gt 0 ]; then
@@ -211,7 +215,7 @@ test_git_log() {
 test_git_diff() {
     step "Test: Git diff"
     local r
-    r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/git/diff 2>/dev/null)
+    r=$(curl -s --max-time 5 http://127.0.0.1:$HTTP_PORT/v1/git/diff 2>/dev/null)
     local ok
     ok=$(echo "$r" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'diff' in d or 'error' in d else 1)" 2>/dev/null && echo "1" || echo "0")
     if [ "$ok" = "1" ]; then
@@ -233,7 +237,7 @@ test_llm_chat() {
     fi
 
     local r
-    r=$(curl -s -X POST http://127.0.0.1:$HTTP_PORT/v1/chat/async \
+    r=$(curl -s --max-time 10 -X POST http://127.0.0.1:$HTTP_PORT/v1/chat/async \
         -H "Content-Type: application/json" \
         -d '{"message":"hello, respond with just ok","require_approval":false}' 2>/dev/null)
     local task_id
@@ -299,16 +303,25 @@ start_server() {
     SERVER_PID=$!
     pass "Server started via runner.py (PID: $SERVER_PID)"
 
-    # Wait for HTTP server to be ready
-    for i in $(seq 1 15); do
+    # Wait for the HTTP server AND the agent to come up. The agent takes a
+    # few seconds to connect and report agent_ready (telos sends it ~5s
+    # after the WebSocket connects), so gating on a bare HTTP response
+    # would let the agent-dependent tests (health, chat) race the connect.
+    # Use --max-time so a stalled server fails the readiness loop instead
+    # of hanging the suite.
+    for i in $(seq 1 20); do
         sleep 1
-        if curl -s http://127.0.0.1:$HTTP_PORT/health >/dev/null 2>&1; then
-            pass "HTTP server ready after ${i}s"
+        local health
+        health=$(curl -s --max-time 2 http://127.0.0.1:$HTTP_PORT/health 2>/dev/null || echo '')
+        local ready
+        ready=$(echo "$health" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('zed_connected') and d.get('agent_ready') else 1)" 2>/dev/null && echo 1 || echo 0)
+        if [ "$ready" = "1" ]; then
+            pass "Server and agent ready after ${i}s"
             return 0
         fi
     done
 
-    warn "Server did not become ready within 15s"
+    warn "Server/agent did not become ready within 20s"
     tail -10 "$SERVER_LOG"
     return 1
 }
