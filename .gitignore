@@ -57,3 +57,6 @@ logs
 
 # Pre-compiled binaries (Helix remote_server, etc.)
 .bin/
+
+# Nested telos agent repo (separate private repository)
+/agents/

@@ -20,12 +20,18 @@ RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
 # Respect pre-configured ZED_BIN (e.g. CI sets ZED_BIN=/bin/true)
 if [ -z "${ZED_BIN:-}" ]; then
-    ACTUS_ARCH="$(uname -m)"
-    case "$ACTUS_ARCH" in
-        x86_64|amd64) ACTUS_ARCH="amd64" ;;
-        aarch64|arm64) ACTUS_ARCH="arm64" ;;
-    esac
-    ZED_BIN="$HELIX_DIR/.bin/helix-zed-headless-$ACTUS_ARCH"
+    # Prefer the sibling telos build (latest upstream zed extraction).
+    TELOS_BIN="$SCRIPT_DIR/../telos/target/telos-release/zed"
+    if [ -f "$TELOS_BIN" ]; then
+        ZED_BIN="$TELOS_BIN"
+    else
+        ACTUS_ARCH="$(uname -m)"
+        case "$ACTUS_ARCH" in
+            x86_64|amd64) ACTUS_ARCH="amd64" ;;
+            aarch64|arm64) ACTUS_ARCH="arm64" ;;
+        esac
+        ZED_BIN="$HELIX_DIR/.bin/helix-zed-headless-$ACTUS_ARCH"
+    fi
 fi
 SERVER_LOG="/tmp/actus-server.log"
 HTTP_PORT="${ACTUS_HTTP_PORT:-9090}"
