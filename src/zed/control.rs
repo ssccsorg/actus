@@ -118,19 +118,29 @@ pub async fn run_ws_server(
         // Read handle: process incoming events with periodic health check
         let read_handle = tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    msg = read.next() => {
-                        if !handle_ws_message(&zed_manager_for_read, msg).await {
-                            break;
-                        }
-                    },
+                // Pick the branch with select, but acquire the manager lock
+                // only AFTER the select resolves. Acquiring a tokio RwLock
+                // read guard inside a select arm risks the branch being
+                // cancelled mid-acquire (the ping arm wins while the read
+                // is pending), which can corrupt the semaphore permit count
+                // and stall every later reader forever.
+                let msg = tokio::select! {
+                    m = read.next() => Some(m),
                     // Health check: break if zed_connect was cleared by the
                     // health monitor (forces reconnection loop iteration).
-                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => None,
+                };
+                match msg {
+                    Some(m) => {
+                        if !handle_ws_message(&zed_manager_for_read, m).await {
+                            break;
+                        }
+                    }
+                    None => {
                         if !zed_manager_for_read.read().await.zed_connected {
                             break;
                         }
-                    },
+                    }
                 }
             }
         });
