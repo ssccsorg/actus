@@ -171,10 +171,17 @@ test_threads() {
 
 test_git_status() {
     step "Test: Git status"
-    local r
-    r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/git/status 2>/dev/null)
-    local ok
-    ok=$(echo "$r" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'files' in d or 'ahead' in d or 'behind' in d else 1)" 2>/dev/null && echo "1" || echo "0")
+    local r ok
+    # The endpoint returns {\"ok\": true, \"status\": { ... }} with
+    # ahead/behind nested inside status, so the check keys off the
+    # top-level ok flag. Retry briefly: the server may still be settling
+    # when the first request arrives.
+    for _ in 1 2 3 4 5; do
+        r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/git/status 2>/dev/null)
+        ok=$(echo "$r" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('ok') else 1)" 2>/dev/null && echo "1" || echo "0")
+        [ "$ok" = "1" ] && break
+        sleep 1
+    done
     if [ "$ok" = "1" ]; then
         pass "Git status returned valid response"
     else
