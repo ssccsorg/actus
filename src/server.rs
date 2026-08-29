@@ -37,7 +37,7 @@ impl AppState {
     }
 }
 
-type SharedState = Arc<AppState>;
+pub type SharedState = Arc<AppState>;
 
 /// Default agent serving endpoints that do not name an agent.
 async fn default_agent(state: &SharedState) -> Result<Arc<dyn AgentBackend>, StatusCode> {
@@ -762,8 +762,11 @@ async fn cancel_turn(State(state): State<SharedState>) -> Json<serde_json::Value
 
 // ── Router ─────────────────────────────────────────────────────────────
 
-pub async fn run_http_server(addr: &str, state: SharedState) -> anyhow::Result<()> {
-    let app = Router::new()
+/// Build the axum router over the given state. Kept separate from
+/// `run_http_server` so integration tests can serve the same router on
+/// an ephemeral port without binding a fixed address.
+pub fn build_router(state: SharedState) -> Router {
+    Router::new()
         .route("/health", get(health))
         .route("/v1/chat", post(chat_stream))
         .route("/v1/chat/async", post(chat_async))
@@ -783,7 +786,11 @@ pub async fn run_http_server(addr: &str, state: SharedState) -> anyhow::Result<(
         .route("/v1/git/diff", get(git_diff))
         .route("/v1/git/log", get(git_log))
         .layer(tower_http::cors::CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state)
+}
+
+pub async fn run_http_server(addr: &str, state: SharedState) -> anyhow::Result<()> {
+    let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("HTTP API server listening on http://{}", addr);
