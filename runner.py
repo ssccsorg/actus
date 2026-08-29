@@ -158,12 +158,12 @@ def main():
     # Signal handler for clean shutdown
     def shutdown(signum, frame):
         print(f"\n{C.YELLOW}Shutting down...{C.END}", file=sys.stderr)
-        server_proc.terminate()
-        try:
-            server_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        # Never call server_proc.wait() here: the main path may already be
+        # inside wait() holding _waitpid_lock, so a second wait() from the
+        # handler deadlocks and the SIGTERM is never acknowledged. Use a
+        # non-blocking poll and kill instead.
+        if server_proc.poll() is None:
             server_proc.kill()
-            server_proc.wait()
         log_file.close()
         print(f"{C.GREEN}Done.{C.END}", file=sys.stderr)
         sys.exit(0)
