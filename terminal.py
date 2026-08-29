@@ -602,8 +602,13 @@ async def send_chat(client: NexClient, message: str):
     shown_prev = False
     seen_approvals = set()
     last_approval_check = 0.0
+    tool_statuses: dict = {}  # message_id -> last status rendered
 
-    async with aiohttp.ClientSession() as session:
+    # The session is recreated on a transport error: a stale keep-alive
+    # connection can fail with EAGAIN/EPIPE on write (raw OSError, not
+    # aiohttp.ClientError), and reusing it would kill the whole chat.
+    session = aiohttp.ClientSession()
+    try:
         while waited < max_wait:
             try:
                 async with session.get(
@@ -628,35 +633,45 @@ async def send_chat(client: NexClient, message: str):
                     if new_content:
                         # A new message id means the model moved on to the
                         # next message in the turn: a tool call, a new
-                        # thinking block, or the final answer. Reset the
-                        # diff base so the new message prints in full.
+                        # thinking block, or the final answer.
                         if msg_id != current_msg_id:
                             current_msg_id = msg_id
                             shown = ""
                             if entry_type == "tool_call":
+                                # Show tool activity compactly: name and
+                                # status only. The full content (tool
+                                # results, file dumps) is for the model,
+                                # not the terminal.
+                                tool_statuses[msg_id] = tool_status or "running"
                                 print(f"\n{C.YELLOW}🔧 {tool_name or 'tool call'} [{tool_status or 'running'}]{C.END}", end="", flush=True)
                             elif new_content.lstrip().startswith("<thinking>"):
                                 print(f"\n{C.DIM}💭 thinking{C.END}\n", end="", flush=True)
                             elif shown_prev:
                                 print()
 
-                        # The server serves the full message content; diff
-                        # locally so model edits replace instead of
-                        # appending invalid slices.
-                        if new_content.startswith(shown):
-                            delta = new_content[len(shown):]
-                            shown = new_content
-                            if delta:
-                                print(delta, end="", flush=True)
+                        # Tool status transitions update the compact line
+                        # instead of diff-printing the whole message.
+                        if entry_type == "tool_call":
+                            if tool_status != tool_statuses.get(msg_id):
+                                tool_statuses[msg_id] = tool_status or "running"
+                                print(f" [{tool_status or 'running'}]", end="", flush=True)
+                            shown = new_content  # consume; never dump tool output
+                            shown_prev = True
                         else:
-                            # The model rewrote its message mid-stream.
-                            # An append-only terminal cannot erase the old
-                            # text, so mark the revision to distinguish it
-                            # from duplicated output.
-                            shown = new_content
-                            print(f"\n{C.DIM}[revised]{C.END}\n", end="", flush=True)
-                            print(shown, end="", flush=True)
-                        shown_prev = True
+                            # The server serves the full message content;
+                            # diff locally so model edits replace instead
+                            # of appending invalid slices.
+                            if new_content.startswith(shown):
+                                delta = new_content[len(shown):]
+                                shown = new_content
+                                if delta:
+                                    print(delta, end="", flush=True)
+                            else:
+                                # The model rewrote its message mid-stream.
+                                shown = new_content
+                                print(f"\n{C.DIM}[revised]{C.END}\n", end="", flush=True)
+                                print(shown, end="", flush=True)
+                            shown_prev = True
                     else:
                         shown_prev = False
 
@@ -665,8 +680,11 @@ async def send_chat(client: NexClient, message: str):
                         print()
                         return
 
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                pass
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                # Transport errors (EAGAIN/EPIPE on a stale connection)
+                # are transient: drop the poisoned session and retry.
+                await session.close()
+                session = aiohttp.ClientSession()
 
             # Prompt for pending tool-call authorizations (ask mode).
             if waited - last_approval_check >= 1.0:
@@ -687,6 +705,8 @@ async def send_chat(client: NexClient, message: str):
 
             await asyncio.sleep(poll_interval)
             waited += poll_interval
+    finally:
+        await session.close()
 
     print(f"\n{C.YELLOW}⚠ Timeout after 120s{C.END}\n")
 
