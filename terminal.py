@@ -31,6 +31,11 @@ import sys
 from pathlib import Path
 
 try:
+    import fcntl  # unix only; used to restore blocking stdio
+except ImportError:
+    fcntl = None
+
+try:
     import httpx
 except ImportError:
     import subprocess as _sp
@@ -894,7 +899,30 @@ async def chat_session(client: NexClient) -> str | None:
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
+def _restore_blocking_stdio() -> None:
+    """Clear O_NONBLOCK on the standard streams.
+
+    When this CLI is launched by a tool runner or an agent shell, the
+    standard streams can arrive as non-blocking pipes. A print() then
+    raises BlockingIOError(35) once the pipe buffer fills, which crashes
+    the client mid-session. Restoring blocking mode makes writes wait for
+    the reader instead of raising, which is the correct behaviour for an
+    interactive terminal.
+    """
+    if fcntl is None:
+        return
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            fd = stream.fileno()
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            if flags & os.O_NONBLOCK:
+                fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+        except (AttributeError, OSError, ValueError):
+            continue
+
+
 def main():
+    _restore_blocking_stdio()
     parser = argparse.ArgumentParser(description=": REST chat client for Rust  server")
     parser.add_argument("--port", type=int, default=9090,
                         help="Server port (default: 9090)")
@@ -985,8 +1013,15 @@ def main():
         asyncio.run(async_main())
     except KeyboardInterrupt:
         print(f"\n{C.YELLOW}Shutdown{C.END}")
+    except BlockingIOError:
+        # The output pipe went away or filled up (non-interactive runner).
+        # Exit quietly instead of dumping a traceback into a dead stream.
+        pass
     finally:
-        print(f"{C.GREEN}Done{C.END}")
+        try:
+            print(f"{C.GREEN}Done{C.END}")
+        except (BlockingIOError, OSError):
+            pass
 
 
 if __name__ == "__main__":
