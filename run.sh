@@ -227,7 +227,7 @@ test_git_diff() {
 }
 
 test_llm_chat() {
-    step "Test: LLM chat (requires API key)"
+    step "Test: LLM chat round trip (requires API key)"
     local api_key="${LLM_API_KEY:-}"
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
         api_key=$(grep -E '^LLM_API_KEY=' "$SCRIPT_DIR/.env" | head -1 | cut -d= -f2-)
@@ -241,13 +241,38 @@ test_llm_chat() {
     r=$(curl -s --max-time 10 -X POST http://127.0.0.1:$HTTP_PORT/v1/chat/async \
         -H "Content-Type: application/json" \
         -d '{"message":"hello, respond with just ok","require_approval":false}' 2>/dev/null)
-    local task_id
+    local task_id thread_id
     task_id=$(echo "$r" | python3 -c "import sys,json; print(json.load(sys.stdin).get('task_id',''))" 2>/dev/null || echo "")
-    if [ -n "$task_id" ]; then
-        pass "Chat async returned task_id: ${task_id:0:12}..."
+    thread_id=$(echo "$r" | python3 -c "import sys,json; print(json.load(sys.stdin).get('thread_id',''))" 2>/dev/null || echo "")
+    if [ -n "$task_id" ] && [ -n "$thread_id" ]; then
+        pass "Chat async returned task_id: ${task_id:0:12}... thread: ${thread_id:0:12}..."
     else
-        warn "Chat async did not return task_id"
+        warn "Chat async did not return task_id/thread_id"
+        return 0
     fi
+
+    # Poll the thread until the turn completes. This verifies the full
+    # loop end to end: actus -> agent -> LLM -> completion. The timeout
+    # must be generous: a real provider turn routinely takes 10-60s.
+    local timeout="${LLM_CHAT_TIMEOUT:-90}"
+    local i
+    for i in $(seq 1 "$timeout"); do
+        local poll completed content
+        poll=$(curl -s --max-time 5 "http://127.0.0.1:$HTTP_PORT/v1/threads/$thread_id/poll" 2>/dev/null || echo "")
+        completed=$(echo "$poll" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('completed') else 1)" 2>/dev/null && echo "1" || echo "0")
+        if [ "$completed" = "1" ]; then
+            content=$(echo "$poll" | python3 -c "import sys,json; print(json.load(sys.stdin).get('new_content','') or '')" 2>/dev/null || echo "")
+            if [ -n "$content" ]; then
+                pass "Turn completed after ${i}s: $(echo "$content" | head -c 60)..."
+            else
+                warn "Turn completed after ${i}s but content is empty"
+            fi
+            return 0
+        fi
+        sleep 1
+    done
+
+    warn "Chat did not complete within ${timeout}s (thread $thread_id)"
 }
 
 # ── Server start ──────────────────────────────────────────────────────
