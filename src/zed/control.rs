@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::accept_async_with_config;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::server::WsCommandTx;
@@ -47,7 +48,15 @@ pub async fn run_ws_server(
         let (stream, peer) = listener.accept().await?;
         tracing::info!("Zed connecting from {}", peer);
 
-        let ws_stream = accept_async(stream).await?;
+        // The agent's tool results can be large (a broad find_path glob on a
+        // big workspace produced a 28MB message). The tungstenite default
+        // cap of 16MB kills the connection when exceeded, aborting the turn;
+        // raise the ceiling so large tool output flows instead of breaking
+        // the WebSocket.
+        let mut ws_config = WebSocketConfig::default();
+        ws_config.max_message_size = Some(256 * 1024 * 1024);
+        ws_config.max_frame_size = Some(256 * 1024 * 1024);
+        let ws_stream = accept_async_with_config(stream, Some(ws_config)).await?;
         let (mut write, mut read) = ws_stream.split();
 
         // Increment reconnect counter and mark connected

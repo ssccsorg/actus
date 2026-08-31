@@ -224,6 +224,8 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 });
+                // Debounced thread persistence (see ZedManager::save_threads).
+                ZedManager::spawn_thread_saver(manager.clone());
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
                 let child = launch_zed(
@@ -342,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 {
                     let g = mgr.read().await;
-                    g.save_threads();
+                    g.flush_threads();
                 }
             }
 

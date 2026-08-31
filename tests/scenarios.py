@@ -165,6 +165,33 @@ def relaunch_agent(env, user_data_dir, workdir):
 
 # ── scenarios ──────────────────────────────────────────────────────────
 
+def scenario_feature_baseline():
+    """Baseline runtime-feature probe run before any cut: file read and
+    mention-format turns. Guards against cleanup silently breaking the
+    agent's file tooling or mention handling."""
+    print("== S0: runtime feature baseline (file read, mention)")
+    tid = chat_async(
+        "read the file run.sh and quote its very first line exactly"
+    )
+    check("file-read turn accepted", bool(tid), str(tid)[:18] if tid else "")
+    if tid:
+        check("file-read turn completed", bool(poll_thread(tid, timeout=150)))
+        thread = get_thread(tid) or {}
+        content = " ".join(
+            m.get("content", "") for m in thread.get("messages", [])
+            if m.get("role") == "assistant" and m.get("entry_type") != "tool_call"
+        )
+        check("answer contains the file content",
+              "usr/bin/env" in content or "bash" in content,
+              "first line quoted")
+    tid2 = chat_async(
+        "@run.sh is mentioned; summarize what this script does in one line"
+    )
+    check("mention-format turn accepted", bool(tid2), str(tid2)[:18] if tid2 else "")
+    if tid2:
+        check("mention-format turn completed", bool(poll_thread(tid2, timeout=150)))
+
+
 def scenario_tool_turn():
     print("== S1: tool-driven turn")
     tid = chat_async(
@@ -308,6 +335,35 @@ def ensure_agent():
     return bool(wait_ready(timeout=40))
 
 
+def scenario_fetch_and_subagent():
+    print("== S7: url fetch + sub-agent execution")
+    tid = chat_async(
+        "use the fetch tool to fetch http://127.0.0.1:9090/health and quote the status field exactly"
+    )
+    check("fetch turn accepted", bool(tid), str(tid)[:18] if tid else "")
+    if tid:
+        check("fetch turn completed", bool(poll_thread(tid, timeout=150)))
+        thread = get_thread(tid) or {}
+        content = " ".join(
+            m.get("content", "") for m in thread.get("messages", [])
+            if m.get("role") == "assistant" and m.get("entry_type") != "tool_call"
+        )
+        check("fetch answer reflects the fetched body",
+              "ok" in content, "status quoted")
+    tid2 = chat_async(
+        "use the spawn_agent tool to start a subagent with the message 'reply with the single word done', then report its result"
+    )
+    check("sub-agent turn accepted", bool(tid2), str(tid2)[:18] if tid2 else "")
+    if tid2:
+        check("sub-agent turn completed", bool(poll_thread(tid2, timeout=180)))
+        thread = get_thread(tid2) or {}
+        content = " ".join(
+            m.get("content", "") for m in thread.get("messages", [])
+            if m.get("role") == "assistant" and m.get("entry_type") != "tool_call"
+        )
+        check("sub-agent result reported", bool(content), content[:80])
+
+
 def scenario_soak():
     print(f"== S6: soak ({SOAK_MINUTES} min)")
     ensure_agent()
@@ -343,11 +399,13 @@ def main():
         print("aborting: agent not ready")
         sys.exit(1)
 
+    scenario_feature_baseline()
     scenario_tool_turn()
     scenario_concurrent()
     scenario_reconnect()
     scenario_mid_turn_resume()
     scenario_multi_turn_resume()
+    scenario_fetch_and_subagent()
     if SOAK_MINUTES > 0:
         scenario_soak()
 

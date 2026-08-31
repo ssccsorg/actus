@@ -5,6 +5,7 @@ pub mod control;
 pub mod types;
 
 use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Channel sender for WebSocket commands to Zed. Shared between
 /// `AppState` and `ZedManager` so cancel can send without acquiring the
@@ -31,11 +32,11 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json;
 use tokio::process::Command;
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{mpsc, watch, Notify, RwLock};
 use uuid::Uuid;
 
 /// Manages a single Zed WebSocket connection and message dispatch.
@@ -73,6 +74,8 @@ pub struct ZedManager {
     /// Pending chat messages that need to be re-sent after reconnection.
     /// Stores (request_id, thread_id, message) tuples.
     pub pending_chat_queue: Vec<(String, String, String)>,
+    /// Dirty flag for the debounced background thread-saver.
+    pub threads_dirty: AtomicBool,
     /// Tool-call authorizations awaiting a human decision, keyed by
     /// tool_call_id (ask mode).
     pub pending_authorizations: HashMap<String, PendingAuthorization>,
@@ -124,6 +127,7 @@ impl ZedManager {
             pending_authorizations: HashMap::new(),
             prior_message_content: HashMap::new(),
             sentinel_cap: 512,
+            threads_dirty: AtomicBool::new(false),
         }
     }
 
@@ -391,6 +395,16 @@ impl ZedManager {
 
     /// Persist all threads to the JSON file.
     pub fn save_threads(&self) {
+        // Debounced: mark dirty and let the background saver persist. The
+        // previous implementation wrote the full file synchronously while
+        // the caller held the manager write lock; on a slow or full disk
+        // that blocked every other manager user and froze the server.
+        self.threads_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Write the full threads file synchronously. Used at shutdown, where
+    /// the process is about to exit and the debounced saver may not run.
+    pub fn flush_threads(&self) {
         match serde_json::to_string_pretty(&self.threads) {
             Ok(json) => {
                 if let Err(e) = std::fs::write(&self.threads_file, &json) {
@@ -401,6 +415,44 @@ impl ZedManager {
                 tracing::error!("Failed to serialize threads: {}", e);
             }
         }
+    }
+
+    /// Background persistence loop: every second, if the dirty flag is set,
+    /// snapshot the threads under a read lock, release it, and write the
+    /// file on a blocking thread. Keeps the heavy JSON serialization and
+    /// disk write off the manager lock and off the async runtime.
+    pub fn spawn_thread_saver(manager: Arc<RwLock<ZedManager>>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let dirty = manager
+                    .read()
+                    .await
+                    .threads_dirty
+                    .swap(false, Ordering::SeqCst);
+                if !dirty {
+                    continue;
+                }
+                let (snapshot, path) = {
+                    let mgr = manager.read().await;
+                    (mgr.threads.clone(), mgr.threads_file.clone())
+                };
+                tokio::task::spawn_blocking(move || {
+                    match serde_json::to_string_pretty(&snapshot) {
+                        Ok(json) => {
+                            if let Err(e) = std::fs::write(&path, &json) {
+                                tracing::error!("Failed to write threads file: {}", e);
+                            }
+                        }
+                        Err(e) => tracing::error!("Failed to serialize threads: {}", e),
+                    }
+                })
+                .await
+                .ok();
+            }
+        });
     }
 
     /// Load threads from a JSON file. Returns an empty map if the file does not exist or is unreadable.
