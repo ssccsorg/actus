@@ -378,6 +378,23 @@ run_tests() {
     info "${BOLD}All tests passed.${END}"
 }
 
+# ── Real-scenario tests ────────────────────────────────────────────────
+
+run_scenarios() {
+    info "${BOLD}Real-scenario tests (tool turns, concurrency, reconnect, soak)${END}"
+    start_server
+    echo ""
+    local soak="${SOAK_MINUTES:-2}"
+    if ACTUS_HTTP_PORT="$HTTP_PORT" ACTUS_WS_PORT="$WS_PORT" \
+        TELOS_BIN="$ZED_BIN" SOAK_MINUTES="$soak" \
+        python3 "$SCRIPT_DIR/tests/scenarios.py"; then
+        pass "Scenarios passed"
+    else
+        fail "Scenarios failed"
+    fi
+    cleanup
+}
+
 # ── Interactive CLI ───────────────────────────────────────────────────
 
 run_cli() {
@@ -399,6 +416,7 @@ Actus launcher and test suite
 Modes:
   (default)       Build, start server, then launch CLI
   --test          Run static checks and integration tests
+  --scenarios     Run real-scenario tests (tool, concurrency, reconnect, soak)
   --server-only   Start server only (background)
   --cli           CLI only (connect to already-running server)
   --help          Show this help
@@ -420,7 +438,10 @@ case "$MODE" in
     --test|-t)
         run_tests
         ;;
-    --server-only|-s)
+    --scenarios|-s)
+        run_scenarios
+        ;;
+    --server-only|-o)
         ensure_zed_binary
         info "Starting server only via runner.py"
         python3 "$RUNNER" --server-only --workdir "$PROJECT_DIR" &
