@@ -111,6 +111,19 @@ def find_agent_pid():
     return int(out[0]) if out else None
 
 
+def kill_all_agents():
+    """Kill every telos-headless agent. The reconnect scenarios own the
+    agent lifecycle; leaving relaunched agents running lets a stale one
+    reconnect instantly and mask the disconnect window."""
+    out = subprocess.run(
+        ["pgrep", "-f", "telos-headless --headless"],
+        capture_output=True, text=True,
+    ).stdout.split()
+    for pid in out:
+        subprocess.run(["kill", "-9", pid], capture_output=True)
+    return len(out)
+
+
 def agent_launch_contract(pid):
     """Extract the user-data-dir and workdir from the running agent, then
     rebuild the launch env the way actus's launch_zed does."""
@@ -173,16 +186,18 @@ def scenario_tool_turn():
 
 def scenario_concurrent():
     print("== S2: concurrent threads")
+    # Light text-only prompts: the agent processes turns serially, so the
+    # goal is server-side concurrency handling, not LLM latency.
     prompts = [
-        "count the files in this workspace",
-        "what is the current git branch?",
-        "reply with exactly the word ok",
+        "reply with exactly the word alpha",
+        "reply with exactly the word beta",
+        "reply with exactly the word gamma",
     ]
     tids = [chat_async(p) for p in prompts]
     check("3 concurrent chats accepted", all(tids), f"{sum(1 for t in tids if t)}/3")
     if not all(tids):
         return
-    results = [poll_thread(t, timeout=120) for t in tids]
+    results = [poll_thread(t, timeout=180) for t in tids]
     done = sum(1 for r in results if r)
     check("all 3 turns completed independently", done == 3, f"{done}/3")
 
@@ -194,10 +209,10 @@ def scenario_reconnect():
     if not pid:
         return
     env, user_data_dir, workdir = agent_launch_contract(pid)
-    subprocess.run(["kill", "-9", str(pid)], check=True)
-    print("    killed agent, waiting for disconnect detection...")
+    kill_all_agents()
+    print("    killed all agents, waiting for disconnect detection...")
     disconnected = None
-    for _ in range(10):
+    for _ in range(12):
         h = health()
         if h and not h.get("zed_connected"):
             disconnected = h
@@ -228,8 +243,8 @@ def scenario_mid_turn_resume():
     if not tid:
         return
     time.sleep(1.5)  # let the turn go in flight
-    subprocess.run(["kill", "-9", str(pid)], check=True)
-    print("    killed agent mid-turn, relaunching...")
+    kill_all_agents()
+    print("    killed agents mid-turn, relaunching...")
     relaunch_agent(env, user_data_dir, workdir)
     h = wait_ready(timeout=40)
     check("agent recovered after mid-turn kill", bool(h))
@@ -237,8 +252,65 @@ def scenario_mid_turn_resume():
     check("in-flight turn completed after reconnect", bool(poll))
 
 
+def scenario_multi_turn_resume():
+    print("== S5: multi-turn thread resume after agent restart")
+    pid = find_agent_pid()
+    check("live agent process found", bool(pid), f"pid={pid}" if pid else "")
+    if not pid:
+        return
+    env, user_data_dir, workdir = agent_launch_contract(pid)
+    magic = str(int(time.time()) % 100000)
+    tid = chat_async(f"remember this magic number: {magic}. reply with exactly the word ok")
+    check("seed turn accepted", bool(tid), str(tid)[:18] if tid else "")
+    if not tid:
+        return
+    check("seed turn completed", bool(poll_thread(tid, timeout=120)))
+    kill_all_agents()
+    print("    killed agents, relaunching for the follow-up...")
+    relaunch_agent(env, user_data_dir, workdir)
+    h = wait_ready(timeout=40)
+    check("agent recovered before the follow-up", bool(h))
+    tid2 = chat_async(f"what was the magic number I told you? reply with only the number.", thread_id=tid)
+    check("follow-up accepted on the same thread", bool(tid2))
+    poll = poll_thread(tid, timeout=120) if tid2 else None
+    check("follow-up turn completed", bool(poll))
+    thread = get_thread(tid) or {}
+    content = " ".join(
+        m.get("content", "") for m in thread.get("messages", [])
+        if m.get("role") == "assistant" and m.get("entry_type") != "tool_call"
+    )
+    check("follow-up answer carries the remembered context", magic in content,
+          f"magic={magic}")
+
+
+def ensure_agent():
+    """Relaunch a single agent if none is running (used by the soak, which
+    may follow scenarios that own the agent lifecycle)."""
+    if find_agent_pid():
+        return True
+    pid = find_agent_pid()
+    env, user_data_dir, workdir = agent_launch_contract(pid) if pid else (
+        {
+            "ZED_EXTERNAL_SYNC_ENABLED": "true",
+            "ZED_WEBSOCKET_SYNC_ENABLED": "true",
+            "ZED_HELIX_URL": f"127.0.0.1:{WS_PORT}",
+            "ZED_HELIX_TOKEN": "test-token",
+            "HELIX_SESSION_ID": "ses_actus-reconnect-test",
+            "ZED_STATELESS": "1",
+            "ZED_WORK_DIR": os.getcwd(),
+            "ZED_TOOL_APPROVAL": "always",
+            "RUST_LOG": "info",
+        },
+        None,
+        os.getcwd(),
+    )
+    relaunch_agent(env, user_data_dir, workdir)
+    return bool(wait_ready(timeout=40))
+
+
 def scenario_soak():
-    print(f"== S5: soak ({SOAK_MINUTES} min)")
+    print(f"== S6: soak ({SOAK_MINUTES} min)")
+    ensure_agent()
     checks = 0
     drops = 0
     end = time.time() + SOAK_MINUTES * 60
@@ -275,6 +347,7 @@ def main():
     scenario_concurrent()
     scenario_reconnect()
     scenario_mid_turn_resume()
+    scenario_multi_turn_resume()
     if SOAK_MINUTES > 0:
         scenario_soak()
 

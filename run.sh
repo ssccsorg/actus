@@ -385,9 +385,12 @@ run_scenarios() {
     start_server
     echo ""
     local soak="${SOAK_MINUTES:-2}"
+    # -u: stream scenario progress unbuffered; the launcher redirects the
+    # output to a log, and buffered prints would hide a long-running
+    # scenario until it exits.
     if ACTUS_HTTP_PORT="$HTTP_PORT" ACTUS_WS_PORT="$WS_PORT" \
         TELOS_BIN="$ZED_BIN" SOAK_MINUTES="$soak" \
-        python3 "$SCRIPT_DIR/tests/scenarios.py"; then
+        python3 -u "$SCRIPT_DIR/tests/scenarios.py"; then
         pass "Scenarios passed"
     else
         fail "Scenarios failed"

@@ -212,7 +212,6 @@ actus/
 │   └── subtree/         Helix Zed fork (git subtree)
 ├── runner.py            Server launcher (build + run)
 ├── terminal.py          Interactive chat CLI
-├── actus-server.py      Python reference server
 ├── run.sh               Gateway: build, test, launch
 ├── Dockerfile           Multi-stage image builder
 └── .github/workflows/
