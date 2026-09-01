@@ -381,7 +381,18 @@ run_tests() {
 # ── Real-scenario tests ────────────────────────────────────────────────
 
 run_scenarios() {
-    info "${BOLD}Real-scenario tests (tool turns, concurrency, reconnect, soak)${END}"
+    local fake="${ACTUS_FAKE:-0}"
+    if [ "$fake" = "1" ]; then
+        info "${BOLD}Deterministic contract scenarios (fake backend, no LLM)${END}"
+        # The fake backend answers every prompt with a fixed string, so the
+        # scenario checks are reproducible without an API key.
+        export TELOS_FAKE_BACKEND=1
+        export ACTUS_FAKE=1
+        LLM_API_KEY=""
+        DEEPSEEK_API_KEY=""
+    else
+        info "${BOLD}Real-scenario tests (tool turns, concurrency, reconnect, soak)${END}"
+    fi
     start_server
     echo ""
     local soak="${SOAK_MINUTES:-2}"
@@ -443,6 +454,12 @@ case "$MODE" in
         ;;
     --scenarios|-s)
         run_scenarios
+        ;;
+    --scenarios-fake|-sf)
+        ACTUS_FAKE=1 run_scenarios
+        ;;
+    --scenarios-llm|-sl)
+        ACTUS_FAKE=0 run_scenarios
         ;;
     --server-only|-o)
         ensure_zed_binary
