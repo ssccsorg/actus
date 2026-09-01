@@ -364,6 +364,31 @@ def scenario_fetch_and_subagent():
         check("sub-agent result reported", bool(content), content[:80])
 
 
+def scenario_thread_mention():
+    """Thread mention: a follow-up turn references an earlier thread by its
+    zed:///agent/thread/{id}?name=... URI. Guards the cross-thread
+    information sharing surface that thread mentions provide. LSP
+    diagnostics mentions are intentionally excluded from this probe."""
+    print("== S8: thread mention (cross-thread context)")
+    tid_a = chat_async(
+        "reply with exactly one word: the base name of the current working directory"
+    )
+    check("seed thread accepted", bool(tid_a), str(tid_a)[:18] if tid_a else "")
+    if not tid_a:
+        return
+    check("seed thread completed", bool(poll_thread(tid_a, timeout=180)))
+    tid_b = chat_async(
+        f"the thread mentioned at zed:///agent/thread/{tid_a}?name=seed "
+        "is referenced as context; acknowledge it and continue"
+    )
+    check("thread-mention turn accepted", bool(tid_b), str(tid_b)[:18] if tid_b else "")
+    if tid_b:
+        check(
+            "thread-mention turn completed",
+            bool(poll_thread(tid_b, timeout=180)),
+        )
+
+
 def scenario_soak():
     print(f"== S6: soak ({SOAK_MINUTES} min)")
     ensure_agent()
@@ -406,6 +431,7 @@ def main():
     scenario_mid_turn_resume()
     scenario_multi_turn_resume()
     scenario_fetch_and_subagent()
+    scenario_thread_mention()
     if SOAK_MINUTES > 0:
         scenario_soak()
 
