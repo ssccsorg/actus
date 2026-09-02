@@ -249,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Launch every configured agent and register it in the fabric.
     let mut registry = AgentRegistry::new();
-    let mut children: Vec<tokio::process::Child> = Vec::new();
+    let mut children: Vec<std::process::Child> = Vec::new();
     // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
     let mut monitors: Vec<(Arc<RwLock<TelosManager>>, WsCommandTx)> = Vec::new();
     // Per-agent user data dirs stay alive for the process lifetime; Telos
@@ -504,7 +504,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             r = http_server => {
                 cli.kill().await.ok();
-                for c in children.iter_mut() { c.kill().await.ok(); }
+                for c in children.iter_mut() { c.kill().ok(); }
                 r.unwrap()?
             },
             result = cli.wait() => {
@@ -515,7 +515,7 @@ async fn main() -> anyhow::Result<()> {
             },
             _ = shutdown_rx => {
                 cli.kill().await.ok();
-                for c in children.iter_mut() { c.kill().await.ok(); }
+                for c in children.iter_mut() { c.kill().ok(); }
                 tracing::info!("Shutdown complete");
             },
         }
@@ -524,11 +524,11 @@ async fn main() -> anyhow::Result<()> {
         // Wait for servers or shutdown signal
         tokio::select! {
             r = http_server => {
-                for c in children.iter_mut() { c.kill().await.ok(); }
+                for c in children.iter_mut() { c.kill().ok(); }
                 r.unwrap()?
             },
             _ = shutdown_rx => {
-                for c in children.iter_mut() { c.kill().await.ok(); }
+                for c in children.iter_mut() { c.kill().ok(); }
                 tracing::info!("Shutdown complete");
             },
         }

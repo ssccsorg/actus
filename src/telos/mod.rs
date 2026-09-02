@@ -35,7 +35,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json;
-use tokio::process::Command;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 use uuid::Uuid;
 
@@ -561,21 +560,20 @@ impl TelosManager {
     }
 }
 
-pub async fn launch_telos(
+/// Build the telos launch command. Kept separate from spawning so the
+/// launch contract (argv and the `TELOS_*` env set) is unit-testable
+/// without a real telos binary.
+fn telos_command(
     bin_path: &Path,
     workdir: &Path,
     user_data_dir: &Path,
     session_id: &str,
     ws_host: &str,
     tool_approval: &str,
-    stderr_log: &Path,
-) -> anyhow::Result<tokio::process::Child> {
-    tracing::info!("Launching telos...");
-
-    let stderr_log = std::fs::File::create(stderr_log)
-        .map_err(|e| anyhow::anyhow!("cannot create stderr log {}: {}", stderr_log.display(), e))?;
-    let child = Command::new(bin_path)
-        .args(["--headless", "--allow-multiple-instances"])
+    stderr_log: std::fs::File,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin_path);
+    cmd.args(["--headless", "--allow-multiple-instances"])
         .arg("--user-data-dir")
         .arg(user_data_dir)
         .arg(workdir)
@@ -588,7 +586,33 @@ pub async fn launch_telos(
         .env("TELOS_TOOL_APPROVAL", tool_approval)
         .env("RUST_LOG", "info")
         .stdout(std::process::Stdio::null())
-        .stderr(stderr_log)
+        .stderr(std::process::Stdio::from(stderr_log));
+    cmd
+}
+
+pub async fn launch_telos(
+    bin_path: &Path,
+    workdir: &Path,
+    user_data_dir: &Path,
+    session_id: &str,
+    ws_host: &str,
+    tool_approval: &str,
+    stderr_log: &Path,
+) -> anyhow::Result<std::process::Child> {
+    tracing::info!("Launching telos...");
+
+    let stderr_log = std::fs::File::create(stderr_log)
+        .map_err(|e| anyhow::anyhow!("cannot create stderr log {}: {}", stderr_log.display(), e))?;
+    let mut cmd = telos_command(
+        bin_path,
+        workdir,
+        user_data_dir,
+        session_id,
+        ws_host,
+        tool_approval,
+        stderr_log,
+    );
+    let child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("cannot spawn {}: {}", bin_path.display(), e))?;
 
@@ -698,4 +722,73 @@ pub fn ensure_telos_settings(
 
     tracing::info!("Telos settings written to {}", settings_file.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::telos_command;
+    use std::collections::HashMap;
+
+    #[test]
+    fn launch_contract_sets_expected_args_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("work");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let user_data_dir = dir.path().join("user");
+        std::fs::create_dir_all(&user_data_dir).unwrap();
+        let log = std::fs::File::create(dir.path().join("telos.log")).unwrap();
+        let bin = dir.path().join("tel");
+
+        let cmd = telos_command(
+            &bin,
+            &workdir,
+            &user_data_dir,
+            "ses_actus-test",
+            "127.0.0.1:8080",
+            "always",
+            log,
+        );
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let pair = [
+            "--user-data-dir".to_string(),
+            user_data_dir.to_string_lossy().into_owned(),
+        ];
+        assert!(args.windows(2).any(|w| w == pair), "args: {args:?}");
+        assert!(args.contains(&workdir.to_string_lossy().into_owned()));
+        assert!(args.iter().any(|a| a == "--headless"));
+        assert!(args.iter().any(|a| a == "--allow-multiple-instances"));
+
+        let envs: HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|value| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        let expect = [
+            ("TELOS_EXTERNAL_SYNC_ENABLED", "true"),
+            ("TELOS_WEBSOCKET_SYNC_ENABLED", "true"),
+            ("TELOS_WS_URL", "127.0.0.1:8080"),
+            ("TELOS_WS_TOKEN", "test-token"),
+            ("TELOS_STATELESS", "1"),
+            ("TELOS_SESSION_ID", "ses_actus-test"),
+            ("TELOS_TOOL_APPROVAL", "always"),
+            ("RUST_LOG", "info"),
+        ];
+        for (key, value) in expect {
+            assert_eq!(
+                envs.get(key).map(String::as_str),
+                Some(value),
+                "env {key}"
+            );
+        }
+    }
 }

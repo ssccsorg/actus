@@ -563,3 +563,94 @@ async fn fetch_rejects_private_host() {
 
     server.abort();
 }
+
+/// Serve the router with a CORS whitelist for tests that exercise it.
+async fn spawn_server_cors(
+    state: SharedState,
+    cors_origins: Vec<String>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, build_router(state, &cors_origins))
+            .await
+            .expect("serve");
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[tokio::test]
+async fn cors_whitelist_controls_browser_origins() {
+    let (state, _keep) = test_state();
+    let origins = vec!["http://allowed.example".to_string()];
+    let (base, server) = spawn_server_cors(state, origins).await;
+
+    // Allowed origin: the response carries the origin back.
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/health"))
+        .header("Origin", "http://allowed.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("http://allowed.example")
+    );
+
+    // Disallowed origin: no CORS header, so the browser blocks the read.
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/health"))
+        .header("Origin", "http://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert!(resp
+        .headers()
+        .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .is_none());
+
+    // Preflight OPTIONS is answered by the CORS layer before auth: no
+    // bearer token is needed, and the pinned methods and headers are
+    // advertised.
+    let resp = reqwest::Client::new()
+        .request(reqwest::Method::OPTIONS, format!("{base}/v1/threads"))
+        .header("Origin", "http://allowed.example")
+        .header("Access-Control-Request-Method", "GET")
+        .header("Access-Control-Request-Headers", "authorization,content-type")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("http://allowed.example")
+    );
+    let methods = resp
+        .headers()
+        .get(reqwest::header::ACCESS_CONTROL_ALLOW_METHODS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        methods.contains("get") && methods.contains("post"),
+        "methods: {methods}"
+    );
+    let headers = resp
+        .headers()
+        .get(reqwest::header::ACCESS_CONTROL_ALLOW_HEADERS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        headers.contains("authorization") && headers.contains("content-type"),
+        "headers: {headers}"
+    );
+
+    server.abort();
+}
