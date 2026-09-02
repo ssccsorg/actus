@@ -143,6 +143,9 @@ impl AgentBackend for ZedBackend {
                 mgr.pending_requests.remove(&request_id);
                 mgr.pending_chat_queue
                     .retain(|(rid, _, _)| rid != &request_id);
+                // Drop the waiter too, otherwise it stays mapped until a
+                // thread_created event that may never arrive.
+                mgr.thread_waiters.remove(&thread_id);
                 return Err("timed out waiting for the platform thread mapping".to_string());
             }
         }

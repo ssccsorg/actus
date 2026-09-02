@@ -46,8 +46,10 @@ impl AppState {
     }
 }
 
-/// Bearer-token gate for every route except /health. The comparison is
-/// constant-time so the token length and bytes cannot leak through timing.
+/// Bearer-token gate for every route except /health. Byte comparison is
+/// constant-time for equal-length tokens; a length mismatch returns
+/// immediately, so the length of a presented token is observable. Tokens
+/// are generated with a fixed length, so this leaks nothing useful.
 async fn require_auth(
     State(state): State<SharedState>,
     req: Request,
@@ -73,6 +75,9 @@ async fn require_auth(
     Ok(next.run(req).await)
 }
 
+/// Compare byte strings without early exit on a mismatching byte. Lengths
+/// are compared first; an equal-length comparison then runs in time
+/// proportional to the length regardless of content.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -700,6 +705,12 @@ fn is_non_public_ip(ip: std::net::IpAddr) -> bool {
 /// Validate a fetch target and build a client with a timeout and no
 /// redirects. Redirects are disabled because a response could bounce to
 /// an internal address after the host check already passed.
+///
+/// The host check runs at resolution time and the connection re-resolves
+/// DNS, so a hostile resolver could swap the address between check and
+/// connect (DNS rebinding). This is accepted for a loopback-bound server
+/// whose fetch endpoint only adds mention context; treat the guard as
+/// defense in depth, not a general-purpose SSRF boundary.
 async fn fetch_client(url_str: &str) -> Result<(String, reqwest::Client), String> {
     let parsed = reqwest::Url::parse(url_str).map_err(|e| format!("invalid url: {}", e))?;
     let scheme = parsed.scheme();

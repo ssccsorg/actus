@@ -151,7 +151,7 @@ test_health() {
 test_files() {
     step "Test: File search"
     local r
-    r=$(curl -s --max-time 5 "${AUTH_H[@]}" "http://127.0.0.1:$HTTP_PORT/v1/files?q=run.sh&max=3" 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" "http://127.0.0.1:$HTTP_PORT/v1/files?q=run.sh&max=3" 2>/dev/null)
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
     if [ "$count" -gt 0 ]; then
@@ -164,7 +164,7 @@ test_files() {
 test_file_mention() {
     step "Test: File mention"
     local r
-    r=$(curl -s --max-time 5 "${AUTH_H[@]}" "http://127.0.0.1:$HTTP_PORT/v1/files/mention?q=run.sh" 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" "http://127.0.0.1:$HTTP_PORT/v1/files/mention?q=run.sh" 2>/dev/null)
     local length
     length=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('mention','')))" 2>/dev/null || echo "0")
     if [ "$length" -gt 0 ]; then
@@ -177,7 +177,7 @@ test_file_mention() {
 test_threads() {
     step "Test: Thread listing"
     local r
-    r=$(curl -s --max-time 5 "${AUTH_H[@]}" http://127.0.0.1:$HTTP_PORT/v1/threads 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" http://127.0.0.1:$HTTP_PORT/v1/threads 2>/dev/null)
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('threads',[])))" 2>/dev/null || echo "0")
     pass "Threads: $count"
@@ -187,7 +187,7 @@ test_threads() {
     first_id=$(echo "$r" | python3 -c "import sys,json; ts=json.load(sys.stdin).get('threads',[]); print(ts[0]['id'] if ts else '')" 2>/dev/null)
     if [ -n "$first_id" ]; then
         local detail
-        detail=$(curl -s --max-time 5 "${AUTH_H[@]}" "http://127.0.0.1:$HTTP_PORT/v1/threads/$first_id" 2>/dev/null)
+        detail=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" "http://127.0.0.1:$HTTP_PORT/v1/threads/$first_id" 2>/dev/null)
         local has_id
         has_id=$(echo "$detail" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'id' in d else 1)" 2>/dev/null && echo "1" || echo "0")
         if [ "$has_id" = "1" ]; then
@@ -208,7 +208,7 @@ test_git_status() {
     # top-level ok flag. Retry briefly: the server may still be settling
     # when the first request arrives.
     for _ in 1 2 3 4 5; do
-        r=$(curl -s --max-time 5 "${AUTH_H[@]}" http://127.0.0.1:$HTTP_PORT/v1/git/status 2>/dev/null)
+        r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" http://127.0.0.1:$HTTP_PORT/v1/git/status 2>/dev/null)
         ok=$(echo "$r" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('ok') else 1)" 2>/dev/null && echo "1" || echo "0")
         [ "$ok" = "1" ] && break
         sleep 1
@@ -223,7 +223,7 @@ test_git_status() {
 test_git_log() {
     step "Test: Git log"
     local r
-    r=$(curl -s --max-time 5 "${AUTH_H[@]}" http://127.0.0.1:$HTTP_PORT/v1/git/log?max=3 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" http://127.0.0.1:$HTTP_PORT/v1/git/log?max=3 2>/dev/null)
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('commits',[])))" 2>/dev/null || echo "0")
     if [ "$count" -gt 0 ]; then
@@ -236,7 +236,7 @@ test_git_log() {
 test_git_diff() {
     step "Test: Git diff"
     local r
-    r=$(curl -s --max-time 5 "${AUTH_H[@]}" http://127.0.0.1:$HTTP_PORT/v1/git/diff 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" http://127.0.0.1:$HTTP_PORT/v1/git/diff 2>/dev/null)
     local ok
     ok=$(echo "$r" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'diff' in d or 'error' in d else 1)" 2>/dev/null && echo "1" || echo "0")
     if [ "$ok" = "1" ]; then
@@ -259,7 +259,7 @@ test_llm_chat() {
 
     local r
     r=$(curl -s --max-time 10 -X POST http://127.0.0.1:$HTTP_PORT/v1/chat/async \
-        "${AUTH_H[@]}" \
+        "${AUTH_H[@]+"${AUTH_H[@]}"}" \
         -H "Content-Type: application/json" \
         -d '{"message":"hello, respond with just ok","require_approval":false}' 2>/dev/null)
     local task_id thread_id
@@ -279,7 +279,7 @@ test_llm_chat() {
     local i
     for i in $(seq 1 "$timeout"); do
         local poll completed content
-        poll=$(curl -s --max-time 5 "${AUTH_H[@]}" "http://127.0.0.1:$HTTP_PORT/v1/threads/$thread_id/poll" 2>/dev/null || echo "")
+        poll=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" "http://127.0.0.1:$HTTP_PORT/v1/threads/$thread_id/poll" 2>/dev/null || echo "")
         completed=$(echo "$poll" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('completed') else 1)" 2>/dev/null && echo "1" || echo "0")
         if [ "$completed" = "1" ]; then
             content=$(echo "$poll" | python3 -c "import sys,json; print(json.load(sys.stdin).get('new_content','') or '')" 2>/dev/null || echo "")

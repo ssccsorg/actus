@@ -125,9 +125,9 @@ fn resolve_api_token(arg: Option<String>) -> anyhow::Result<String> {
     );
     persist_api_token(&token)?;
     tracing::warn!(
-        "Generated API token (written to {}): {}",
-        api_token_file().display(),
-        token
+        "Generated API token starting {}...; full value written to {}",
+        &token[..4],
+        api_token_file().display()
     );
     Ok(token)
 }
