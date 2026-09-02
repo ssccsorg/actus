@@ -432,7 +432,8 @@ Actus launcher and test suite
 Modes:
   (default)       Build, start server, then launch CLI
   --test          Run static checks and integration tests
-  --scenarios     Run real-scenario tests (tool, concurrency, reconnect, soak)
+  --scenarios     Run deterministic contract scenarios (fake backend, no LLM)
+  --scenarios-llm Run live scenarios against the real LLM (opt-in, consumes API)
   --server-only   Start server only (background)
   --cli           CLI only (connect to already-running server)
   --help          Show this help
@@ -455,7 +456,9 @@ case "$MODE" in
         run_tests
         ;;
     --scenarios|-s)
-        run_scenarios
+        # Deterministic by default: never spend LLM tokens unless the
+        # caller explicitly opts into the live tier with --scenarios-llm.
+        ACTUS_FAKE=1 run_scenarios
         ;;
     --scenarios-fake|-sf)
         ACTUS_FAKE=1 run_scenarios
