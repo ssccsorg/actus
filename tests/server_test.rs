@@ -266,6 +266,45 @@ async fn file_search_and_mention_scope_to_workdir() {
 }
 
 #[tokio::test]
+async fn file_search_reports_truncation() {
+    let (state, workdir) = test_state();
+    // Files live at the workdir root and match query `f` exactly, so the
+    // match count is deterministic regardless of walk order or stray files.
+    for i in 0..12 {
+        std::fs::write(workdir.path().join(format!("f{i}.rs")), "fn f() {}\n").unwrap();
+    }
+
+    let (base, server) = spawn_server(state).await;
+
+    // More matches than the cap: the response must say truncated.
+    let resp = client()
+        .get(format!("{base}/v1/files"))
+        .query(&[("q", "f"), ("max", "5")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let files = body["files"].as_array().unwrap();
+    assert_eq!(files.len(), 5, "cap must limit results");
+    assert_eq!(body["count"], 5);
+    assert_eq!(body["truncated"], true);
+
+    // Cap equal to the match count is not truncation.
+    let resp = client()
+        .get(format!("{base}/v1/files"))
+        .query(&[("q", "f"), ("max", "12")])
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["files"].as_array().unwrap().len(), 12);
+    assert_eq!(body["truncated"], false);
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn symbols_and_rules_work_on_empty_workdir() {
     let (state, _keep) = test_state();
     let (base, server) = spawn_server(state).await;

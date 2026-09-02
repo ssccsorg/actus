@@ -578,14 +578,14 @@ async fn search_files_handler(
     // The tree walk is synchronous and can be slow on large workspaces;
     // keep it off the async runtime.
     let workdir = state.workdir.clone();
-    let results = tokio::task::spawn_blocking(move || files::search_files(&workdir, &opts))
+    let result = tokio::task::spawn_blocking(move || files::search_files(&workdir, &opts))
         .await
         .unwrap_or_default();
-    let count = results.len();
+    let count = result.files.len();
     Json(FileSearchResponse {
-        files: results,
+        files: result.files,
         count,
-        truncated: false,
+        truncated: result.truncated,
     })
 }
 
@@ -602,13 +602,13 @@ async fn mention_files_handler(
         ..Default::default()
     };
     let workdir = state.workdir.clone();
-    let results = tokio::task::spawn_blocking(move || files::search_files(&workdir, &opts))
+    let result = tokio::task::spawn_blocking(move || files::search_files(&workdir, &opts))
         .await
         .unwrap_or_default();
-    let mention = files::format_mention(&results, &query);
+    let mention = files::format_mention(&result.files, &query);
     Json(serde_json::json!({
         "mention": mention,
-        "count": results.len(),
+        "count": result.files.len(),
     }))
 }
 

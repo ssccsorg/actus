@@ -32,6 +32,15 @@ pub struct FileSearchOptions {
     pub include_hidden: bool,
 }
 
+/// Outcome of a file search.
+#[derive(Debug, Default)]
+pub struct FileSearchResult {
+    /// Matches collected up to the requested cap.
+    pub files: Vec<FileEntry>,
+    /// True when further matches exist beyond `files` and were omitted.
+    pub truncated: bool,
+}
+
 impl Default for FileSearchOptions {
     fn default() -> Self {
         Self {
@@ -47,14 +56,14 @@ impl Default for FileSearchOptions {
 ///
 /// Respects .gitignore. Skips common heavy directories unconditionally
 /// (node_modules, target, .git, .venv, __pycache__).
-pub fn search_files(workdir: &Path, opts: &FileSearchOptions) -> Vec<FileEntry> {
+pub fn search_files(workdir: &Path, opts: &FileSearchOptions) -> FileSearchResult {
     let root = match &opts.dir {
         Some(sub) => workdir.join(sub),
         None => workdir.to_path_buf(),
     };
 
     if !root.exists() {
-        return vec![];
+        return FileSearchResult::default();
     }
 
     let query_lower = opts.query.to_lowercase();
@@ -72,12 +81,9 @@ pub fn search_files(workdir: &Path, opts: &FileSearchOptions) -> Vec<FileEntry> 
     }
 
     let mut results: Vec<FileEntry> = Vec::new();
+    let mut truncated = false;
 
     for entry in walk.build().flatten() {
-        if results.len() >= max_results {
-            break;
-        }
-
         let abs_path = entry.path();
 
         // Skip root dir itself
@@ -123,16 +129,29 @@ pub fn search_files(workdir: &Path, opts: &FileSearchOptions) -> Vec<FileEntry> 
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default();
 
-        results.push(FileEntry {
+        let file_entry = FileEntry {
             relative_path: relative,
             is_dir: metadata.is_dir(),
             size: metadata.len(),
             modified,
             mime_type,
-        });
+        };
+
+        if results.len() < max_results {
+            results.push(file_entry);
+        } else {
+            // One more matching entry exists beyond the cap. Walking stops
+            // here so `truncated` is reported without scanning the rest of
+            // the tree.
+            truncated = true;
+            break;
+        }
     }
 
-    results
+    FileSearchResult {
+        files: results,
+        truncated,
+    }
 }
 
 /// Format file search results as a mention string suitable for embedding in a
@@ -180,12 +199,17 @@ mod tests {
         // List all
         let results = search_files(base, &FileSearchOptions::default());
         assert!(
-            results.len() >= 2,
+            results.files.len() >= 2,
             "expected at least 2 files, got {}",
-            results.len()
+            results.files.len()
         );
-        assert!(results.iter().any(|e| e.relative_path.contains("main.rs")));
+        assert!(!results.truncated, "no truncation expected at default cap");
         assert!(results
+            .files
+            .iter()
+            .any(|e| e.relative_path.contains("main.rs")));
+        assert!(results
+            .files
             .iter()
             .any(|e| e.relative_path.contains("readme.md")));
 
@@ -197,7 +221,40 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(results.len(), 1, "expected 1 file matching 'main'");
-        assert!(results[0].relative_path.contains("main.rs"));
+        assert_eq!(results.files.len(), 1, "expected 1 file matching 'main'");
+        assert!(results.files[0].relative_path.contains("main.rs"));
+    }
+
+    #[test]
+    fn test_search_files_reports_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // Files live at the root so the walk yields exactly five entries;
+        // a subdirectory would itself count as a match when the query is
+        // empty and skew the exact-cap case below.
+        for i in 0..5 {
+            let mut f = fs::File::create(base.join(format!("f{i}.rs"))).unwrap();
+            f.write_all(b"fn f() {}").unwrap();
+        }
+
+        let opts = FileSearchOptions {
+            query: String::new(),
+            max_results: 3,
+            ..Default::default()
+        };
+        let results = search_files(base, &opts);
+        assert_eq!(results.files.len(), 3, "cap must limit results");
+        assert!(results.truncated, "more matches exist beyond the cap");
+
+        // A cap at or above the match count is not truncation.
+        let opts = FileSearchOptions {
+            query: String::new(),
+            max_results: 5,
+            ..Default::default()
+        };
+        let results = search_files(base, &opts);
+        assert_eq!(results.files.len(), 5);
+        assert!(!results.truncated, "all matches fit within the cap");
     }
 }
