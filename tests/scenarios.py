@@ -28,7 +28,7 @@ PORT = int(os.environ.get("ACTUS_HTTP_PORT", "9090"))
 BASE = f"http://127.0.0.1:{PORT}"
 WS_PORT = int(os.environ.get("ACTUS_WS_PORT", "8080"))
 TELOS_BIN = os.environ.get(
-    "TELOS_BIN", "../telos/target/telos-release/telos"
+    "TELOS_BIN", "../telos/target/telos-release/tel"
 )
 SOAK_MINUTES = float(os.environ.get("SOAK_MINUTES", "2"))
 # Deterministic contract mode: the agent runs with TELOS_FAKE_BACKEND=1 and
