@@ -565,6 +565,7 @@ pub async fn launch_telos(
     bin_path: &Path,
     workdir: &Path,
     user_data_dir: &Path,
+    session_id: &str,
     ws_host: &str,
     tool_approval: &str,
     stderr_log: &Path,
@@ -583,6 +584,7 @@ pub async fn launch_telos(
         .env("TELOS_WS_URL", ws_host)
         .env("TELOS_WS_TOKEN", "test-token")
         .env("TELOS_STATELESS", "1")
+        .env("TELOS_SESSION_ID", session_id)
         .env("TELOS_TOOL_APPROVAL", tool_approval)
         .env("RUST_LOG", "info")
         .stdout(std::process::Stdio::null())

@@ -174,6 +174,7 @@ def agent_launch_contract(pid):
         "TELOS_WS_URL": f"127.0.0.1:{WS_PORT}",
         "TELOS_WS_TOKEN": "test-token",
         "TELOS_STATELESS": "1",
+        "TELOS_SESSION_ID": "ses_actus-reconnect-test",
         "TELOS_TOOL_APPROVAL": "always",
         "RUST_LOG": "info",
     }
@@ -368,6 +369,7 @@ def ensure_agent():
             "TELOS_WS_URL": f"127.0.0.1:{WS_PORT}",
             "TELOS_WS_TOKEN": "test-token",
             "TELOS_STATELESS": "1",
+            "TELOS_SESSION_ID": "ses_actus-reconnect-test",
             "TELOS_TOOL_APPROVAL": "always",
             "RUST_LOG": "info",
         },

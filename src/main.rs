@@ -310,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
                     &spec.bin,
                     &workdir,
                     user_data_dir.path(),
+                    &session_id,
                     &ws_host,
                     spec.tool_approval.as_str(),
                     &threads_dir.join("telos.log"),
