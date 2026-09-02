@@ -4,7 +4,7 @@
 Covers the gaps the integration suite does not: tool-driven turns,
 concurrent threads, WebSocket reconnect/resume, and a short soak.
 
-Requires a running actus server whose agent is telos-headless. The
+Requires a running actus server whose agent is telos. The
 reconnect scenarios locate the live agent process, kill it, and relaunch
 it with the same launch contract (user-data-dir from the command line,
 environment reconstructed from actus's launch_zed), so actus's accept
@@ -28,7 +28,7 @@ PORT = int(os.environ.get("ACTUS_HTTP_PORT", "9090"))
 BASE = f"http://127.0.0.1:{PORT}"
 WS_PORT = int(os.environ.get("ACTUS_WS_PORT", "8080"))
 TELOS_BIN = os.environ.get(
-    "TELOS_BIN", "../telos/target/telos-release/telos-headless"
+    "TELOS_BIN", "../telos/target/telos-release/telos"
 )
 SOAK_MINUTES = float(os.environ.get("SOAK_MINUTES", "2"))
 # Deterministic contract mode: the agent runs with TELOS_FAKE_BACKEND=1 and
@@ -138,18 +138,18 @@ def check_fake_response(thread):
 
 def find_agent_pid():
     out = subprocess.run(
-        ["pgrep", "-f", "telos-headless --headless"],
+        ["pgrep", "-f", "telos --headless"],
         capture_output=True, text=True,
     ).stdout.split()
     return int(out[0]) if out else None
 
 
 def kill_all_agents():
-    """Kill every telos-headless agent. The reconnect scenarios own the
+    """Kill every telos agent. The reconnect scenarios own the
     agent lifecycle; leaving relaunched agents running lets a stale one
     reconnect instantly and mask the disconnect window."""
     out = subprocess.run(
-        ["pgrep", "-f", "telos-headless --headless"],
+        ["pgrep", "-f", "telos --headless"],
         capture_output=True, text=True,
     ).stdout.split()
     for pid in out:

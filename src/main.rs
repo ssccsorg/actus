@@ -169,28 +169,20 @@ async fn main() -> anyhow::Result<()> {
         .map(|k| unquote(&k))
         .ok_or_else(|| anyhow::anyhow!("API key required: set LLM_API_KEY or --api-key"))?;
 
-    // Resolve binary path
+    // Resolve binary path: --bin or the sibling telos build. The helix
+    // fallback was removed: actus drives telos only.
     let bin_path = if let Some(p) = args.bin {
         p
     } else {
-        let arch_suffix = match std::env::consts::ARCH {
-            "aarch64" => "arm64",
-            "x86_64" => "amd64",
-            other => other,
-        };
-        let bin_name = format!("helix-zed-headless-{}", arch_suffix);
-        let candidates = vec![
-            dirs::home_dir()
-                .map(|h| h.join(format!(".bin/{}", bin_name)))
-                .unwrap_or_default(),
-            PathBuf::from(format!("../.bin/{}", bin_name)),
-            PathBuf::from(format!(".bin/{}", bin_name)),
-            PathBuf::from(format!("helix/.bin/{}", bin_name)),
-        ];
-        candidates
-            .into_iter()
-            .find(|p| p.exists())
-            .ok_or_else(|| anyhow::anyhow!("helix-zed-headless binary not found"))?
+        let default = PathBuf::from("../telos/target/telos-release/tel");
+        if default.exists() {
+            default
+        } else {
+            return Err(anyhow::anyhow!(
+                "agent binary not found: pass --bin or set TELOS_BIN (expected sibling build at {})",
+                default.display()
+            ));
+        }
     };
 
     let workdir = std::fs::canonicalize(&args.workdir)?;

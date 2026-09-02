@@ -15,23 +15,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
-HELIX_DIR="$SCRIPT_DIR/helix"
 RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
-# Respect pre-configured ZED_BIN (e.g. CI sets ZED_BIN=/bin/true)
+# Respect a pre-configured ZED_BIN (e.g. CI sets ZED_BIN=/bin/true);
+# default to the sibling telos build, the only agent binary actus runs.
 if [ -z "${ZED_BIN:-}" ]; then
-    # Prefer the sibling telos headless build (minimal agent core).
-    TELOS_HEADLESS="$SCRIPT_DIR/../telos/target/telos-release/telos-headless"
-    if [ -f "$TELOS_HEADLESS" ]; then
-        ZED_BIN="$TELOS_HEADLESS"
-    else
-        ACTUS_ARCH="$(uname -m)"
-        case "$ACTUS_ARCH" in
-            x86_64|amd64) ACTUS_ARCH="amd64" ;;
-            aarch64|arm64) ACTUS_ARCH="arm64" ;;
-        esac
-        ZED_BIN="$HELIX_DIR/.bin/helix-zed-headless-$ACTUS_ARCH"
-    fi
+    ZED_BIN="$SCRIPT_DIR/../telos/target/telos-release/tel"
 fi
 SERVER_LOG="/tmp/actus-server.log"
 HTTP_PORT="${ACTUS_HTTP_PORT:-9090}"
@@ -57,7 +46,6 @@ cleanup() {
     # explicit binary paths avoids clobbering sibling cargo builds whose
     # rustc command lines also contain "target/debug".
     pkill -f "$SCRIPT_DIR/target/debug/" 2>/dev/null || true
-    pkill -f "$SCRIPT_DIR/helix/.bin/" 2>/dev/null || true
     pkill -f "$SCRIPT_DIR/../telos/target/telos-release/" 2>/dev/null || true
     pkill -f "$SCRIPT_DIR/runner.py" 2>/dev/null || true
     sleep 1
@@ -300,20 +288,12 @@ test_llm_chat() {
 
 ensure_zed_binary() {
     if [ -f "$ZED_BIN" ]; then
-        pass "Zed binary: $ZED_BIN"
+        pass "Agent binary: $ZED_BIN"
         return 0
     fi
-    info "Zed binary not found at $ZED_BIN"
-    if [ -f "$HELIX_DIR/build.sh" ]; then
-        info "Building Zed from source via helix/build.sh..."
-        bash "$HELIX_DIR/build.sh" --build-only --release || {
-            warn "Zed build failed — integration tests will be skipped"
-            return 1
-        }
-    else
-        warn "helix/build.sh not found — integration tests will be skipped"
-        return 1
-    fi
+    info "Agent binary not found at $ZED_BIN"
+    warn "Build the sibling telos repo first (cargo build --profile telos-release -p telos), then retry. Agent integration tests are skipped until the binary exists."
+    return 1
 }
 
 start_server() {

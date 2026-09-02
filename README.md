@@ -79,7 +79,7 @@ provider = "deepseek"
 model = "deepseek-chat"
 base_url = "https://api.deepseek.com/v1"
 api_key = "sk-..."
-bin = "helix/.bin/helix-zed-headless-arm64"
+bin = "../telos/target/telos-release/tel"
 ws_port = 8080
 tool_approval = "always"  # always | ask | never (drives the fork's approval policy)
 
@@ -147,7 +147,8 @@ picker opens only for explicit `@?query`.
 
 - Rust toolchain
 - Python 3.12+
-- A pre-built headless Zed binary (or build with `helix/build.sh`)
+- A built telos binary (build the sibling `telos` repo; default path
+  `../telos/target/telos-release/tel`)
 
 ### Quick Start
 
@@ -228,10 +229,6 @@ actus/
 │       ├── backend.rs   ZedBackend adapter (AgentBackend impl)
 │       ├── control.rs   WebSocket bridge and event dispatch
 │       └── types.rs     Protocol type definitions
-├── helix/
-│   ├── build.sh         Clone → patch → build Zed headless
-│   ├── patch/           Patches for Helix Zed fork
-│   └── subtree/         Helix Zed fork (git subtree)
 ├── runner.py            Server launcher (build + run)
 ├── terminal.py          Interactive chat CLI
 ├── run.sh               Gateway: build, test, launch
