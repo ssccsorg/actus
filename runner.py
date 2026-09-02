@@ -18,6 +18,7 @@ For production, run the Rust binary directly:
 
 import argparse
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -83,6 +84,8 @@ def build_rust_cmd(bin_path: Path, args: argparse.Namespace) -> list[str]:
         cmd += ["--provider", args.provider]
     if args.base_url:
         cmd += ["--base-url", args.base_url]
+    if args.api_token:
+        cmd += ["--api-token", args.api_token]
     return cmd
 
 
@@ -100,6 +103,7 @@ def main():
     parser.add_argument("--server-only", action="store_true", help="Server only, no CLI")
     parser.add_argument("--build-only", action="store_true", help="Build Rust binary only and exit")
     parser.add_argument("--no-build", action="store_true", help="Skip build (use existing binary)")
+    parser.add_argument("--api-token", help="Bearer token for the HTTP API (default: ACTUS_API_TOKEN env, ~/.actus/api_token, or generated)")
     args = parser.parse_args()
 
     if args.build_only:
@@ -131,6 +135,19 @@ def main():
     api_key = args.api_key or os.environ.get("LLM_API_KEY", "")
     if not api_key:
         print(f"{C.YELLOW}Warning: No API key set. Set LLM_API_KEY.{C.END}")
+
+    # Resolve the API bearer token: CLI arg, env, token file, or generated.
+    # The Rust server persists its effective token to ~/.actus/api_token, so
+    # reading that file keeps this runner in sync with a server it did not
+    # start.
+    api_token = args.api_token or os.environ.get("ACTUS_API_TOKEN", "")
+    if not api_token:
+        token_file = Path.home() / ".actus" / "api_token"
+        if token_file.exists():
+            api_token = token_file.read_text().strip()
+    if not api_token:
+        api_token = secrets.token_urlsafe(32)
+    args.api_token = api_token
 
     # Build Rust binary
     if not args.no_build:
@@ -200,9 +217,11 @@ def main():
         if TERMINAL.exists():
             term_env = os.environ.copy()
             term_env["TERMINAL_PORT"] = str(args.http_port)
+            term_env["ACTUS_API_TOKEN"] = api_token
             term_proc = subprocess.Popen(
                 [sys.executable, str(TERMINAL), "--port", str(args.http_port)],
                 stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+                env=term_env,
             )
             try:
                 term_proc.wait()

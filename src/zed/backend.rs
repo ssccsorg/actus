@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Notify, RwLock};
 use tokio::sync::watch;
+use tokio::sync::{Notify, RwLock};
 
 use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadSession,
@@ -122,12 +122,28 @@ impl AgentBackend for ZedBackend {
             let waiter = Arc::new(Notify::new());
             {
                 let mut mgr = self.manager.write().await;
-                mgr.thread_waiters
-                    .insert(thread_id.clone(), waiter.clone());
+                mgr.thread_waiters.insert(thread_id.clone(), waiter.clone());
             }
             tokio::select! {
                 _ = waiter.notified() => {},
                 _ = tokio::time::sleep(Duration::from_secs(20)) => {},
+            }
+            // The platform thread mapping was not established within the
+            // bound. The message may or may not be processed, but its
+            // events cannot be correlated, so fail the submit instead of
+            // leaving the caller waiting on a turn that never resolves.
+            let mapping_ok = self
+                .manager
+                .read()
+                .await
+                .get_acp_thread_id(&thread_id)
+                .is_some();
+            if !mapping_ok {
+                let mut mgr = self.manager.write().await;
+                mgr.pending_requests.remove(&request_id);
+                mgr.pending_chat_queue
+                    .retain(|(rid, _, _)| rid != &request_id);
+                return Err("timed out waiting for the platform thread mapping".to_string());
             }
         }
 

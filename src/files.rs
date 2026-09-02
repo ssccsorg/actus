@@ -10,7 +10,8 @@ use serde::Serialize;
 /// Result of a single file match.
 #[derive(Debug, Clone, Serialize)]
 pub struct FileEntry {
-    pub path: String,
+    /// Path relative to the workdir. Absolute filesystem paths are never
+    /// exposed to API clients.
     pub relative_path: String,
     pub is_dir: bool,
     pub size: u64,
@@ -123,7 +124,6 @@ pub fn search_files(workdir: &Path, opts: &FileSearchOptions) -> Vec<FileEntry> 
             .unwrap_or_default();
 
         results.push(FileEntry {
-            path: abs_path.to_string_lossy().to_string(),
             relative_path: relative,
             is_dir: metadata.is_dir(),
             size: metadata.len(),
@@ -185,11 +185,9 @@ mod tests {
             results.len()
         );
         assert!(results.iter().any(|e| e.relative_path.contains("main.rs")));
-        assert!(
-            results
-                .iter()
-                .any(|e| e.relative_path.contains("readme.md"))
-        );
+        assert!(results
+            .iter()
+            .any(|e| e.relative_path.contains("readme.md")));
 
         // Query filter
         let results = search_files(

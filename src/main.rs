@@ -58,18 +58,90 @@ struct Args {
     /// Server-only mode: don't auto-start CLI
     #[arg(long, default_value_t = false)]
     server_only: bool,
+
+    /// Bearer token required by the HTTP API. Falls back to the
+    /// ACTUS_API_TOKEN env var, then to ~/.actus/api_token, then to a
+    /// freshly generated token persisted to that file.
+    #[arg(long)]
+    api_token: Option<String>,
+
+    /// Comma-separated list of CORS origins allowed to call the HTTP API
+    /// from a browser. Empty (default) sends no CORS headers, so browsers
+    /// enforce same-origin and cross-origin reads are blocked.
+    #[arg(long, default_value = "")]
+    cors_origins: String,
+}
+
+/// Location of the persisted API token shared with the CLI and scripts.
+fn api_token_file() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".actus").join("api_token"))
+        .unwrap_or_else(|| PathBuf::from(".actus/api_token"))
+}
+
+/// Write the effective token to ~/.actus/api_token with mode 0600 so the
+/// CLI, run.sh, and curl can read the same value the server enforces.
+fn persist_api_token(token: &str) -> anyhow::Result<()> {
+    let file = api_token_file();
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true).mode(0o600);
+    let mut f = opts.open(&file)?;
+    std::io::Write::write_all(&mut f, token.as_bytes())?;
+    Ok(())
+}
+
+/// Resolve the HTTP API bearer token: CLI arg, then ACTUS_API_TOKEN env,
+/// then the persisted token file, then a freshly generated token. The
+/// effective token is persisted so every consumer reads the same value.
+fn resolve_api_token(arg: Option<String>) -> anyhow::Result<String> {
+    if let Some(t) = arg {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            persist_api_token(&t)?;
+            return Ok(t);
+        }
+    }
+    if let Ok(t) = std::env::var("ACTUS_API_TOKEN") {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            persist_api_token(&t)?;
+            return Ok(t);
+        }
+    }
+    if let Ok(t) = std::fs::read_to_string(api_token_file()) {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Ok(t);
+        }
+    }
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    persist_api_token(&token)?;
+    tracing::warn!(
+        "Generated API token (written to {}): {}",
+        api_token_file().display(),
+        token
+    );
+    Ok(token)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Args = clap::Parser::parse();
 
-    // Init logging — always to stderr
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe { std::env::set_var("RUST_LOG", "actus=info"); }
-    }
+    // Init logging — always to stderr. The filter falls back to
+    // `actus=info` when RUST_LOG is unset or invalid.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("actus=info"));
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()?)
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 
@@ -123,14 +195,26 @@ async fn main() -> anyhow::Result<()> {
 
     let workdir = std::fs::canonicalize(&args.workdir)?;
 
+    // The HTTP API requires a bearer token. Resolution order: CLI arg,
+    // ACTUS_API_TOKEN env, the persisted token file, then a freshly
+    // generated token. The effective token is always persisted to
+    // ~/.actus/api_token (mode 0600) so the CLI, run.sh, and curl can
+    // read the same value.
+    let api_token = resolve_api_token(args.api_token.clone())?;
+    let cors_origins: Vec<String> = args
+        .cors_origins
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     // Read model/provider config from args or env
     let provider = unquote(&std::env::var("LLM_PROVIDER").unwrap_or(args.provider));
     let base_url = unquote(&std::env::var("LLM_BASE_URL").unwrap_or(args.base_url));
     let model_name =
         unquote(&std::env::var("LLM_MODEL").unwrap_or_else(|_| format!("{}-chat", provider)));
-    let model_display = unquote(
-        &std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone()),
-    );
+    let model_display =
+        unquote(&std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone()));
 
     // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
     // Missing file (or no override) means a single default zed agent.
@@ -235,6 +319,7 @@ async fn main() -> anyhow::Result<()> {
                     &session_id,
                     &ws_host,
                     spec.tool_approval.as_str(),
+                    &threads_dir.join("zed-headless.log"),
                 )
                 .await?;
                 _user_data_dirs.push(user_data_dir);
@@ -273,12 +358,16 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("  Threads:    {}", threads_root.display());
 
     // Build app state and start HTTP server
-    let state = Arc::new(AppState::new(registry, workdir.clone()));
+    let state = Arc::new(AppState::new(
+        registry,
+        workdir.clone(),
+        Some(api_token.clone()),
+    ));
 
     let http_server = tokio::spawn({
         let state = state.clone();
         let addr = format!("127.0.0.1:{}", args.http_port);
-        async move { run_http_server(&addr, state).await }
+        async move { run_http_server(&addr, state, cors_origins).await }
     });
 
     // Resolve CLI path (terminal.py) — skip if --server-only
@@ -286,15 +375,15 @@ async fn main() -> anyhow::Result<()> {
         None
     } else {
         args.cli.or_else(|| {
-        // Auto-detect relative to binary or CWD
-        let candidates = vec![
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.join("terminal.py"))),
-            Some(PathBuf::from("terminal.py")),
-        ];
-        candidates.into_iter().flatten().find(|p| p.exists())
-    })
+            // Auto-detect relative to binary or CWD
+            let candidates = vec![
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|p| p.join("terminal.py"))),
+                Some(PathBuf::from("terminal.py")),
+            ];
+            candidates.into_iter().flatten().find(|p| p.exists())
+        })
     };
 
     // Wait for the default agent to be ready before starting the CLI.
@@ -322,12 +411,12 @@ async fn main() -> anyhow::Result<()> {
         let monitors = monitors.clone();
 
         tokio::spawn(async move {
-            let mut sigterm = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            ).expect("Failed to register SIGTERM handler");
-            let mut sigint = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::interrupt(),
-            ).expect("Failed to register SIGINT handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("Failed to register SIGINT handler");
 
             tokio::select! {
                 _ = sigterm.recv() => {}
@@ -410,6 +499,7 @@ async fn main() -> anyhow::Result<()> {
             .arg(&cli_path)
             .arg("--port")
             .arg(args.http_port.to_string())
+            .env("ACTUS_API_TOKEN", &api_token)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())

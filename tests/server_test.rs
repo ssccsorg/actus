@@ -11,14 +11,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use actus::agent::{AgentBackend, AgentRegistry};
-use actus::server::{AppState, SharedState, build_router};
+use actus::server::{build_router, AppState, SharedState};
 use actus::zed::backend::ZedBackend;
 use actus::zed::{WsCommandTx, ZedManager};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 /// State with one disconnected Zed backend and an empty temp workdir.
-/// The TempDir is returned so it outlives the tests.
+/// The TempDir is returned so it outlives the tests. Auth is enabled with
+/// a fixed token; `client()` sends it on every request.
 fn test_state() -> (SharedState, tempfile::TempDir) {
     let workdir = tempfile::tempdir().expect("tempdir");
     let manager = Arc::new(RwLock::new(ZedManager::new(
@@ -31,7 +32,11 @@ fn test_state() -> (SharedState, tempfile::TempDir) {
 
     let mut registry = AgentRegistry::new();
     registry.register(backend, true);
-    let state = AppState::new(registry, workdir.path().to_path_buf());
+    let state = AppState::new(
+        registry,
+        workdir.path().to_path_buf(),
+        Some("test-token".to_string()),
+    );
     (Arc::new(state), workdir)
 }
 
@@ -42,7 +47,7 @@ async fn spawn_server(state: SharedState) -> (String, tokio::task::JoinHandle<()
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("local addr");
     let handle = tokio::spawn(async move {
-        axum::serve(listener, build_router(state))
+        axum::serve(listener, build_router(state, &[]))
             .await
             .expect("serve");
     });
@@ -50,8 +55,14 @@ async fn spawn_server(state: SharedState) -> (String, tokio::task::JoinHandle<()
 }
 
 fn client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        reqwest::header::HeaderValue::from_static("Bearer test-token"),
+    );
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .default_headers(headers)
         .build()
         .expect("client")
 }
@@ -124,7 +135,11 @@ async fn thread_lifecycle_over_http() {
     let (base, server) = spawn_server(state).await;
 
     // Empty listing first.
-    let resp = client().get(format!("{base}/v1/threads")).send().await.unwrap();
+    let resp = client()
+        .get(format!("{base}/v1/threads"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["threads"].as_array().unwrap().len(), 0);
@@ -138,10 +153,17 @@ async fn thread_lifecycle_over_http() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let created: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(created["status"], "created");
-    let tid = created["thread_id"].as_str().expect("thread_id").to_string();
+    let tid = created["thread_id"]
+        .as_str()
+        .expect("thread_id")
+        .to_string();
 
     // Listing now shows one thread.
-    let resp = client().get(format!("{base}/v1/threads")).send().await.unwrap();
+    let resp = client()
+        .get(format!("{base}/v1/threads"))
+        .send()
+        .await
+        .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     let threads = body["threads"].as_array().unwrap();
     assert_eq!(threads.len(), 1);
@@ -168,12 +190,11 @@ async fn missing_thread_returns_404() {
     let (state, _keep) = test_state();
     let (base, server) = spawn_server(state).await;
 
-    for path in ["/v1/threads/does-not-exist", "/v1/threads/does-not-exist/poll"] {
-        let resp = client()
-            .get(format!("{base}{path}"))
-            .send()
-            .await
-            .unwrap();
+    for path in [
+        "/v1/threads/does-not-exist",
+        "/v1/threads/does-not-exist/poll",
+    ] {
+        let resp = client().get(format!("{base}{path}")).send().await.unwrap();
         assert_eq!(
             resp.status(),
             reqwest::StatusCode::NOT_FOUND,
@@ -220,12 +241,14 @@ async fn file_search_and_mention_scope_to_workdir() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
     let files = body["files"].as_array().unwrap();
-    assert!(!files.is_empty(), "search for 'main' must match src/main.rs");
     assert!(
-        files
-            .iter()
-            .any(|f| f["relative_path"].as_str().unwrap().ends_with("src/main.rs"))
+        !files.is_empty(),
+        "search for 'main' must match src/main.rs"
     );
+    assert!(files.iter().any(|f| f["relative_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("src/main.rs")));
     assert_eq!(body["count"], files.len() as u64);
 
     // Mention formatting returns a non-empty string referencing the match.
@@ -293,7 +316,11 @@ async fn git_status_reports_non_repo() {
 #[tokio::test]
 async fn git_status_diff_log_on_real_repo() {
     // Skip cleanly when git is unavailable.
-    if std::process::Command::new("git").arg("--version").output().is_err() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         eprintln!("skipping: git not available");
         return;
     }
@@ -319,13 +346,11 @@ async fn git_status_diff_log_on_real_repo() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["ok"], true);
     assert_eq!(body["status"]["branch"], "main");
-    assert!(
-        body["status"]["modified"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m.as_str().unwrap().contains("readme.md"))
-    );
+    assert!(body["status"]["modified"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m.as_str().unwrap().contains("readme.md")));
 
     let resp = client()
         .get(format!("{base}/v1/git/diff"))
@@ -437,6 +462,65 @@ async fn unknown_route_returns_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn auth_required_except_health() {
+    let (state, _keep) = test_state();
+    let (base, server) = spawn_server(state).await;
+
+    // API routes reject requests without the bearer token.
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/v1/threads"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // A wrong token is also rejected.
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/v1/threads"))
+        .header(reqwest::header::AUTHORIZATION, "Bearer wrong")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Health stays open so readiness probes work before a token exists.
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn fetch_rejects_private_host() {
+    let (state, _keep) = test_state();
+    let (base, server) = spawn_server(state).await;
+
+    // No network is involved: loopback and link-local targets are rejected
+    // before any request is sent.
+    for url in [
+        "http://127.0.0.1:9090/health",
+        "http://localhost/health",
+        "http://169.254.169.254/latest/meta-data",
+    ] {
+        let resp = client()
+            .get(format!("{base}/v1/fetch"))
+            .query(&[("url", url)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["ok"], false, "{} must be rejected", url);
+    }
 
     server.abort();
 }

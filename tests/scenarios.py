@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 PORT = int(os.environ.get("ACTUS_HTTP_PORT", "9090"))
 BASE = f"http://127.0.0.1:{PORT}"
@@ -38,12 +39,22 @@ FAKE_RESPONSE = os.environ.get("TELOS_FAKE_RESPONSE", "OK")
 PASS = 0
 FAIL = 0
 
+# The API requires a bearer token except on /health. Resolve it the same
+# way the server does: env var, then the token file the server writes.
+API_TOKEN = os.environ.get("ACTUS_API_TOKEN", "") or (
+    (Path.home() / ".actus" / "api_token").read_text().strip()
+    if (Path.home() / ".actus" / "api_token").exists()
+    else ""
+)
+
 
 def http(method, path, body=None, timeout=10):
     url = f"{BASE}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    if API_TOKEN:
+        req.add_header("Authorization", f"Bearer {API_TOKEN}")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read() or b"{}")

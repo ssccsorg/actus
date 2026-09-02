@@ -244,7 +244,8 @@ impl ZedManager {
             .take_while(|m| m.role == "assistant")
         {
             if let Some(id) = &m.message_id {
-                self.prior_message_content.insert(id.clone(), m.content.clone());
+                self.prior_message_content
+                    .insert(id.clone(), m.content.clone());
             }
         }
     }
@@ -258,7 +259,8 @@ impl ZedManager {
         if request_id.is_empty() {
             return;
         }
-        self.pending_requests.insert(request_id.to_string(), String::new());
+        self.pending_requests
+            .insert(request_id.to_string(), String::new());
         if self.pending_requests.len() > self.sentinel_cap {
             // Drop enough consumed entries (empty values) to get back under
             // the cap. The entry just inserted is always kept; active
@@ -489,7 +491,8 @@ impl ZedManager {
                     for thread in threads.values_mut() {
                         let mut seen: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
-                        let mut kept: Vec<ThreadMessage> = Vec::with_capacity(thread.messages.len());
+                        let mut kept: Vec<ThreadMessage> =
+                            Vec::with_capacity(thread.messages.len());
                         for m in std::mem::take(&mut thread.messages) {
                             match &m.message_id {
                                 Some(id) if !seen.insert(id.clone()) => {
@@ -565,10 +568,12 @@ pub async fn launch_zed(
     session_id: &str,
     ws_host: &str,
     tool_approval: &str,
+    stderr_log: &Path,
 ) -> anyhow::Result<tokio::process::Child> {
     tracing::info!("Launching Zed headless...");
 
-    let stderr_log = std::fs::File::create("/tmp/-headless.log")?;
+    let stderr_log = std::fs::File::create(stderr_log)
+        .map_err(|e| anyhow::anyhow!("cannot create stderr log {}: {}", stderr_log.display(), e))?;
     let child = Command::new(bin_path)
         .args(["--headless", "--allow-multiple-instances"])
         .arg("--user-data-dir")
@@ -585,7 +590,8 @@ pub async fn launch_zed(
         .env("RUST_LOG", "info")
         .stdout(std::process::Stdio::null())
         .stderr(stderr_log)
-        .spawn()?;
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("cannot spawn {}: {}", bin_path.display(), e))?;
 
     tracing::info!("Zed started (PID: {:?})", child.id());
     Ok(child)
