@@ -208,6 +208,11 @@ comma-separated origin list to allow cross-origin requests from those
 origins only. The default (empty) sends no CORS headers, so browsers
 enforce same-origin policy.
 
+Consumers on the same machine share the token file: when a second server
+instance starts, it overwrites `~/.actus/api_token`, so file-based
+consumers may then hold a token valid only for the later instance. The
+runtime targets a single local instance.
+
 ## Project Structure
 
 ```
