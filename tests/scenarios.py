@@ -7,7 +7,7 @@ concurrent threads, WebSocket reconnect/resume, and a short soak.
 Requires a running actus server whose agent is telos. The
 reconnect scenarios locate the live agent process, kill it, and relaunch
 it with the same launch contract (user-data-dir from the command line,
-environment reconstructed from actus's launch_zed), so actus's accept
+environment reconstructed from actus's launch_telos), so actus's accept
 loop and pending-message resend are exercised for real.
 
 Usage:
@@ -77,7 +77,7 @@ def check(name, ok, detail=""):
 def wait_ready(timeout=40):
     for _ in range(timeout):
         s, h = http("GET", "/health", timeout=3)
-        if s == 200 and h.get("zed_connected") and h.get("agent_ready"):
+        if s == 200 and h.get("telos_connected") and h.get("agent_ready"):
             return h
         time.sleep(1)
     return None
@@ -159,7 +159,7 @@ def kill_all_agents():
 
 def agent_launch_contract(pid):
     """Extract the user-data-dir and workdir from the running agent, then
-    rebuild the launch env the way actus's launch_zed does."""
+    rebuild the launch env the way actus's launch_telos does."""
     cmd = subprocess.run(
         ["ps", "-o", "command=", "-p", str(pid)],
         capture_output=True, text=True,
@@ -169,14 +169,12 @@ def agent_launch_contract(pid):
     tokens = [t for t in cmd.split() if not t.startswith("-")]
     workdir = tokens[-1] if tokens else os.getcwd()
     env = {
-        "ZED_EXTERNAL_SYNC_ENABLED": "true",
-        "ZED_WEBSOCKET_SYNC_ENABLED": "true",
-        "ZED_HELIX_URL": f"127.0.0.1:{WS_PORT}",
-        "ZED_HELIX_TOKEN": "test-token",
-        "HELIX_SESSION_ID": "ses_actus-reconnect-test",
-        "ZED_STATELESS": "1",
-        "ZED_WORK_DIR": workdir,
-        "ZED_TOOL_APPROVAL": "always",
+        "TELOS_EXTERNAL_SYNC_ENABLED": "true",
+        "TELOS_WEBSOCKET_SYNC_ENABLED": "true",
+        "TELOS_WS_URL": f"127.0.0.1:{WS_PORT}",
+        "TELOS_WS_TOKEN": "test-token",
+        "TELOS_STATELESS": "1",
+        "TELOS_TOOL_APPROVAL": "always",
         "RUST_LOG": "info",
     }
     return env, user_data_dir, workdir
@@ -284,7 +282,7 @@ def scenario_reconnect():
     disconnected = None
     for _ in range(12):
         h = health()
-        if h and not h.get("zed_connected"):
+        if h and not h.get("telos_connected"):
             disconnected = h
             break
         time.sleep(1)
@@ -365,14 +363,12 @@ def ensure_agent():
     pid = find_agent_pid()
     env, user_data_dir, workdir = agent_launch_contract(pid) if pid else (
         {
-            "ZED_EXTERNAL_SYNC_ENABLED": "true",
-            "ZED_WEBSOCKET_SYNC_ENABLED": "true",
-            "ZED_HELIX_URL": f"127.0.0.1:{WS_PORT}",
-            "ZED_HELIX_TOKEN": "test-token",
-            "HELIX_SESSION_ID": "ses_actus-reconnect-test",
-            "ZED_STATELESS": "1",
-            "ZED_WORK_DIR": os.getcwd(),
-            "ZED_TOOL_APPROVAL": "always",
+            "TELOS_EXTERNAL_SYNC_ENABLED": "true",
+            "TELOS_WEBSOCKET_SYNC_ENABLED": "true",
+            "TELOS_WS_URL": f"127.0.0.1:{WS_PORT}",
+            "TELOS_WS_TOKEN": "test-token",
+            "TELOS_STATELESS": "1",
+            "TELOS_TOOL_APPROVAL": "always",
             "RUST_LOG": "info",
         },
         None,
@@ -417,7 +413,7 @@ def scenario_fetch_and_subagent():
 
 def scenario_thread_mention():
     """Thread mention: a follow-up turn references an earlier thread by its
-    zed:///agent/thread/{id}?name=... URI. Guards the cross-thread
+    telos:///agent/thread/{id}?name=... URI. Guards the cross-thread
     information sharing surface that thread mentions provide. LSP
     diagnostics mentions are intentionally excluded from this probe."""
     print("== S8: thread mention (cross-thread context)")
@@ -429,7 +425,7 @@ def scenario_thread_mention():
         return
     check("seed thread completed", bool(poll_thread(tid_a, timeout=180)))
     tid_b = chat_async(
-        f"the thread mentioned at zed:///agent/thread/{tid_a}?name=seed "
+        f"the thread mentioned at telos:///agent/thread/{tid_a}?name=seed "
         "is referenced as context; acknowledge it and continue"
     )
     check("thread-mention turn accepted", bool(tid_b), str(tid_b)[:18] if tid_b else "")
@@ -450,7 +446,7 @@ def scenario_soak():
     while time.time() < end:
         h = health()
         checks += 1
-        if not h or not h.get("zed_connected"):
+        if not h or not h.get("telos_connected"):
             drops += 1
         if time.time() - last_chat > 60:
             last_chat = time.time()

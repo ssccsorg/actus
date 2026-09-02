@@ -1,6 +1,6 @@
-// : Headless Zed AI agent — REST API server
+// : Telos AI agent — REST API server
 //
-// Launches Zed in --headless mode, connects via WebSocket,
+// Launches Telos in --headless mode, connects via WebSocket,
 // and exposes a REST API for multi-thread chat with async task queue.
 //
 // Usage:
@@ -16,18 +16,18 @@ use actus::agent::AgentKind;
 use actus::agent::AgentRegistry;
 use actus::server::run_http_server;
 use actus::server::{AppState, WsCommandTx};
-use actus::zed::backend::ZedBackend;
-use actus::zed::control::run_ws_server;
-use actus::zed::{ensure_zed_settings, launch_zed, ZedManager};
+use actus::telos::backend::TelosBackend;
+use actus::telos::control::run_ws_server;
+use actus::telos::{ensure_telos_settings, launch_telos, TelosManager};
 
 #[derive(clap::Parser, Debug, Clone)]
-#[command(name = "", version, about = "Headless Zed AI agent server")]
+#[command(name = "", version, about = "Telos AI agent server")]
 struct Args {
-    /// Helix headless Zed binary path
+    /// Telos binary path
     #[arg(long)]
     bin: Option<PathBuf>,
 
-    /// Working directory for Zed
+    /// Working directory for Telos
     #[arg(long, default_value = ".")]
     workdir: PathBuf,
 
@@ -35,7 +35,7 @@ struct Args {
     #[arg(long, default_value = "9090")]
     http_port: u16,
 
-    /// WebSocket port for Zed to connect to
+    /// WebSocket port for Telos to connect to
     #[arg(long, default_value = "8080")]
     ws_port: u16,
 
@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Environment values from a `.env` file may carry surrounding quotes
     // (`LLM_MODEL="deepseek-v4-flash"`). Strip them defensively here so a
-    // quoted value never leaks into Zed's settings.json or credentials,
+    // quoted value never leaks into Telos's settings.json or credentials,
     // where a `"deepseek-v4-flash"` model name or quoted key fails the
     // lookup and aborts every turn.
     let unquote = |s: &str| -> String {
@@ -169,10 +169,12 @@ async fn main() -> anyhow::Result<()> {
         .map(|k| unquote(&k))
         .ok_or_else(|| anyhow::anyhow!("API key required: set LLM_API_KEY or --api-key"))?;
 
-    // Resolve binary path: --bin or the sibling telos build. The helix
-    // fallback was removed: actus drives telos only.
+    // Resolve binary path: --bin, the TELOS_BIN env var, or the sibling
+    // telos build. actus drives telos only.
     let bin_path = if let Some(p) = args.bin {
         p
+    } else if let Ok(p) = std::env::var("TELOS_BIN") {
+        PathBuf::from(p)
     } else {
         let default = PathBuf::from("../telos/target/telos-release/tel");
         if default.exists() {
@@ -209,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
         unquote(&std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone()));
 
     // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
-    // Missing file (or no override) means a single default zed agent.
+    // Missing file (or no override) means a single default telos agent.
     let config_path = std::env::var("ACTUS_CONFIG")
         .ok()
         .map(PathBuf::from)
@@ -249,23 +251,23 @@ async fn main() -> anyhow::Result<()> {
     let mut registry = AgentRegistry::new();
     let mut children: Vec<tokio::process::Child> = Vec::new();
     // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
-    let mut monitors: Vec<(Arc<RwLock<ZedManager>>, WsCommandTx)> = Vec::new();
-    // Per-agent user data dirs stay alive for the process lifetime; Zed
+    let mut monitors: Vec<(Arc<RwLock<TelosManager>>, WsCommandTx)> = Vec::new();
+    // Per-agent user data dirs stay alive for the process lifetime; Telos
     // reads settings at startup and watches them while running.
     let mut _user_data_dirs: Vec<tempfile::TempDir> = Vec::new();
 
-    let default_name = if specs.iter().any(|s| s.name == "zed") {
-        "zed".to_string()
+    let default_name = if specs.iter().any(|s| s.name == "telos") {
+        "telos".to_string()
     } else {
         specs[0].name.clone()
     };
 
     for spec in &specs {
         match spec.kind {
-            AgentKind::Zed => {
+            AgentKind::Telos => {
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
-                ensure_zed_settings(
+                ensure_telos_settings(
                     user_data_dir.path(),
                     &spec.api_key,
                     &spec.provider,
@@ -281,7 +283,7 @@ async fn main() -> anyhow::Result<()> {
                     spec.name,
                     &uuid::Uuid::new_v4().to_string()[..8]
                 );
-                let manager = Arc::new(RwLock::new(ZedManager::new(
+                let manager = Arc::new(RwLock::new(TelosManager::new(
                     session_id.clone(),
                     ws_host.clone(),
                     &threads_dir,
@@ -289,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
                 let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
                 monitors.push((manager.clone(), ws_tx.clone()));
 
-                // Per-agent WebSocket server (Zed connects back here).
+                // Per-agent WebSocket server (Telos connects back here).
                 tokio::spawn({
                     let host = ws_host.clone();
                     let mgr = manager.clone();
@@ -300,18 +302,17 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 });
-                // Debounced thread persistence (see ZedManager::save_threads).
-                ZedManager::spawn_thread_saver(manager.clone());
+                // Debounced thread persistence (see TelosManager::save_threads).
+                TelosManager::spawn_thread_saver(manager.clone());
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-                let child = launch_zed(
+                let child = launch_telos(
                     &spec.bin,
                     &workdir,
                     user_data_dir.path(),
-                    &session_id,
                     &ws_host,
                     spec.tool_approval.as_str(),
-                    &threads_dir.join("zed-headless.log"),
+                    &threads_dir.join("telos.log"),
                 )
                 .await?;
                 _user_data_dirs.push(user_data_dir);
@@ -324,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
                 );
                 children.push(child);
 
-                let backend = Arc::new(ZedBackend {
+                let backend = Arc::new(TelosBackend {
                     manager: manager.clone(),
                     ws_tx: ws_tx.clone(),
                 });
@@ -456,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
                     let (connected, elapsed, active_turn) = {
                         let g = mgr.read().await;
                         (
-                            g.zed_connected,
+                            g.telos_connected,
                             g.last_sse_event_time.elapsed(),
                             !g.pending_chat_queue.is_empty(),
                         )
@@ -467,13 +468,13 @@ async fn main() -> anyhow::Result<()> {
                             "Health monitor: no events for {}s during an active turn, forcing reconnection",
                             elapsed.as_secs()
                         );
-                        // Force reconnection: clear zed_connected and the
+                        // Force reconnection: clear telos_connected and the
                         // shared command channel. The WS read loop's
                         // periodic check breaks, and the connection loop
-                        // accepts a new connection (Zed auto-reconnects).
+                        // accepts a new connection (Telos auto-reconnects).
                         {
                             let mut g = mgr.write().await;
-                            g.zed_connected = false;
+                            g.telos_connected = false;
                         }
                         {
                             let mut guard = ws_tx.lock().await;

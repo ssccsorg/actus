@@ -17,10 +17,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
 RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
-# Respect a pre-configured ZED_BIN (e.g. CI sets ZED_BIN=/bin/true);
+# Respect a pre-configured TELOS_BIN (e.g. CI sets TELOS_BIN=/bin/true);
 # default to the sibling telos build, the only agent binary actus runs.
-if [ -z "${ZED_BIN:-}" ]; then
-    ZED_BIN="$SCRIPT_DIR/../telos/target/telos-release/tel"
+if [ -z "${TELOS_BIN:-}" ]; then
+    TELOS_BIN="$SCRIPT_DIR/../telos/target/telos-release/tel"
 fi
 SERVER_LOG="/tmp/actus-server.log"
 HTTP_PORT="${ACTUS_HTTP_PORT:-9090}"
@@ -124,11 +124,11 @@ test_health() {
     h=$(curl -s --max-time 5 http://127.0.0.1:$HTTP_PORT/health 2>/dev/null || echo '{"status":"error"}')
     if echo "$h" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='ok' else 1)" 2>/dev/null; then
         pass "Server health: ok"
-        local zed agent threads
-        zed=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('zed_connected',False))")
+        local telos agent threads
+        telos=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('telos_connected',False))")
         agent=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('agent_ready',False))")
         threads=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('active_threads',0))")
-        pass "Zed connected: $zed"
+        pass "Telos connected: $telos"
         pass "Agent ready: $agent"
         pass "Active threads: $threads"
     else
@@ -286,12 +286,12 @@ test_llm_chat() {
 
 # ── Server start ──────────────────────────────────────────────────────
 
-ensure_zed_binary() {
-    if [ -f "$ZED_BIN" ]; then
-        pass "Agent binary: $ZED_BIN"
+ensure_telos_binary() {
+    if [ -f "$TELOS_BIN" ]; then
+        pass "Agent binary: $TELOS_BIN"
         return 0
     fi
-    info "Agent binary not found at $ZED_BIN"
+    info "Agent binary not found at $TELOS_BIN"
     warn "Build the sibling telos repo first (cargo build --profile telos-release -p telos), then retry. Agent integration tests are skipped until the binary exists."
     return 1
 }
@@ -299,7 +299,7 @@ ensure_zed_binary() {
 start_server() {
     step "Starting Actus server via runner.py"
 
-    ensure_zed_binary
+    ensure_telos_binary
 
     local api_key="${LLM_API_KEY:-}"
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
@@ -315,8 +315,8 @@ start_server() {
         "--server-only"
     )
     [ -n "$api_key" ] && runner_args+=("--api-key" "$api_key")
-    if [ -f "$ZED_BIN" ]; then
-        runner_args+=("--bin" "$ZED_BIN")
+    if [ -f "$TELOS_BIN" ]; then
+        runner_args+=("--bin" "$TELOS_BIN")
     fi
 
     info "HTTP:  http://127.0.0.1:$HTTP_PORT"
@@ -341,7 +341,7 @@ start_server() {
         local health
         health=$(curl -s --max-time 2 http://127.0.0.1:$HTTP_PORT/health 2>/dev/null || echo '')
         local ready
-        ready=$(echo "$health" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('zed_connected') and d.get('agent_ready') else 1)" 2>/dev/null && echo 1 || echo 0)
+        ready=$(echo "$health" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('telos_connected') and d.get('agent_ready') else 1)" 2>/dev/null && echo 1 || echo 0)
         if [ "$ready" = "1" ]; then
             pass "Server and agent ready after ${i}s"
             return 0
@@ -402,7 +402,7 @@ run_scenarios() {
     # output to a log, and buffered prints would hide a long-running
     # scenario until it exits.
     if ACTUS_HTTP_PORT="$HTTP_PORT" ACTUS_WS_PORT="$WS_PORT" \
-        TELOS_BIN="$ZED_BIN" SOAK_MINUTES="$soak" \
+        TELOS_BIN="$TELOS_BIN" SOAK_MINUTES="$soak" \
         python3 -u "$SCRIPT_DIR/tests/scenarios.py"; then
         pass "Scenarios passed"
     else
@@ -464,7 +464,7 @@ case "$MODE" in
         ACTUS_FAKE=0 run_scenarios
         ;;
     --server-only|-o)
-        ensure_zed_binary
+        ensure_telos_binary
         info "Starting server only via runner.py"
         python3 "$RUNNER" --server-only --workdir "$PROJECT_DIR" &
         SERVER_PID=$!
@@ -478,7 +478,7 @@ case "$MODE" in
         show_help
         ;;
     *)
-        ensure_zed_binary
+        ensure_telos_binary
         info "Building and starting Actus..."
         python3 "$RUNNER" --workdir "$PROJECT_DIR"
         ;;

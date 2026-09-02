@@ -1,11 +1,11 @@
-// Serialization round-trip tests for the Zed protocol types (issue #9).
+// Serialization round-trip tests for the Telos protocol types (issue #9).
 //
 // The SyncEvent enum is adjacently tagged (`event_type` + `data`), which
-// is the wire format Zed emits over the WebSocket. These tests pin that
+// is the wire format Telos emits over the WebSocket. These tests pin that
 // format and prove every variant survives a JSON round trip, including
 // the defaulted fields of MessageAdded.
 
-use actus::zed::types::{IncomingChatMessage, OutgoingMessage, SyncEvent};
+use actus::telos::types::{IncomingChatMessage, OutgoingMessage, SyncEvent};
 
 #[test]
 fn sync_event_roundtrip_all_variants() {
@@ -39,11 +39,11 @@ fn sync_event_roundtrip_all_variants() {
             error: "agent turn aborted".to_string(),
         },
         SyncEvent::AgentReady {
-            agent_name: "zed".to_string(),
+            agent_name: "telos".to_string(),
             thread_id: Some("acp-1".to_string()),
         },
         SyncEvent::AgentReady {
-            agent_name: "zed".to_string(),
+            agent_name: "telos".to_string(),
             thread_id: None,
         },
         SyncEvent::TurnCancelled {
@@ -67,7 +67,7 @@ fn sync_event_roundtrip_all_variants() {
 #[test]
 fn sync_event_wire_format_has_tag_and_data() {
     // The wire format must be { "event_type": ..., "data": ... } so the
-    // serde representation matches what Zed actually emits.
+    // serde representation matches what Telos actually emits.
     let event = SyncEvent::ThreadCreated {
         acp_thread_id: "acp-9".to_string(),
         request_id: "req-9".to_string(),
@@ -77,7 +77,7 @@ fn sync_event_wire_format_has_tag_and_data() {
     assert_eq!(value["data"]["acp_thread_id"], "acp-9");
     assert_eq!(value["data"]["request_id"], "req-9");
 
-    // Parsing a raw wire-format frame produced by Zed must work.
+    // Parsing a raw wire-format frame produced by Telos must work.
     let raw = r#"{
         "event_type": "message_added",
         "data": {
@@ -162,14 +162,14 @@ fn incoming_chat_message_roundtrip_and_defaults() {
         acp_thread_id: Some("acp-1".to_string()),
         message: "hello".to_string(),
         request_id: "req-1".to_string(),
-        agent_name: Some("zed".to_string()),
+        agent_name: Some("telos".to_string()),
         interrupt: true,
     };
     let json = serde_json::to_string(&msg).unwrap();
     let back: IncomingChatMessage = serde_json::from_str(&json).unwrap();
     assert_eq!(back.acp_thread_id.as_deref(), Some("acp-1"));
     assert_eq!(back.message, "hello");
-    assert_eq!(back.agent_name.as_deref(), Some("zed"));
+    assert_eq!(back.agent_name.as_deref(), Some("telos"));
     assert!(back.interrupt);
 
     // Optional fields default when absent.

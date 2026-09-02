@@ -2,7 +2,7 @@
 //
 // These are real end-to-end tests: the production router is served on
 // an ephemeral port and exercised through a real HTTP client. The agent
-// backend is a disconnected ZedBackend, so endpoints that require a
+// backend is a disconnected TelosBackend, so endpoints that require a
 // live agent exercise the failure paths (503, error payloads) while
 // endpoints that only need the workspace (files, git, threads) are
 // covered end to end.
@@ -12,23 +12,23 @@ use std::sync::Arc;
 
 use actus::agent::{AgentBackend, AgentRegistry};
 use actus::server::{build_router, AppState, SharedState};
-use actus::zed::backend::ZedBackend;
-use actus::zed::{WsCommandTx, ZedManager};
+use actus::telos::backend::TelosBackend;
+use actus::telos::{WsCommandTx, TelosManager};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
-/// State with one disconnected Zed backend and an empty temp workdir.
+/// State with one disconnected Telos backend and an empty temp workdir.
 /// The TempDir is returned so it outlives the tests. Auth is enabled with
 /// a fixed token; `client()` sends it on every request.
 fn test_state() -> (SharedState, tempfile::TempDir) {
     let workdir = tempfile::tempdir().expect("tempdir");
-    let manager = Arc::new(RwLock::new(ZedManager::new(
+    let manager = Arc::new(RwLock::new(TelosManager::new(
         "ses_test".to_string(),
         "127.0.0.1:9999".to_string(),
         workdir.path(),
     )));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-    let backend: Arc<dyn AgentBackend> = Arc::new(ZedBackend { manager, ws_tx });
+    let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend { manager, ws_tx });
 
     let mut registry = AgentRegistry::new();
     registry.register(backend, true);
@@ -92,13 +92,13 @@ async fn health_reports_disconnected_agent() {
     let body: serde_json::Value = resp.json().await.unwrap();
 
     assert_eq!(body["status"], "ok");
-    assert_eq!(body["zed_connected"], false);
+    assert_eq!(body["telos_connected"], false);
     assert_eq!(body["agent_ready"], false);
     assert_eq!(body["active_threads"], 0);
     let agents = body["agents"].as_array().expect("agents array");
     assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0]["name"], "zed");
-    assert_eq!(agents[0]["kind"], "zed");
+    assert_eq!(agents[0]["name"], "telos");
+    assert_eq!(agents[0]["kind"], "telos");
 
     server.abort();
 }

@@ -3,13 +3,13 @@
 : REST chat client for the Rust  server.
 
 Connects to the Rust HTTP server at localhost:9090 which already manages
-Zed headless.  No subprocess, no WebSocket, no API key needed here.
+Telos.  No subprocess, no WebSocket, no API key needed here.
 
 Usage:
   ./terminal.py                              # default port 9090
   ./terminal.py --port 9091                  # custom port
-  ./terminal.py --workdir /path/to/project   # no-zed fallback info
-  ./terminal.py --no-zed                     # fallback mode
+  ./terminal.py --workdir /path/to/project   # no-telos fallback info
+  ./terminal.py --no-telos                     # fallback mode
 
 Commands:
   /exit, /quit    - exit
@@ -237,14 +237,14 @@ def print_banner(h: dict):
     print(f"{C.BOLD}{C.HEADER}╚══════════════════════════════════════╝{C.END}")
     ok = h and h.get("status") == "ok"
     if ok:
-        zed = h.get("zed_connected", False)
+        telos = h.get("telos_connected", False)
         agent = h.get("agent_ready", False)
         print(f"  {C.GREEN}✓{C.END} Server: {h.get('status', '?')}")
-        print(f"  {C.GREEN}✓{C.END} Zed connected: {zed}")
+        print(f"  {C.GREEN}✓{C.END} Telos connected: {telos}")
         print(f"  {C.GREEN}✓{C.END} Agent ready: {agent}")
         print(f"  {C.DIM}Active threads: {h.get('active_threads', 0)}{C.END}")
-        if not zed or not agent:
-            print(f"\n{C.YELLOW}⚠ Waiting for Zed to connect...{C.END}")
+        if not telos or not agent:
+            print(f"\n{C.YELLOW}⚠ Waiting for Telos to connect...{C.END}")
     else:
         print(f"  {C.RED}✗{C.END} Server unreachable")
     print()
@@ -542,7 +542,7 @@ async def send_chat(client: NexClient, message: str):
 
     Uses async submission (returns immediately) and polls for new content
     at 300ms intervals. This avoids the SSE streaming issues with the
-    WebSocket event delivery from Zed.
+    WebSocket event delivery from Telos.
     """
     global current_thread_id, show_raw
 
@@ -950,9 +950,9 @@ def main():
     parser.add_argument("--port", type=int, default=9090,
                         help="Server port (default: 9090)")
     parser.add_argument("--workdir", default=os.getcwd(),
-                        help="Working directory hint (for --no-zed fallback)")
-    parser.add_argument("--no-zed", action="store_true",
-                        help="Fallback mode: do not expect Zed to be managed")
+                        help="Working directory hint (for --no-telos fallback)")
+    parser.add_argument("--no-telos", action="store_true",
+                        help="Fallback mode: do not expect Telos to be managed")
     parser.add_argument("--api-token", default=None,
                         help="Bearer token for the actus HTTP API (default: ACTUS_API_TOKEN env or ~/.actus/api_token)")
     args = parser.parse_args()
@@ -983,7 +983,7 @@ def main():
             print(f"  {C.DIM}Server:{C.END} {base_url}")
             print(f"  {C.DIM}Workdir:{C.END} {workdir}")
             print()
-            if h.get("zed_connected") and h.get("agent_ready"):
+            if h.get("telos_connected") and h.get("agent_ready"):
                 print(f"{C.BOLD}Enter a message. /exit returns to thread selection.{C.END}")
                 print(f"{C.DIM}Example: \"What's in this directory?\"{C.END}")
 

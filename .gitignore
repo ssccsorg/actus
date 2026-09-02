@@ -9,7 +9,6 @@ node_modules/
 # Python (LightRAG)
 __pycache__/
 
-# Helix fork clone (managed by build.sh)
 *.py[cod]
 *.pyo
 *.egg-info/
@@ -55,7 +54,7 @@ result/
 
 logs
 
-# Pre-compiled binaries (Helix remote_server, etc.)
+# Pre-compiled binaries
 .bin/
 
 # Nested telos agent repo (separate private repository)

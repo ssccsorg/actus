@@ -8,7 +8,7 @@ The analysis is grounded in the official LangGraph documentation and repositorie
 
 ## Positioning
 
-Actus is an execution fabric. It exposes one `AgentBackend` trait and one REST API, and behind that surface it weaves whatever agent platform a task needs. Zed headless is the first adapter (ACP over WebSocket). LangGraph is the declared second platform kind, but no adapter exists yet.
+Actus is an execution fabric. It exposes one `AgentBackend` trait and one REST API, and behind that surface it weaves whatever agent platform a task needs. The telos agent is the first adapter (ACP over WebSocket). LangGraph is the declared second platform kind, but no adapter exists yet.
 
 LangGraph is a graph-based agent orchestration framework with a server runtime. The ecosystem splits into layers:
 
@@ -20,7 +20,7 @@ LangGraph is a graph-based agent orchestration framework with a server runtime. 
 | Deployment | LangSmith Deployment (formerly LangGraph Platform) | Cloud, self-hosted, hybrid, standalone hosting |
 | Observability | LangSmith | Tracing, evaluation, Studio UI |
 
-The relationship is complementary, not competing. Actus owns lifecycle and routing across platforms; LangGraph owns graph state and durable execution inside one platform. A `LangGraphBackend` adapter would let actus orchestrate a LangGraph agent exactly as it orchestrates Zed today.
+The relationship is complementary, not competing. Actus owns lifecycle and routing across platforms; LangGraph owns graph state and durable execution inside one platform. A `LangGraphBackend` adapter would let actus orchestrate a LangGraph agent exactly as it orchestrates Telos today.
 
 ## Verified API Surface
 
@@ -83,13 +83,13 @@ There is no official Rust client. The official SDKs are Python (`langgraph-sdk`)
 
 ## Ecosystem Relationships
 
-MCP connects in both directions. LangGraph agents consume MCP tools through `langchain-mcp-adapters`, and the Agent Server exposes an assistant as an MCP server at `POST /mcp/`. Actus already injects MCP servers into Zed via `context_servers`; a LangGraph agent would instead declare MCP consumption inside the graph, so the config surface differs.
+MCP connects in both directions. LangGraph agents consume MCP tools through `langchain-mcp-adapters`, and the Agent Server exposes an assistant as an MCP server at `POST /mcp/`. Actus already injects MCP servers into Telos via `context_servers`; a LangGraph agent would instead declare MCP consumption inside the graph, so the config surface differs.
 
-ACP has no official presence in the LangGraph ecosystem. No LangGraph or Zed ACP integration was found in official docs or repositories; only small community bridges exist. This matters because actus's Zed adapter speaks ACP over WebSocket, so the two adapters would share no wire protocol.
+ACP has no official presence in the LangGraph ecosystem. No LangGraph or Telos ACP integration was found in official docs or repositories; only small community bridges exist. This matters because actus's Telos adapter speaks ACP over WebSocket, so the two adapters would share no wire protocol.
 
 The OpenAI Assistants API is conceptually parallel (assistants, threads, runs, messages) but wire-incompatible, and OpenAI has deprecated it in favor of the Responses API. LangGraph's value over that surface is graph control, interrupts, and checkpointing.
 
-LangSmith is the observability layer. Agent Server traces runs into LangSmith automatically, so a LangGraph agent under actus gains tracing without actus work, which the Zed adapter cannot offer.
+LangSmith is the observability layer. Agent Server traces runs into LangSmith automatically, so a LangGraph agent under actus gains tracing without actus work, which the Telos adapter cannot offer.
 
 ## Recommendation
 

@@ -1,8 +1,8 @@
-// ZedBackend — ACP/WebSocket adapter implementing the agent fabric trait.
+// TelosBackend — ACP/WebSocket adapter implementing the agent fabric trait.
 //
-// Runs one headless Zed process behind the `AgentBackend` interface.
+// Runs one Telos process behind the `AgentBackend` interface.
 // ACP-over-WebSocket details (connection loop, event dispatch, reconnect)
-// stay inside `zed::control`; this adapter owns thread state, context
+// stay inside `telos::control`; this adapter owns thread state, context
 // injection, command submission, and the resume wait.
 
 use std::sync::Arc;
@@ -14,26 +14,26 @@ use tokio::sync::{Notify, RwLock};
 use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadSession,
 };
-use crate::zed::{WsCommandTx, ZedManager};
+use crate::telos::{WsCommandTx, TelosManager};
 
-/// One headless Zed agent instance behind the fabric interface.
-pub struct ZedBackend {
-    pub manager: Arc<RwLock<ZedManager>>,
-    /// Shared command channel, kept in sync with `ZedManager::ws_tx` by
-    /// `zed::control`. Sending through the shared channel means a stale
+/// One Telos agent instance behind the fabric interface.
+pub struct TelosBackend {
+    pub manager: Arc<RwLock<TelosManager>>,
+    /// Shared command channel, kept in sync with `TelosManager::ws_tx` by
+    /// `telos::control`. Sending through the shared channel means a stale
     /// manager-side sender after a reconnect cannot silently drop a
     /// message.
     pub ws_tx: WsCommandTx,
 }
 
 #[async_trait::async_trait]
-impl AgentBackend for ZedBackend {
+impl AgentBackend for TelosBackend {
     fn name(&self) -> &str {
-        "zed"
+        "telos"
     }
 
     fn kind(&self) -> AgentKind {
-        AgentKind::Zed
+        AgentKind::Telos
     }
 
     async fn status(&self) -> AgentStatus {
@@ -41,7 +41,7 @@ impl AgentBackend for ZedBackend {
         AgentStatus {
             name: self.name().to_string(),
             kind: self.kind(),
-            connected: mgr.zed_connected,
+            connected: mgr.telos_connected,
             ready: mgr.agent_ready,
         }
     }
@@ -55,7 +55,7 @@ impl AgentBackend for ZedBackend {
         // sending so the command channel is not blocked by thread work.
         let (thread_id, request_id, is_new, cmd) = {
             let mut mgr = self.manager.write().await;
-            if !mgr.zed_connected || !mgr.agent_ready {
+            if !mgr.telos_connected || !mgr.agent_ready {
                 return Err("agent not connected or not ready".to_string());
             }
             let tid = mgr.get_or_create_thread(thread_id);

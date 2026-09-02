@@ -1,13 +1,13 @@
 // MCP coverage for the production six-server set (issue #7).
 //
-// Mirrors the servers configured in the user's Zed IDE:
+// Mirrors the servers configured in the user's Telos IDE:
 //   stdio: memory, sequentialthinking, filesystem, context7
 //   http:  cloudflare-api, mcp-server-github
 // Unit tests cover config parsing and settings injection; the scenario
 // test proves an injected stdio entry spawns a working MCP server.
 
 use actus::agent::config::{load_config, AgentDefaults, McpServer};
-use actus::zed::ensure_zed_settings;
+use actus::telos::ensure_telos_settings;
 use std::path::PathBuf;
 
 fn defaults() -> AgentDefaults {
@@ -17,7 +17,7 @@ fn defaults() -> AgentDefaults {
         model_display: "deepseek-chat".to_string(),
         base_url: "https://api.deepseek.com/v1".to_string(),
         api_key: "sk-test".to_string(),
-        bin: PathBuf::from("/bin/zed"),
+        bin: PathBuf::from("/bin/telos"),
         ws_port: 8080,
     }
 }
@@ -25,7 +25,7 @@ fn defaults() -> AgentDefaults {
 /// The production six-server TOML, token redacted.
 const SIX_SERVER_TOML: &str = r#"
 [[agents]]
-name = "zed"
+name = "telos"
 ws_port = 8080
 
 [[agents.mcp]]
@@ -110,7 +110,7 @@ fn six_server_settings_injection_schema() {
         std::fs::write(&cfg, SIX_SERVER_TOML).unwrap();
         load_config(Some(&cfg), &defaults()).unwrap()
     };
-    ensure_zed_settings(
+    ensure_telos_settings(
         data_dir,
         "sk-test",
         "deepseek",
@@ -209,7 +209,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
         headers: Default::default(),
         timeout: None,
     }];
-    ensure_zed_settings(
+    ensure_telos_settings(
         dir.path(),
         "sk-test",
         "deepseek",

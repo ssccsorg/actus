@@ -7,6 +7,6 @@ under the Business Source License 1.1 (see `LICENSE`).
 
 Copyright (c) 2026 SSCCS Foundation.
 
-Actus executes a separate agent process (the telos binary) that is built
-and distributed from its own repository. No telos, Zed, or Helix source
-code is vendored in this repository.
+Actus executes a separate agent process (the telos binary) built and
+distributed from its own repository; this repository vendors no agent
+source code.

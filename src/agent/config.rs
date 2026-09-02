@@ -1,6 +1,6 @@
 // Agent configuration — static declaration of the platforms the fabric
 // weaves. Agents live in `~/.actus/config.toml` (or `ACTUS_CONFIG`); when
-// the file is absent a single default "zed" agent is derived from the CLI
+// the file is absent a single default "telos" agent is derived from the CLI
 // and environment.
 
 use std::collections::{HashMap, HashSet};
@@ -32,7 +32,7 @@ impl ToolApproval {
 }
 
 /// One MCP (Model Context Protocol) server attached to an agent. Matches
-/// Zed's `context_servers` settings entries: either a local stdio process
+/// Telos's `context_servers` settings entries: either a local stdio process
 /// (`command`/`args`/`env`) or a remote HTTP endpoint (`url`/`headers`).
 #[derive(Clone, Debug, Deserialize)]
 pub struct McpServer {
@@ -58,7 +58,7 @@ pub struct McpServer {
 /// concrete: `load_config` fills anything the file omits from defaults.
 #[derive(Clone, Debug)]
 pub struct AgentSpec {
-    /// Unique agent name used in routing (e.g. "zed", "claude").
+    /// Unique agent name used in routing (e.g. "telos", "claude").
     pub name: String,
     pub kind: AgentKind,
     pub provider: String,
@@ -66,11 +66,11 @@ pub struct AgentSpec {
     pub model_display: String,
     pub base_url: String,
     pub api_key: String,
-    /// Zed headless binary path.
+    /// Telos binary path.
     pub bin: PathBuf,
     /// WebSocket port the agent process connects back to.
     pub ws_port: u16,
-    /// Tool call approval policy; drives the fork's ZED_TOOL_APPROVAL env.
+    /// Tool call approval policy; drives the fork's TELOS_TOOL_APPROVAL env.
     pub tool_approval: ToolApproval,
     /// MCP servers attached to this agent.
     pub mcp: Vec<McpServer>,
@@ -123,9 +123,9 @@ struct ConfigFile {
 
 /// Load and resolve agent specs.
 ///
-/// `file = None` yields a single default "zed" spec. When `file` is Some
+/// `file = None` yields a single default "telos" spec. When `file` is Some
 /// the TOML must parse and contain at least one agent. Resolved specs have
-/// unique names and unique WebSocket ports among `zed`-kind agents.
+/// unique names and unique WebSocket ports among `telos`-kind agents.
 pub fn load_config(file: Option<&Path>, defaults: &AgentDefaults) -> Result<Vec<AgentSpec>, String> {
     let files: Vec<AgentSpecFile> = match file {
         Some(p) => {
@@ -136,7 +136,7 @@ pub fn load_config(file: Option<&Path>, defaults: &AgentDefaults) -> Result<Vec<
             cfg.agents
         }
         None => vec![AgentSpecFile {
-            name: "zed".to_string(),
+            name: "telos".to_string(),
             kind: None,
             provider: None,
             model: None,
@@ -161,9 +161,9 @@ pub fn load_config(file: Option<&Path>, defaults: &AgentDefaults) -> Result<Vec<
         if !names.insert(f.name.clone()) {
             return Err(format!("config: duplicate agent name '{}'", f.name));
         }
-        let kind = f.kind.unwrap_or(AgentKind::Zed);
+        let kind = f.kind.unwrap_or(AgentKind::Telos);
         let ws_port = f.ws_port.unwrap_or(defaults.ws_port);
-        if kind == AgentKind::Zed {
+        if kind == AgentKind::Telos {
             if let Some(prev) = ports.insert(ws_port, f.name.clone()) {
                 return Err(format!(
                     "config: agents '{}' and '{}' share WebSocket port {}",

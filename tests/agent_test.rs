@@ -3,13 +3,13 @@
 use std::sync::Arc;
 
 use actus::agent::{AgentBackend, AgentKind, AgentRegistry};
-use actus::zed::backend::ZedBackend;
-use actus::zed::control::handle_zed_event;
-use actus::zed::{WsCommandTx, ZedManager};
+use actus::telos::backend::TelosBackend;
+use actus::telos::control::handle_telos_event;
+use actus::telos::{WsCommandTx, TelosManager};
 use tokio::sync::RwLock;
 
-fn zed_manager(dir: &std::path::Path) -> ZedManager {
-    ZedManager::new(
+fn telos_manager(dir: &std::path::Path) -> TelosManager {
+    TelosManager::new(
         "ses_test".to_string(),
         "127.0.0.1:9999".to_string(),
         dir,
@@ -18,58 +18,58 @@ fn zed_manager(dir: &std::path::Path) -> ZedManager {
 
 #[test]
 fn agent_kind_roundtrip() {
-    assert_eq!(AgentKind::parse("zed"), Some(AgentKind::Zed));
+    assert_eq!(AgentKind::parse("telos"), Some(AgentKind::Telos));
     assert_eq!(AgentKind::parse("langgraph"), Some(AgentKind::LangGraph));
     assert_eq!(AgentKind::parse("native"), Some(AgentKind::Native));
     assert_eq!(AgentKind::parse("unknown"), None);
-    assert_eq!(AgentKind::Zed.as_str(), "zed");
-    assert_eq!(serde_json::to_string(&AgentKind::Zed).unwrap(), "\"zed\"");
+    assert_eq!(AgentKind::Telos.as_str(), "telos");
+    assert_eq!(serde_json::to_string(&AgentKind::Telos).unwrap(), "\"telos\"");
     assert_eq!(
         serde_json::from_str::<AgentKind>("\"langgraph\"").unwrap(),
         AgentKind::LangGraph
     );
 }
 
-fn zed_backend() -> ZedBackend {
+fn telos_backend() -> TelosBackend {
     let dir = tempfile::tempdir().expect("tempdir");
-    let manager = Arc::new(RwLock::new(ZedManager::new(
+    let manager = Arc::new(RwLock::new(TelosManager::new(
         "ses_test".to_string(),
         "127.0.0.1:9999".to_string(),
         dir.path(),
     )));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-    ZedBackend { manager, ws_tx }
+    TelosBackend { manager, ws_tx }
 }
 
 #[tokio::test]
 async fn registry_default_agent_status() {
     let mut registry = AgentRegistry::new();
-    registry.register(Arc::new(zed_backend()), true);
+    registry.register(Arc::new(telos_backend()), true);
 
     let default = registry.default_agent().expect("default agent");
     let status = default.status().await;
-    assert_eq!(status.name, "zed");
-    assert_eq!(status.kind, AgentKind::Zed);
+    assert_eq!(status.name, "telos");
+    assert_eq!(status.kind, AgentKind::Telos);
     assert!(!status.connected);
     assert!(!status.ready);
 
     let statuses = registry.statuses().await;
     assert_eq!(statuses.len(), 1);
-    assert_eq!(statuses[0].name, "zed");
+    assert_eq!(statuses[0].name, "telos");
 }
 
 #[tokio::test]
 async fn registry_get_by_name() {
     let mut registry = AgentRegistry::new();
-    registry.register(Arc::new(zed_backend()), true);
+    registry.register(Arc::new(telos_backend()), true);
 
-    assert!(registry.get("zed").is_some());
+    assert!(registry.get("telos").is_some());
     assert!(registry.get("missing").is_none());
 }
 
 #[tokio::test]
 async fn submit_fails_when_not_connected() {
-    let backend = zed_backend();
+    let backend = telos_backend();
     let err = backend.submit(None, "hello").await.expect_err("must fail");
     assert!(
         err.contains("not connected") || err.contains("not ready"),
@@ -84,7 +84,7 @@ async fn submit_fails_when_not_connected() {
 /// bound across repeated failed submissions.
 #[tokio::test]
 async fn failed_submit_cleans_pending_requests() {
-    let backend = zed_backend();
+    let backend = telos_backend();
 
     // Not connected: submit fails before inserting a mapping.
     {
@@ -101,7 +101,7 @@ async fn failed_submit_cleans_pending_requests() {
     // the send fails, and the mapping must be removed again.
     {
         let mut mgr = backend.manager.write().await;
-        mgr.zed_connected = true;
+        mgr.telos_connected = true;
         mgr.agent_ready = true;
     }
     {
@@ -127,7 +127,7 @@ async fn failed_submit_cleans_pending_requests() {
 #[test]
 fn truncation_never_splits_multibyte_chars() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = zed_manager(dir.path());
+    let mut mgr = telos_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     // Title: a long string of multi-byte chars (Korean) plus ASCII.
@@ -150,11 +150,11 @@ fn truncation_never_splits_multibyte_chars() {
 
 /// A stale acp_thread_id from a previous session must be cleared when
 /// the thread is prepared again, and the reverse map entry dropped, so a
-/// resumed thread does not resume the wrong Zed thread.
+/// resumed thread does not resume the wrong Telos thread.
 #[test]
 fn prepare_message_clears_stale_acp_mapping() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = zed_manager(dir.path());
+    let mut mgr = telos_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     // Simulate a persisted thread with an acp id from a past session.
@@ -261,7 +261,7 @@ fn load_threads_repairs_turn_counter_drift() {
     f.write_all(serde_json::to_string_pretty(&map).unwrap().as_bytes())
         .unwrap();
 
-    let loaded = ZedManager::load_threads(&threads_file);
+    let loaded = TelosManager::load_threads(&threads_file);
     let repaired = loaded.get("t1").expect("thread loaded");
     assert_eq!(repaired.turn_completed, 2, "counter must be repaired to message count");
 
@@ -280,20 +280,20 @@ fn load_threads_repairs_turn_counter_drift() {
     let mut f = std::fs::File::create(&threads_file).unwrap();
     f.write_all(serde_json::to_string_pretty(&map2).unwrap().as_bytes())
         .unwrap();
-    let loaded = ZedManager::load_threads(&threads_file);
+    let loaded = TelosManager::load_threads(&threads_file);
     let repaired = loaded.get("t1").unwrap();
     assert_eq!(repaired.turn_completed, 2, "tool_call entries must be excluded");
 }
 
 /// Streaming updates to the same message id must replace the existing
-/// message in place, wherever it sits in the thread. Zed emits updates for
+/// message in place, wherever it sits in the thread. Telos emits updates for
 /// interleaved messages (thinking, tool call, answer), so the same id
 /// reappears non-consecutively; appending a duplicate each time swells a
 /// turn into dozens of messages and breaks poll/SSE.
 #[test]
 fn add_message_full_replaces_by_id_anywhere() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = zed_manager(dir.path());
+    let mut mgr = telos_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     mgr.add_message_full(
@@ -359,7 +359,7 @@ fn add_message_full_replaces_by_id_anywhere() {
 #[test]
 fn scoped_message_ids_do_not_collide_across_acp_threads() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = zed_manager(dir.path());
+    let mut mgr = telos_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     mgr.add_message_full(
@@ -394,7 +394,7 @@ fn scoped_message_ids_do_not_collide_across_acp_threads() {
 #[test]
 fn scoped_id_update_targets_only_its_acp_thread() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = zed_manager(dir.path());
+    let mut mgr = telos_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     mgr.add_message_full(
@@ -433,7 +433,7 @@ fn scoped_id_update_targets_only_its_acp_thread() {
 
 #[tokio::test]
 async fn threads_empty_when_no_state() {
-    let backend = zed_backend();
+    let backend = telos_backend();
     assert!(backend.threads().await.is_empty());
     assert!(backend.thread("missing").await.is_none());
 }
@@ -445,7 +445,7 @@ async fn threads_empty_when_no_state() {
 #[tokio::test]
 async fn duplicate_completion_consumed_by_sentinel() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
 
     // Set up the local thread and ACP mapping as the submit path would.
     {
@@ -458,14 +458,14 @@ async fn duplicate_completion_consumed_by_sentinel() {
     }
 
     // First completion: consumes the mapping, bumps the counter.
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-1","request_id":"req-1"}}"#,
     )
     .await;
 
     // Duplicate completion: sentinel present, must be ignored.
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-1","request_id":"req-1"}}"#,
     )
@@ -484,7 +484,7 @@ async fn duplicate_completion_consumed_by_sentinel() {
 #[tokio::test]
 async fn empty_completion_records_error() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -494,7 +494,7 @@ async fn empty_completion_records_error() {
         mgr.pending_requests.insert("req-2".to_string(), tid.clone());
     }
 
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-2","request_id":"req-2"}}"#,
     )
@@ -516,7 +516,7 @@ async fn empty_completion_records_error() {
 #[tokio::test]
 async fn error_then_completion_consumes_once() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -526,12 +526,12 @@ async fn error_then_completion_consumes_once() {
         mgr.pending_requests.insert("req-3".to_string(), tid.clone());
     }
 
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"chat_response_error","data":{"request_id":"req-3","error":"boom"}}"#,
     )
     .await;
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-3","request_id":"req-3"}}"#,
     )
@@ -554,7 +554,7 @@ async fn error_then_completion_consumes_once() {
 #[tokio::test]
 async fn replay_of_prior_turn_entry_is_dropped() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
 
     // Simulate turn 1: thinking + tool call + answer, then completion.
     {
@@ -564,22 +564,22 @@ async fn replay_of_prior_turn_entry_is_dropped() {
         mgr.thread_id_map.insert("acp-4".to_string(), tid.clone());
         mgr.pending_requests.insert("req-4".to_string(), tid.clone());
     }
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"1","role":"assistant","content":"<thinking>first</thinking>","entry_type":"text"}}"#,
     )
     .await;
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"2","role":"assistant","content":"**Tool Call: ls**","entry_type":"tool_call","tool_name":"ls","tool_status":"Completed"}}"#,
     )
     .await;
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"3","role":"assistant","content":"answer one","entry_type":"text"}}"#,
     )
     .await;
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-4","request_id":"req-4"}}"#,
     )
@@ -598,18 +598,18 @@ async fn replay_of_prior_turn_entry_is_dropped() {
         mgr.add_message(&tid, "user", "second", None);
         mgr.pending_requests.insert("req-5".to_string(), tid.clone());
     }
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"1","role":"assistant","content":"<thinking>first</thinking>","entry_type":"text"}}"#,
     )
     .await;
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"2","role":"assistant","content":"**Tool Call: ls**","entry_type":"tool_call","tool_name":"ls","tool_status":"Completed"}}"#,
     )
     .await;
     // Genuinely new content under a reused id: must be accepted.
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"3","role":"assistant","content":"<thinking>second</thinking>","entry_type":"text"}}"#,
     )
@@ -643,7 +643,7 @@ async fn replay_of_prior_turn_entry_is_dropped() {
 #[test]
 fn consume_request_prunes_old_sentinels() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = zed_manager(dir.path());
+    let mut mgr = telos_manager(dir.path());
     mgr.sentinel_cap = 4;
 
     // Fill with active mappings plus consumed sentinels past the cap.
@@ -668,7 +668,7 @@ fn consume_request_prunes_old_sentinels() {
 #[tokio::test]
 async fn thread_created_after_consumption_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -679,7 +679,7 @@ async fn thread_created_after_consumption_is_ignored() {
         mgr.consume_request("req-6");
     }
 
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"thread_created","data":{"acp_thread_id":"acp-6","request_id":"req-6"}}"#,
     )
@@ -699,7 +699,7 @@ async fn thread_created_after_consumption_is_ignored() {
 #[tokio::test]
 async fn error_then_thread_created_ignored() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -709,12 +709,12 @@ async fn error_then_thread_created_ignored() {
         mgr.pending_requests.insert("req-7".to_string(), tid.clone());
     }
 
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"chat_response_error","data":{"request_id":"req-7","error":"boom"}}"#,
     )
     .await;
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"thread_created","data":{"acp_thread_id":"acp-7b","request_id":"req-7"}}"#,
     )
@@ -733,7 +733,7 @@ async fn error_then_thread_created_ignored() {
 #[tokio::test]
 async fn turn_cancelled_consumes_and_ignores_duplicate() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -743,12 +743,12 @@ async fn turn_cancelled_consumes_and_ignores_duplicate() {
         mgr.pending_requests.insert("req-8".to_string(), tid.clone());
     }
 
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"turn_cancelled","data":{"request_id":"req-8","status":"cancelled"}}"#,
     )
     .await;
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"turn_cancelled","data":{"request_id":"req-8","status":"cancelled"}}"#,
     )
@@ -769,7 +769,7 @@ async fn turn_cancelled_consumes_and_ignores_duplicate() {
 #[tokio::test]
 async fn thread_created_and_tool_metadata_flow() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
 
     let tid = {
         let mut mgr = manager.write().await;
@@ -780,7 +780,7 @@ async fn thread_created_and_tool_metadata_flow() {
     };
 
     // thread_created: maps acp-9 to the local thread.
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"thread_created","data":{"acp_thread_id":"acp-9","request_id":"req-9"}}"#,
     )
@@ -798,7 +798,7 @@ async fn thread_created_and_tool_metadata_flow() {
     }
 
     // message_added with tool metadata: scoped id + metadata stored.
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-9","message_id":"7","role":"assistant","content":"**Tool Call: grep**","entry_type":"tool_call","tool_name":"grep","tool_status":"In Progress"}}"#,
     )
@@ -820,9 +820,9 @@ async fn thread_created_and_tool_metadata_flow() {
 #[tokio::test]
 async fn message_added_unknown_thread_ignored() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(zed_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
 
-    handle_zed_event(
+    handle_telos_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-ghost","message_id":"1","role":"assistant","content":"x"}}"#,
     )
@@ -835,7 +835,7 @@ async fn message_added_unknown_thread_ignored() {
 /// cancel without a sender fails; with a sender it submits the command.
 #[tokio::test]
 async fn cancel_submits_when_connected() {
-    let backend = zed_backend();
+    let backend = telos_backend();
 
     // No sender: cancel fails with not connected.
     let err = backend.cancel().await.expect_err("must fail without sender");
@@ -855,7 +855,7 @@ async fn cancel_submits_when_connected() {
 /// create_thread creates a fresh thread and returns its id.
 #[tokio::test]
 async fn create_thread_creates_fresh_thread() {
-    let backend = zed_backend();
+    let backend = telos_backend();
     let tid = backend.create_thread().await.expect("thread created");
     let thread = backend.thread(&tid).await.expect("thread exists");
     assert!(thread.messages.is_empty());
@@ -866,7 +866,7 @@ async fn create_thread_creates_fresh_thread() {
 /// connected; without a sender it fails.
 #[tokio::test]
 async fn resolve_tool_call_sends_when_connected() {
-    let backend = zed_backend();
+    let backend = telos_backend();
     let tid = backend.create_thread().await.unwrap();
     let mgr = backend.manager.clone();
     {

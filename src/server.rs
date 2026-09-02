@@ -22,7 +22,7 @@ use crate::agent::{AgentBackend, AgentRegistry, AgentStatus};
 use crate::context;
 use crate::files;
 use crate::git;
-pub use crate::zed::WsCommandTx;
+pub use crate::telos::WsCommandTx;
 
 // ── App State ──────────────────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ async fn agent_for(
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
-    pub zed_connected: bool,
+    pub telos_connected: bool,
     pub agent_ready: bool,
     pub active_threads: usize,
     /// Per-agent runtime state from the execution fabric.
@@ -172,7 +172,7 @@ pub struct AgentQuery {
 
 async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
     let agents = state.agents.statuses().await;
-    let (zed_connected, agent_ready, active_threads) = match state.agents.default_agent() {
+    let (telos_connected, agent_ready, active_threads) = match state.agents.default_agent() {
         Some(agent) => {
             let status = agent.status().await;
             let threads = agent.threads().await.len();
@@ -182,7 +182,7 @@ async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
     };
     Json(HealthResponse {
         status: "ok".to_string(),
-        zed_connected,
+        telos_connected,
         agent_ready,
         active_threads,
         agents,
@@ -493,7 +493,7 @@ pub struct PollResponse {
 /// Poll for new thread state.
 ///
 /// Alternative to SSE for clients that cannot maintain a persistent connection
-/// or when WebSocket events from Zed are unreliable. The client calls this
+/// or when WebSocket events from Telos are unreliable. The client calls this
 /// endpoint at regular intervals (e.g., every 500ms).
 ///
 /// The response serves the full content of the most recent assistant

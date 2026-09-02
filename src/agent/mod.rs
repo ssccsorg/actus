@@ -2,7 +2,7 @@
 //
 // Actus weaves heterogeneous agent platforms behind one thin execution
 // interface, the same way neXus weaves heterogeneous FIH storage types
-// behind one knowledge fabric. A platform adapter (ZedBackend now, a
+// behind one knowledge fabric. A platform adapter (TelosBackend now, a
 // LangGraph or Native adapter later) implements `AgentBackend`; the
 // registry maps agent names to running adapters; HTTP handlers talk only
 // to the trait.
@@ -20,8 +20,8 @@ pub mod config;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
-    /// Zed headless over ACP/WebSocket (helix fork). Default agent.
-    Zed,
+    /// Telos over ACP/WebSocket. Default agent.
+    Telos,
     /// LangGraph Server over REST/SSE. Future adapter.
     LangGraph,
     /// In-process Rust agent loop. Future adapter.
@@ -29,11 +29,11 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
-    pub const ALL: [AgentKind; 3] = [AgentKind::Zed, AgentKind::LangGraph, AgentKind::Native];
+    pub const ALL: [AgentKind; 3] = [AgentKind::Telos, AgentKind::LangGraph, AgentKind::Native];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            AgentKind::Zed => "zed",
+            AgentKind::Telos => "telos",
             AgentKind::LangGraph => "langgraph",
             AgentKind::Native => "native",
         }
@@ -86,7 +86,7 @@ pub struct ThreadSession {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// True when the last assistant response is complete.
     pub completed: bool,
-    /// Platform-side thread id (ACP thread id for Zed). Kept on the
+    /// Platform-side thread id (ACP thread id for Telos). Kept on the
     /// session so persisted files stay backward compatible; a future
     /// platform adapter maps its own id into this field.
     pub acp_thread_id: Option<String>,
