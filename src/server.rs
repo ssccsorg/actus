@@ -3,7 +3,7 @@
 use axum::response::sse::Event;
 use axum::{
     extract::{Path, Query, Request, State},
-    http::{HeaderValue, StatusCode},
+    http::{header, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{Json, Response, Sse},
     routing::{get, post},
@@ -585,7 +585,7 @@ async fn search_files_handler(
     let workdir = state.workdir.clone();
     let result = tokio::task::spawn_blocking(move || files::search_files(&workdir, &opts))
         .await
-        .unwrap_or_default();
+        .unwrap_or_default(); // panicked walk: an empty list is a valid response
     let count = result.files.len();
     Json(FileSearchResponse {
         files: result.files,
@@ -609,7 +609,7 @@ async fn mention_files_handler(
     let workdir = state.workdir.clone();
     let result = tokio::task::spawn_blocking(move || files::search_files(&workdir, &opts))
         .await
-        .unwrap_or_default();
+        .unwrap_or_default(); // panicked walk: an empty list is a valid response
     let mention = files::format_mention(&result.files, &query);
     Json(serde_json::json!({
         "mention": mention,
@@ -636,7 +636,7 @@ async fn search_symbols_handler(
     let max = params.max.unwrap_or(20);
     let symbols = tokio::task::spawn_blocking(move || context::search_symbols(&workdir, &q, max))
         .await
-        .unwrap_or_default();
+        .unwrap_or_default(); // panicked walk: an empty list is a valid response
     Json(serde_json::json!({
         "symbols": symbols,
         "count": symbols.len(),
@@ -648,7 +648,7 @@ async fn rules_handler(State(state): State<SharedState>) -> Json<serde_json::Val
     let workdir = state.workdir.clone();
     let rules = tokio::task::spawn_blocking(move || context::find_rules(&workdir))
         .await
-        .unwrap_or_default();
+        .unwrap_or_default(); // panicked walk: an empty list is a valid response
     Json(serde_json::json!({
         "rules": rules,
         "count": rules.len(),
@@ -970,7 +970,14 @@ pub fn build_router(state: SharedState, cors_origins: &[String]) -> Router {
     } else {
         let origins: Vec<HeaderValue> =
             cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
-        router.layer(tower_http::cors::CorsLayer::new().allow_origin(origins))
+        router.layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(origins)
+                // The API only reads the bearer token and JSON bodies, so
+                // the preflight response is pinned to those plus OPTIONS.
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]),
+        )
     }
 }
 
