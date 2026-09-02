@@ -191,6 +191,23 @@ docker build --target full .
 | `/v1/git/log` | GET | Recent commit history |
 | `/v1/cancel` | POST | Cancel current agent turn |
 
+### API Authentication
+
+Every endpoint except `/health` requires a bearer token sent as
+`Authorization: Bearer <token>`. The server resolves the effective token
+in this order: the `--api-token` CLI argument, the `ACTUS_API_TOKEN`
+environment variable, the persisted token file `~/.actus/api_token`, or a
+freshly generated token. The effective token is written to
+`~/.actus/api_token` (mode 0600) at startup, so the CLI and shell
+consumers read the same value the server enforces. Authentication is
+enabled by default and has no disable switch yet; `/health` stays open so
+readiness probes work before a token exists.
+
+Browser access is governed separately. Pass `--cors-origins` with a
+comma-separated origin list to allow cross-origin requests from those
+origins only. The default (empty) sends no CORS headers, so browsers
+enforce same-origin policy.
+
 ## Project Structure
 
 ```
