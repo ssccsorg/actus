@@ -235,7 +235,13 @@ test_git_diff() {
 }
 
 test_llm_chat() {
-    step "Test: LLM chat round trip (requires API key)"
+    step "Test: LLM chat round trip (opt-in)"
+    # Never spend LLM tokens from an automatic run. The round trip runs
+    # only when LLM_CHAT=1 is set explicitly on top of a real key.
+    if [ "${LLM_CHAT:-0}" != "1" ]; then
+        warn "Skipped: set LLM_CHAT=1 to run the live LLM round trip"
+        return 0
+    fi
     local api_key="${LLM_API_KEY:-}"
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
         api_key=$(grep -E '^LLM_API_KEY=' "$SCRIPT_DIR/.env" | head -1 | cut -d= -f2-)
@@ -440,6 +446,7 @@ Modes:
 
 Environment:
   LLM_API_KEY      Provider API key
+  LLM_CHAT         Set to 1 to run the live LLM chat round trip in --test
   LLM_PROVIDER     Provider name (default: deepseek)
   LLM_BASE_URL     API base URL
   LLM_MODEL        Model name
