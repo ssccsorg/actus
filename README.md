@@ -1,13 +1,19 @@
-# Actus — Agent Execution Runtime
+# Actus: the act runtime of the SSCCS stack
 
-Actus is an agent execution runtime that manages the lifecycle,
-communication, and coordination of autonomous agents operating across
-a shared knowledge space.
+Actus is a headless execution runtime that performs acts over a shared
+knowledge space. The name joins act and us: the runtime exists for acts.
+An act is any unit of execution, from reading workspace context, editing
+files, running commands, resolving symbols, and fetching resources, to
+driving an autonomous agent through a task. The agent is the first type
+of act and only one type among several.
 
-If neXus is the knowledge fabric (FIH blackboard, state space, storage),
-actus is the execution fabric — the runtime that spawns agents, routes
-messages, persists threads, and exposes a uniform HTTP API regardless of
-which agent type is underneath.
+Actus plans with the LLM, holds conversation state and workspace context,
+and commands the execution agents that convert plans into system effects.
+The default execution agent is Telos. If neXus is the knowledge fabric
+(FIH blackboard, state space, storage), actus is the execution fabric:
+the runtime that spawns agents, routes messages, persists threads, and
+exposes a uniform HTTP API regardless of which agent or act type is
+underneath.
 
 ## Architecture
 
@@ -16,53 +22,64 @@ External Client (CLI / HTTP)
         │
         ▼
   ┌─────────────────────────────────────┐
-  │         Actus Server (REST API)      │
+  │          Actus Server (REST)         │
   │  ┌─────────┐  ┌──────────┐          │
   │  │ Session  │  │  Agent   │          │
   │  │ Manager  │  │  Bridge  │          │
   │  └─────────┘  └────┬─────┘          │
-  │  ┌─────────┐  ┌────┴─────┐          │
-  │  │ File +  │  │ Workspace│          │
-  │  │  Git    │  │ Context  │          │
-  │  └─────────┘  └──────────┘          │
+  │  ┌────────────────────────────────┐  │
+  │  │   Direct acts (no agent)       │  │
+  │  │  File + Git · Rules · Fetch    │  │
+  │  └────────────────────────────────┘  │
   └───────────────┬─────────────────────┘
                   │
         ┌─────────┴─────────┐
         ▼                   ▼
   ┌──────────┐      ┌──────────────┐
   │ Telos    │      │   Future     │
-  │ (Coding) │      │  Agent Types │
-  │          │      │ (Research,   │
+  │ (General │      │  Agent Types │
+  │ Execution)│      │ (Research,   │
   │          │      │  Review,     │
   │          │      │  Deploy...)  │
   └──────────┘      └──────────────┘
 ```
 
-Telos is the first default agent type — a general-purpose coding
-agent with file-system and git awareness. The architecture is designed to
-accept any agent that communicates via WebSocket, making actus a universal
-gateway for agent execution.
+Direct acts run inside the server: file search and mention, symbol and
+rule lookup, URL fetch behind an SSRF guard, and git status, diff, and
+log. Delegated acts run through the agent bridge. Telos is the first
+default agent type: a general agent execution layer that converts plans
+into system effects without binding to a language or a domain. It carries
+file-system and git awareness, which suits code work, and the same
+surface reaches processes and network effects. The architecture accepts
+any act or agent that communicates over a contract, making actus a
+universal gateway for execution.
 
-## Agent Execution Fabric
+## Execution Fabric
 
-Like neXus weaves heterogeneous FIH storage types behind one thin knowledge
-fabric, actus weaves heterogeneous agent platforms behind one thin execution
-fabric. Any platform can be orchestrated through the same actus surface;
-Telos is the default agent.
+Like neXus weaves heterogeneous FIH storage types behind one thin
+knowledge fabric, actus weaves heterogeneous act types behind one thin
+execution fabric. Agents are the first implemented family of acts. Any
+agent platform can be orchestrated through the same actus surface; Telos
+is the default agent.
 
-- `agent::AgentKind` — platform kinds (`telos`, `langgraph`, `native`),
+- `agent::AgentKind`: platform kinds (`telos`, `langgraph`, `native`),
   extensible by adding a kind and an adapter.
-- `agent::AgentBackend` — uniform async trait (`status`, `submit`, `cancel`,
-  `thread`, `threads`, `subscribe`) implemented by every platform adapter.
-- `agent::AgentRegistry` — name to running adapter map with a default agent.
-- `telos::backend::TelosBackend` — first adapter, wrapping `TelosManager`.
+- `agent::AgentBackend`: uniform async trait (`status`, `submit`,
+  `cancel`, `thread`, `threads`, `subscribe`) implemented by every
+  platform adapter.
+- `agent::AgentRegistry`: name to running adapter map with a default
+  agent.
+- `telos::backend::TelosBackend`: first adapter, wrapping `TelosManager`.
   ACP-over-WebSocket details (reconnect, event dispatch) stay inside
   `telos::control`; the adapter owns thread state and command submission.
+- Direct acts: the server performs file, git, rules, fetch, and symbol
+  services in-process; they are acts with no agent attached.
 
 HTTP handlers talk only to the `AgentBackend` trait, so a new platform
-(LangGraph Server over REST/SSE, an in-process Rust agent) plugs in by
-implementing the trait and registering it. `/v1/health` reports per-agent
-status in the `agents` map.
+(LangGraph Server over REST/SSE, an in-process Rust agent, a lightweight
+auxiliary agent binary) plugs in by implementing the trait and
+registering it. `/v1/health` reports per-agent status in the `agents`
+map.
 
 ## Configuration
 
@@ -74,14 +91,14 @@ flags and environment (`LLM_API_KEY`, `LLM_PROVIDER`, `LLM_BASE_URL`,
 ```toml
 [[agents]]
 name = "telos"             # default agent; routed when no agent is named
-kind = "telos"             # telos | langgraph | native (only telos has an adapter yet)
+kind = "telos"             # telos | langgraph | native (telos default; native is in-process)
 provider = "deepseek"
 model = "deepseek-chat"
 base_url = "https://api.deepseek.com/v1"
 api_key = "sk-..."
 bin = "../telos/target/telos-release/tel"
 ws_port = 8080
-tool_approval = "always"  # always | ask | never (drives the fork's approval policy)
+tool_approval = "always"  # always | ask | never (drives the agent's approval policy)
 
   # MCP servers attached to this agent (stdio or http)
   [[agents.mcp]]
@@ -110,7 +127,7 @@ the headless agent, exposing their tools to the model.
 
 `tool_approval` sets the tool call approval policy. `always` auto-approves
 tool calls (headless task execution); `ask` waits for a human or approval
-bridge; `never` rejects them. The mode is carried to the fork via the
+bridge; `never` rejects them. The mode is carried to the agent via the
 `TELOS_TOOL_APPROVAL` environment variable.
 
 ## `@` Mention Context
@@ -134,12 +151,16 @@ picker opens only for explicit `@?query`.
 
 ## Agent Types
 
+The agent family is the first implemented type of act. Each agent is an
+external process behind the registry.
+
 | Agent | Role | Protocol |
 |---|---|---|
-| Telos | Code generation, editing, file operations | ACP over WebSocket |
-| (future) Research Agent | Literature search, experiment design | TBD |
-| (future) Review Agent | Code review, compliance checking | TBD |
-| (future) Deploy Agent | CI/CD, infrastructure management | TBD |
+| Telos | General execution: converts plans into system effects across files, commands, and network | ACP over WebSocket |
+| (planned) Research Agent | Literature search, experiment design | TBD |
+| (planned) Review Agent | Code review, compliance checking | TBD |
+| (planned) Deploy Agent | CI/CD, infrastructure management | TBD |
+| (trial) Auxiliary Agent | Lightweight input/output tasks alongside the professional core; first candidate is Ante, a single-binary terminal agent driven through its JSONL serve protocol or headless one-shot mode | JSONL |
 
 ## Getting Started
 
@@ -156,7 +177,7 @@ picker opens only for explicit `@?query`.
 # Build and start server with interactive CLI
 ./run.sh
 
-# Run full test suite (static checks + HTTP smoke tests)
+# Run the test suite (static checks, unit and integration tests, HTTP smoke tests)
 ./run.sh --test
 
 # Start server only (background)
@@ -169,12 +190,15 @@ picker opens only for explicit `@?query`.
 ### Docker
 
 ```bash
-# Build base image (actus binary only)
-docker build .
+# Build the slim runtime image (default target: actus binary and git only)
+docker build -t actus .
 
-# Build full integration image (includes Telos bootstrapping)
-docker build --target full .
+# Build the test image used by CI (adds python3, curl, git for run.sh --test)
+docker build --target test -t actus:test .
 ```
+
+Published images are cut on version tags (a versioned image plus `latest`)
+or as manual dev snapshots. Development commits publish nothing.
 
 ### API Endpoints
 
@@ -185,8 +209,11 @@ docker build --target full .
 | `/v1/chat/async` | POST | Send message, return task ID |
 | `/v1/threads` | GET | List conversation threads |
 | `/v1/threads/{id}` | GET | Thread messages and metadata |
-| `/v1/files` | GET | Search workspace files |
+| `/v1/files` | GET | Search workspace files (direct act) |
 | `/v1/files/mention` | GET | File mention for prompt injection |
+| `/v1/symbols` | GET | Symbol search (direct act) |
+| `/v1/rules` | GET | Project rules (direct act) |
+| `/v1/fetch` | GET | Fetch a public URL (direct act, SSRF-guarded) |
 | `/v1/git/status` | GET | Git working tree status |
 | `/v1/git/diff` | GET | Git diff (unstaged/staged) |
 | `/v1/git/log` | GET | Recent commit history |
@@ -220,10 +247,10 @@ runtime targets a single local instance.
 actus/
 ├── src/
 │   ├── main.rs          Server entry point
-│   ├── agent/           Execution fabric: AgentKind, AgentBackend, AgentRegistry
+│   ├── agent/           Execution fabric: AgentKind, AgentBackend, AgentRegistry, native reference adapter
 │   ├── server.rs        REST API routes and handlers
-│   ├── files.rs         File search and mention
-│   ├── git.rs           Git operations
+│   ├── files.rs         File search and mention (direct act)
+│   ├── git.rs           Git operations (direct act)
 │   └── telos/
 │       ├── mod.rs       Telos lifecycle and session management
 │       ├── backend.rs   TelosBackend adapter (AgentBackend impl)
@@ -232,18 +259,18 @@ actus/
 ├── runner.py            Server launcher (build + run)
 ├── terminal.py          Interactive chat CLI
 ├── run.sh               Gateway: build, test, launch
-├── Dockerfile           Multi-stage image builder
+├── Dockerfile           Multi-stage: toolchain, release, test, runtime targets
 └── .github/workflows/
-    ├── ci.yml           Test workflow (base target)
-    └── publish-actus-image.yml  Publish to GHCR
+    ├── ci.yml           Test workflow (test target)
+    └── publish-actus-image.yml  Publish runtime image on version tags or manual dispatch
 ```
 
 ## Relationship to neXus
 
 | Layer | neXus | actus |
 |---|---|---|
-| Domain | Knowledge, state, storage | Agent execution, lifecycle |
-| Primitives | Fact, Intent, Hint | Agent, Thread, Task |
+| Domain | Knowledge, state, storage | Execution: acts and agents |
+| Primitives | Fact, Intent, Hint | Act, Agent, Thread |
 | Interface | FIH Blackboard API | REST + WebSocket |
 | Role | Accumulate verified knowledge | Execute actions from knowledge |
 
@@ -254,7 +281,7 @@ knowledge and action.
 ## License
 
 Apache-2.0 (see `LICENSE`). Third-party licenses are reported via
-cargo-about; see NOTICE.md. Actus is the execution fabric; it
-launches and talks to agent processes over WebSocket. Agent binaries are
-separate projects with their own licenses and are not packaged with
-actus.
+cargo-about; see NOTICE.md. Actus is the execution fabric; it launches
+and talks to agent processes over a contract. Agent binaries are separate
+projects with their own licenses (Telos is GPL-3.0-or-later) and are not
+packaged with actus.
