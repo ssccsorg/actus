@@ -1,27 +1,30 @@
-// ExtCliAgent: generic raw-CLI adapter for the agent fabric.
+// ExtCliAgent: declarative raw-CLI adapter for the agent fabric.
 //
 // Any external binary with a command-line interface can be attached as an
-// auxiliary agent: per turn, actus spawns `bin <cli_args...> <prompt>` as
-// a child process in the workdir, with the process environment inherited
-// so provider credentials pass through. The finished output is recorded
-// in the thread and the completion is announced on the notify channel, so
-// the HTTP polling and SSE flows behave like every other backend.
+// auxiliary agent without code changes. Per turn, actus spawns the binary
+// with the agent's declared argument template and records the finished
+// output in the thread. One-shot acts are parallel: separate turns run as
+// separate child processes and complete independently.
 //
-// The first attached binary is Ante (bin `ante`, `cli_args = ["-p"]`),
-// the trial auxiliary agent for lightweight input/output tasks next to
-// the professional Telos core. The adapter itself carries no product
-// name: any CLI that accepts a prompt as its final argument plugs in with
-// no code change.
+// The invocation contract is declarative, because CLIs differ:
+//   - `cli_args` may carry a `{prompt}` marker that is replaced by the
+//     message; without a marker the message is appended as the final
+//     argument (for example Ante: ["-p", "{prompt}"]).
+//   - `cli_prompt = "stdin"` writes the message to the child's stdin
+//     instead of passing it as an argument.
+//   - `cli_env` adds per-agent environment over the inherited server
+//     environment, so each CLI can carry its own credentials.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
 use tokio::sync::{watch, Mutex, RwLock};
 
+use crate::agent::config::PromptMode;
 use crate::agent::{
     truncate_title, AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt,
     ThreadMessage, ThreadSession,
@@ -31,14 +34,19 @@ use crate::agent::{
 /// long output; a thread message stays bounded.
 const MAX_REPLY_CHARS: usize = 200_000;
 
+/// Marker replaced by the prompt message inside `cli_args`.
+const PROMPT_MARKER: &str = "{prompt}";
+
 pub struct ExtCliAgent {
     name: String,
     bin: PathBuf,
     args: Vec<String>,
+    env: HashMap<String, String>,
+    prompt_mode: PromptMode,
     timeout: Duration,
     workdir: PathBuf,
     threads: Arc<RwLock<HashMap<String, ThreadSession>>>,
-    running: Arc<Mutex<Option<Child>>>,
+    running: Arc<Mutex<HashMap<String, Child>>>,
     notify: watch::Sender<u64>,
 }
 
@@ -47,6 +55,8 @@ impl ExtCliAgent {
         name: impl Into<String>,
         bin: PathBuf,
         args: Vec<String>,
+        env: HashMap<String, String>,
+        prompt_mode: PromptMode,
         timeout_secs: u64,
         workdir: PathBuf,
     ) -> Self {
@@ -55,10 +65,12 @@ impl ExtCliAgent {
             name: name.into(),
             bin,
             args,
+            env,
+            prompt_mode,
             timeout: Duration::from_secs(timeout_secs.max(1)),
             workdir,
             threads: Arc::new(RwLock::new(HashMap::new())),
-            running: Arc::new(Mutex::new(None)),
+            running: Arc::new(Mutex::new(HashMap::new())),
             notify,
         }
     }
@@ -123,13 +135,6 @@ impl AgentBackend for ExtCliAgent {
         thread_id: Option<&str>,
         message: &str,
     ) -> Result<SubmitReceipt, String> {
-        if self.running.lock().await.is_some() {
-            return Err(format!(
-                "agent '{}' busy: a turn is already running",
-                self.name
-            ));
-        }
-
         let (tid, is_new) = self.get_or_create(thread_id).await;
         let request_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
@@ -154,19 +159,48 @@ impl AgentBackend for ExtCliAgent {
             session.completed = false;
         }
 
+        // Resolve the argument template for this turn.
+        let mut cmd_args: Vec<String> = Vec::with_capacity(self.args.len() + 1);
+        let mut replaced = false;
+        for arg in &self.args {
+            if arg.contains(PROMPT_MARKER) {
+                cmd_args.push(arg.replace(PROMPT_MARKER, message));
+                replaced = true;
+            } else {
+                cmd_args.push(arg.clone());
+            }
+        }
+        if self.prompt_mode == PromptMode::Arg && !replaced {
+            cmd_args.push(message.to_string());
+        }
+
         let mut cmd = tokio::process::Command::new(&self.bin);
-        cmd.args(&self.args)
-            .arg(message)
+        cmd.args(&cmd_args)
             .current_dir(&self.workdir)
-            .stdin(std::process::Stdio::null())
+            .envs(&self.env)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let child = cmd
+        if self.prompt_mode == PromptMode::Stdin {
+            cmd.stdin(std::process::Stdio::piped());
+        } else {
+            cmd.stdin(std::process::Stdio::null());
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("cannot start {}: {}", self.bin.display(), e))?;
+
+        if self.prompt_mode == PromptMode::Stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                let mut payload = message.as_bytes().to_vec();
+                payload.push(b'\n');
+                let _ = stdin.write_all(&payload).await;
+                drop(stdin);
+            }
+        }
+
         {
             let mut running = self.running.lock().await;
-            *running = Some(child);
+            running.insert(tid.clone(), child);
         }
 
         let threads = self.threads.clone();
@@ -177,7 +211,7 @@ impl AgentBackend for ExtCliAgent {
         let task_request_id = request_id.clone();
 
         tokio::spawn(async move {
-            let child = running.lock().await.take();
+            let child = running.lock().await.remove(&task_thread_id);
             let content = match child {
                 None => "[ext-cli] cancelled".to_string(),
                 Some(mut child) => {
@@ -252,7 +286,7 @@ impl AgentBackend for ExtCliAgent {
 
     async fn cancel(&self) -> Result<(), String> {
         let mut running = self.running.lock().await;
-        if let Some(mut child) = running.take() {
+        for (_, mut child) in running.drain() {
             let _ = child.kill().await;
         }
         Ok(())

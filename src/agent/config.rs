@@ -10,6 +10,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentKind;
 
+/// How a cli-kind agent receives the prompt message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptMode {
+    /// Pass the prompt as a command argument. A `{prompt}` marker in
+    /// `cli_args` is replaced; without a marker the prompt is appended
+    /// as the final argument.
+    Arg,
+    /// Write the prompt to the child's stdin instead of passing it as an
+    /// argument (for CLIs that read the prompt from stdin).
+    Stdin,
+}
+
+fn default_prompt_mode() -> PromptMode {
+    PromptMode::Arg
+}
+
 /// Tool call approval policy for an agent. `Always` auto-approves every
 /// tool call (headless task execution); `Ask` waits for a human or a
 /// future approval bridge; `Never` rejects tool calls.
@@ -77,7 +94,14 @@ pub struct AgentSpec {
     /// MCP servers attached to this agent.
     pub mcp: Vec<McpServer>,
     /// Fixed CLI arguments prepended before the prompt for cli-kind agents.
+    /// A `{prompt}` marker is replaced by the message; without a marker
+    /// the message is appended as the final argument.
     pub cli_args: Vec<String>,
+    /// Extra environment variables for cli-kind agents, merged over the
+    /// inherited server environment.
+    pub cli_env: HashMap<String, String>,
+    /// Prompt injection mode for cli-kind agents.
+    pub cli_prompt: PromptMode,
     /// Per-turn timeout in seconds for cli-kind agents.
     pub cli_timeout_secs: u64,
 }
@@ -121,6 +145,10 @@ struct AgentSpecFile {
     mcp: Vec<McpServer>,
     #[serde(default)]
     cli_args: Vec<String>,
+    #[serde(default)]
+    cli_env: HashMap<String, String>,
+    #[serde(default = "default_prompt_mode")]
+    cli_prompt: PromptMode,
     #[serde(default = "default_cli_timeout")]
     cli_timeout_secs: u64,
 }
@@ -161,6 +189,8 @@ pub fn load_config(
             tool_approval: None,
             mcp: Vec::new(),
             cli_args: Vec::new(),
+            cli_env: HashMap::new(),
+            cli_prompt: default_prompt_mode(),
             cli_timeout_secs: default_cli_timeout(),
         }],
     };
@@ -204,6 +234,8 @@ pub fn load_config(
             tool_approval: f.tool_approval.unwrap_or(ToolApproval::Always),
             mcp: f.mcp,
             cli_args: f.cli_args,
+            cli_env: f.cli_env,
+            cli_prompt: f.cli_prompt,
             cli_timeout_secs: f.cli_timeout_secs,
         });
     }

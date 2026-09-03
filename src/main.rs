@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use actus::agent::config::{load_config, AgentDefaults};
+use actus::agent::config::{load_config, AgentDefaults, PromptMode};
 use actus::agent::ext_cli::ExtCliAgent;
 use actus::agent::native::NativeAgent;
 use actus::agent::AgentKind;
@@ -350,6 +350,8 @@ async fn main() -> anyhow::Result<()> {
                     spec.name.clone(),
                     spec.bin.clone(),
                     spec.cli_args.clone(),
+                    spec.cli_env.clone(),
+                    spec.cli_prompt,
                     spec.cli_timeout_secs,
                     workdir.clone(),
                 ));
