@@ -13,7 +13,7 @@ Actus executes agent processes that are built and distributed from their
 own repositories. This repository vendors no agent source code.
 
 - `telos` (the default ACP/WebSocket agent adapter) is a separate project
-  that contains a Zed-derived core. When it is distributed, that component
+  that contains a independent core. When it is distributed, that component
   is subject to the GNU General Public License version 3, and its source is
   published by the telos project. Actus connects to it over a local
   WebSocket only; actus code is not linked with it.
