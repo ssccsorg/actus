@@ -6,7 +6,7 @@
 # whenever a dependency license cannot be resolved from the accepted list,
 # which fails the CI job. Run locally with:
 #
-#   cargo install cargo-about --locked
+#   cargo install cargo-about --locked --features cli
 #   script/licenses-check.sh
 
 set -euo pipefail

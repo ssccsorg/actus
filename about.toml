@@ -29,4 +29,3 @@ accepted = [
 
 # Placeholder for discoverability. Dependencies with unclear licenses are
 # clarified with [crate.clarify] tables appended below, not entries here.
-clarifications = []

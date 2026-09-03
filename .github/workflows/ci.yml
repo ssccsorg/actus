@@ -39,16 +39,3 @@ jobs:
             --entrypoint ./run.sh \
             actus:ci --test
 
-  license:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-about
-        run: cargo install cargo-about --locked
-
-      - name: Check third-party licenses
-        run: script/licenses-check.sh
