@@ -1,0 +1,32 @@
+# Third-party license policy for actus, consumed by cargo-about in
+# script/licenses-check.sh. CI runs that script to enforce that every
+# dependency license is accepted below or clarified in a per-crate table.
+#
+# When cargo-about cannot resolve a dependency license from the accepted
+# list, add a clarification table for that crate at the end of this file,
+# as described in the cargo-about book:
+# https://embarkstudios.github.io/cargo-about/cli/generate/config.html
+#
+#   [some-crate.clarify]
+#   license = "MIT"
+#   [[some-crate.clarify.files]]
+#   path = "LICENSE"
+#   checksum = "full sha256 of the license file contents"
+
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "GPL-3.0-or-later",
+    "CDLA-Permissive-2.0",
+]
+
+# Placeholder for discoverability. Dependencies with unclear licenses are
+# clarified with [crate.clarify] tables appended below, not entries here.
+clarifications = []

@@ -253,7 +253,8 @@ knowledge and action.
 
 ## License
 
-Apache-2.0 (see `LICENSE`). Actus is the execution fabric; it
+Apache-2.0 (see `LICENSE`). Third-party licenses are reported via
+cargo-about; see NOTICE.md. Actus is the execution fabric; it
 launches and talks to agent processes over WebSocket. Agent binaries are
 separate projects with their own licenses and are not packaged with
 actus.
