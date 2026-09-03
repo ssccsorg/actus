@@ -65,7 +65,9 @@ pub struct AgentSpec {
     pub model: String,
     pub model_display: String,
     pub base_url: String,
-    pub api_key: String,
+    /// LLM API key. Optional at the fabric level; the Telos adapter
+    /// requires one when it launches an agent.
+    pub api_key: Option<String>,
     /// Telos binary path.
     pub bin: PathBuf,
     /// WebSocket port the agent process connects back to.
@@ -83,7 +85,7 @@ pub struct AgentDefaults {
     pub model: String,
     pub model_display: String,
     pub base_url: String,
-    pub api_key: String,
+    pub api_key: Option<String>,
     pub bin: PathBuf,
     pub ws_port: u16,
 }
@@ -126,13 +128,16 @@ struct ConfigFile {
 /// `file = None` yields a single default "telos" spec. When `file` is Some
 /// the TOML must parse and contain at least one agent. Resolved specs have
 /// unique names and unique WebSocket ports among `telos`-kind agents.
-pub fn load_config(file: Option<&Path>, defaults: &AgentDefaults) -> Result<Vec<AgentSpec>, String> {
+pub fn load_config(
+    file: Option<&Path>,
+    defaults: &AgentDefaults,
+) -> Result<Vec<AgentSpec>, String> {
     let files: Vec<AgentSpecFile> = match file {
         Some(p) => {
             let text = std::fs::read_to_string(p)
                 .map_err(|e| format!("cannot read {}: {}", p.display(), e))?;
-            let cfg: ConfigFile =
-                toml::from_str(&text).map_err(|e| format!("cannot parse {}: {}", p.display(), e))?;
+            let cfg: ConfigFile = toml::from_str(&text)
+                .map_err(|e| format!("cannot parse {}: {}", p.display(), e))?;
             cfg.agents
         }
         None => vec![AgentSpecFile {
@@ -183,7 +188,7 @@ pub fn load_config(file: Option<&Path>, defaults: &AgentDefaults) -> Result<Vec<
             model: f.model.unwrap_or_else(|| defaults.model.clone()),
             model_display,
             base_url: f.base_url.unwrap_or_else(|| defaults.base_url.clone()),
-            api_key: f.api_key.unwrap_or_else(|| defaults.api_key.clone()),
+            api_key: f.api_key.or_else(|| defaults.api_key.clone()),
             bin: f.bin.unwrap_or_else(|| defaults.bin.clone()),
             ws_port,
             tool_approval: f.tool_approval.unwrap_or(ToolApproval::Always),

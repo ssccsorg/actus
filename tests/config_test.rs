@@ -10,7 +10,7 @@ fn defaults() -> AgentDefaults {
         model: "deepseek-chat".to_string(),
         model_display: "deepseek-chat".to_string(),
         base_url: "https://api.deepseek.com/v1".to_string(),
-        api_key: "sk-test".to_string(),
+        api_key: Some("sk-test".to_string()),
         bin: PathBuf::from("/bin/telos"),
         ws_port: 8080,
     }
@@ -30,7 +30,7 @@ fn no_file_yields_single_default_telos() {
     assert_eq!(specs[0].kind, AgentKind::Telos);
     assert_eq!(specs[0].provider, "deepseek");
     assert_eq!(specs[0].model, "deepseek-chat");
-    assert_eq!(specs[0].api_key, "sk-test");
+    assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
     assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
     assert_eq!(specs[0].ws_port, 8080);
     assert_eq!(specs[0].tool_approval, ToolApproval::Always);
@@ -81,7 +81,7 @@ base_url = "https://api.anthropic.com/v1"
 
     // telos inherits everything from defaults
     assert_eq!(specs[0].kind, AgentKind::Telos);
-    assert_eq!(specs[0].api_key, "sk-test");
+    assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
     assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
 
     // claude overrides provider/model/base_url, inherits api_key
@@ -90,7 +90,7 @@ base_url = "https://api.anthropic.com/v1"
     assert_eq!(specs[1].model, "claude-sonnet-4");
     assert_eq!(specs[1].model_display, "claude-sonnet-4");
     assert_eq!(specs[1].base_url, "https://api.anthropic.com/v1");
-    assert_eq!(specs[1].api_key, "sk-test");
+    assert_eq!(specs[1].api_key.as_deref(), Some("sk-test"));
     assert_eq!(specs[1].ws_port, 8080);
 }
 

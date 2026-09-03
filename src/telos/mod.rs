@@ -624,7 +624,7 @@ pub async fn launch_telos(
 
 pub fn ensure_telos_settings(
     data_dir: &Path,
-    api_key: &str,
+    api_key: Option<&str>,
     provider: &str,
     base_url: &str,
     model_name: &str,
@@ -633,6 +633,10 @@ pub fn ensure_telos_settings(
 ) -> anyhow::Result<()> {
     use std::fs;
     use std::io::Write;
+
+    let api_key = api_key.ok_or_else(|| {
+        anyhow::anyhow!("telos agent requires an LLM API key (LLM_API_KEY or --api-key)")
+    })?;
 
     let settings_dir = data_dir.join("config");
     fs::create_dir_all(&settings_dir)?;
@@ -784,11 +788,7 @@ mod tests {
             ("RUST_LOG", "info"),
         ];
         for (key, value) in expect {
-            assert_eq!(
-                envs.get(key).map(String::as_str),
-                Some(value),
-                "env {key}"
-            );
+            assert_eq!(envs.get(key).map(String::as_str), Some(value), "env {key}");
         }
     }
 }

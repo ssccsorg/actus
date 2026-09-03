@@ -1,7 +1,8 @@
-// : Telos AI agent — REST API server
+// Actus — agent execution runtime (REST API server)
 //
-// Launches Telos in --headless mode, connects via WebSocket,
-// and exposes a REST API for multi-thread chat with async task queue.
+// Launches and supervises agent adapters (Telos over WebSocket, the
+// in-process native reference adapter, future platforms) and exposes a
+// REST API for multi-thread chat with an async task queue.
 //
 // Usage:
 //    --workdir /path/to/project
@@ -12,22 +13,22 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use actus::agent::config::{load_config, AgentDefaults};
+use actus::agent::native::NativeAgent;
 use actus::agent::AgentKind;
 use actus::agent::AgentRegistry;
-use actus::server::run_http_server;
-use actus::server::{AppState, WsCommandTx};
+use actus::server::{run_http_server, AppState};
 use actus::telos::backend::TelosBackend;
 use actus::telos::control::run_ws_server;
-use actus::telos::{ensure_telos_settings, launch_telos, TelosManager};
+use actus::telos::{ensure_telos_settings, launch_telos, TelosManager, WsCommandTx};
 
 #[derive(clap::Parser, Debug, Clone)]
-#[command(name = "", version, about = "Telos AI agent server")]
+#[command(name = "", version, about = "Actus agent runtime server")]
 struct Args {
     /// Telos binary path
     #[arg(long)]
     bin: Option<PathBuf>,
 
-    /// Working directory for Telos
+    /// Working directory for agents
     #[arg(long, default_value = ".")]
     workdir: PathBuf,
 
@@ -35,7 +36,7 @@ struct Args {
     #[arg(long, default_value = "9090")]
     http_port: u16,
 
-    /// WebSocket port for Telos to connect to
+    /// WebSocket port a spawned agent process connects back to
     #[arg(long, default_value = "8080")]
     ws_port: u16,
 
@@ -162,29 +163,22 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Resolve API key
+    // Resolve the LLM API key. Optional at the fabric level; the Telos
+    // adapter requires one when it launches an agent.
     let api_key = args
         .api_key
         .or_else(|| std::env::var("LLM_API_KEY").ok())
-        .map(|k| unquote(&k))
-        .ok_or_else(|| anyhow::anyhow!("API key required: set LLM_API_KEY or --api-key"))?;
+        .map(|k| unquote(&k));
 
-    // Resolve binary path: --bin, the TELOS_BIN env var, or the sibling
-    // telos build. actus drives telos only.
+    // Resolve the Telos binary path: --bin, TELOS_BIN, or the sibling
+    // build. Used by the Telos adapter only; existence is checked at
+    // launch so non-Telos agents do not require it.
     let bin_path = if let Some(p) = args.bin {
         p
     } else if let Ok(p) = std::env::var("TELOS_BIN") {
         PathBuf::from(p)
     } else {
-        let default = PathBuf::from("../telos/target/telos-release/tel");
-        if default.exists() {
-            default
-        } else {
-            return Err(anyhow::anyhow!(
-                "agent binary not found: pass --bin or set TELOS_BIN (expected sibling build at {})",
-                default.display()
-            ));
-        }
+        PathBuf::from("../telos/target/telos-release/tel")
     };
 
     let workdir = std::fs::canonicalize(&args.workdir)?;
@@ -256,20 +250,30 @@ async fn main() -> anyhow::Result<()> {
     // reads settings at startup and watches them while running.
     let mut _user_data_dirs: Vec<tempfile::TempDir> = Vec::new();
 
-    let default_name = if specs.iter().any(|s| s.name == "telos") {
-        "telos".to_string()
-    } else {
-        specs[0].name.clone()
-    };
+    // The first configured agent is the fabric default.
+    let default_name = specs[0].name.clone();
 
     for spec in &specs {
         match spec.kind {
             AgentKind::Telos => {
+                let api_key = spec.api_key.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "agent '{}': LLM API key required (LLM_API_KEY or --api-key)",
+                        spec.name
+                    )
+                })?;
+                if !spec.bin.exists() {
+                    return Err(anyhow::anyhow!(
+                        "agent '{}': telos binary not found at {}",
+                        spec.name,
+                        spec.bin.display()
+                    ));
+                }
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
                 ensure_telos_settings(
                     user_data_dir.path(),
-                    &spec.api_key,
+                    Some(api_key),
                     &spec.provider,
                     &spec.base_url,
                     &spec.model,
@@ -332,11 +336,18 @@ async fn main() -> anyhow::Result<()> {
                 });
                 registry.register(backend, spec.name == default_name);
             }
-            AgentKind::LangGraph | AgentKind::Native => {
+            AgentKind::Native => {
+                let backend = Arc::new(NativeAgent::new(spec.name.clone()));
+                registry.register(backend, spec.name == default_name);
+                tracing::info!(
+                    "Agent '{}' running (native reference adapter, in-process)",
+                    spec.name
+                );
+            }
+            AgentKind::LangGraph => {
                 tracing::warn!(
-                    "Agent '{}': kind {:?} has no adapter yet, skipping",
-                    spec.name,
-                    spec.kind
+                    "Agent '{}': kind langgraph has no adapter yet, skipping",
+                    spec.name
                 );
             }
         }

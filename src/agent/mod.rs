@@ -14,17 +14,20 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 pub mod config;
+pub mod native;
 
 /// Supported agent platform kinds. Adding a platform means adding a kind
 /// and an `AgentBackend` adapter; the rest of actus is unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
-    /// Telos over ACP/WebSocket. Default agent.
+    /// Telos over ACP/WebSocket. Default agent when a Telos binary and
+    /// provider credentials are available.
     Telos,
     /// LangGraph Server over REST/SSE. Future adapter.
     LangGraph,
-    /// In-process Rust agent loop. Future adapter.
+    /// In-process Rust agent loop. Reference adapter (deterministic,
+    /// no LLM); proves the fabric seam and lets actus run without Telos.
     Native,
 }
 
@@ -118,11 +121,8 @@ pub trait AgentBackend: Send + Sync {
 
     /// Submit a chat message, creating or resuming the given thread.
     /// Errors when the agent is not connected or not ready.
-    async fn submit(
-        &self,
-        thread_id: Option<&str>,
-        message: &str,
-    ) -> Result<SubmitReceipt, String>;
+    async fn submit(&self, thread_id: Option<&str>, message: &str)
+        -> Result<SubmitReceipt, String>;
 
     /// Cancel the running turn, if any.
     async fn cancel(&self) -> Result<(), String>;
