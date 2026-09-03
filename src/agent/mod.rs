@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 pub mod config;
+pub mod ext_cli;
 pub mod native;
 
 /// Supported agent platform kinds. Adding a platform means adding a kind
@@ -29,16 +30,27 @@ pub enum AgentKind {
     /// In-process Rust agent loop. Reference adapter (deterministic,
     /// no LLM); proves the fabric seam and lets actus run without Telos.
     Native,
+    /// Any external CLI binary as an auxiliary agent. Raw transport: per
+    /// turn, actus spawns `bin <args...> <prompt>` and records the output.
+    /// Ante is the first attached binary (`cli_args = ["-p"]`).
+    #[serde(rename = "ext_cli")]
+    ExtCli,
 }
 
 impl AgentKind {
-    pub const ALL: [AgentKind; 3] = [AgentKind::Telos, AgentKind::LangGraph, AgentKind::Native];
+    pub const ALL: [AgentKind; 4] = [
+        AgentKind::Telos,
+        AgentKind::LangGraph,
+        AgentKind::Native,
+        AgentKind::ExtCli,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             AgentKind::Telos => "telos",
             AgentKind::LangGraph => "langgraph",
             AgentKind::Native => "native",
+            AgentKind::ExtCli => "ext_cli",
         }
     }
 
@@ -66,6 +78,16 @@ pub struct PendingAuthorization {
     pub tool_call_id: String,
     pub tool_name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Truncate a first user message into a thread title.
+pub(crate) fn truncate_title(message: &str) -> String {
+    let flat = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 60 {
+        flat
+    } else {
+        flat.chars().take(60).collect::<String>() + "..."
+    }
 }
 
 /// Receipt returned by `AgentBackend::submit`.

@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use actus::agent::config::{load_config, AgentDefaults};
+use actus::agent::ext_cli::ExtCliAgent;
 use actus::agent::native::NativeAgent;
 use actus::agent::AgentKind;
 use actus::agent::AgentRegistry;
@@ -342,6 +343,21 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!(
                     "Agent '{}' running (native reference adapter, in-process)",
                     spec.name
+                );
+            }
+            AgentKind::ExtCli => {
+                let backend = Arc::new(ExtCliAgent::new(
+                    spec.name.clone(),
+                    spec.bin.clone(),
+                    spec.cli_args.clone(),
+                    spec.cli_timeout_secs,
+                    workdir.clone(),
+                ));
+                registry.register(backend, spec.name == default_name);
+                tracing::info!(
+                    "Agent '{}' running (ext_cli adapter, raw transport, bin {})",
+                    spec.name,
+                    spec.bin.display()
                 );
             }
             AgentKind::LangGraph => {

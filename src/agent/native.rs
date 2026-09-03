@@ -15,8 +15,8 @@ use tokio::sync::watch;
 use tokio::sync::RwLock;
 
 use crate::agent::{
-    AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
-    ThreadSession,
+    truncate_title, AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt,
+    ThreadMessage, ThreadSession,
 };
 
 /// Deterministic in-process agent instance.
@@ -169,14 +169,5 @@ impl AgentBackend for NativeAgent {
     async fn create_thread(&self) -> Result<String, String> {
         let (tid, _) = self.get_or_create(None).await;
         Ok(tid)
-    }
-}
-
-fn truncate_title(message: &str) -> String {
-    let flat = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= 60 {
-        flat
-    } else {
-        flat.chars().take(60).collect::<String>() + "..."
     }
 }

@@ -76,6 +76,10 @@ pub struct AgentSpec {
     pub tool_approval: ToolApproval,
     /// MCP servers attached to this agent.
     pub mcp: Vec<McpServer>,
+    /// Fixed CLI arguments prepended before the prompt for cli-kind agents.
+    pub cli_args: Vec<String>,
+    /// Per-turn timeout in seconds for cli-kind agents.
+    pub cli_timeout_secs: u64,
 }
 
 /// Values every agent inherits when the config file omits them.
@@ -115,6 +119,10 @@ struct AgentSpecFile {
     tool_approval: Option<ToolApproval>,
     #[serde(default)]
     mcp: Vec<McpServer>,
+    #[serde(default)]
+    cli_args: Vec<String>,
+    #[serde(default = "default_cli_timeout")]
+    cli_timeout_secs: u64,
 }
 
 #[derive(Deserialize)]
@@ -152,6 +160,8 @@ pub fn load_config(
             ws_port: None,
             tool_approval: None,
             mcp: Vec::new(),
+            cli_args: Vec::new(),
+            cli_timeout_secs: default_cli_timeout(),
         }],
     };
 
@@ -193,7 +203,13 @@ pub fn load_config(
             ws_port,
             tool_approval: f.tool_approval.unwrap_or(ToolApproval::Always),
             mcp: f.mcp,
+            cli_args: f.cli_args,
+            cli_timeout_secs: f.cli_timeout_secs,
         });
     }
     Ok(specs)
+}
+
+fn default_cli_timeout() -> u64 {
+    300
 }
