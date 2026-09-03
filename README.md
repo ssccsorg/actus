@@ -30,15 +30,15 @@ External Client (CLI / HTTP)
         ┌─────────┴─────────┐
         ▼                   ▼
   ┌──────────┐      ┌──────────────┐
-  │  Zed     │      │   Future     │
-  │ Headless │      │  Agent Types │
-  │ (Coding) │      │ (Research,   │
+  │ Telos    │      │   Future     │
+  │ (Coding) │      │  Agent Types │
+  │          │      │ (Research,   │
   │          │      │  Review,     │
   │          │      │  Deploy...)  │
   └──────────┘      └──────────────┘
 ```
 
-Zed headless is the first default agent type — a general-purpose coding
+Telos is the first default agent type — a general-purpose coding
 agent with file-system and git awareness. The architecture is designed to
 accept any agent that communicates via WebSocket, making actus a universal
 gateway for agent execution.
@@ -48,16 +48,16 @@ gateway for agent execution.
 Like neXus weaves heterogeneous FIH storage types behind one thin knowledge
 fabric, actus weaves heterogeneous agent platforms behind one thin execution
 fabric. Any platform can be orchestrated through the same actus surface;
-Zed headless is the default agent.
+Telos is the default agent.
 
-- `agent::AgentKind` — platform kinds (`zed`, `langgraph`, `native`),
+- `agent::AgentKind` — platform kinds (`telos`, `langgraph`, `native`),
   extensible by adding a kind and an adapter.
 - `agent::AgentBackend` — uniform async trait (`status`, `submit`, `cancel`,
   `thread`, `threads`, `subscribe`) implemented by every platform adapter.
 - `agent::AgentRegistry` — name to running adapter map with a default agent.
-- `zed::backend::ZedBackend` — first adapter, wrapping `ZedManager`.
+- `telos::backend::TelosBackend` — first adapter, wrapping `TelosManager`.
   ACP-over-WebSocket details (reconnect, event dispatch) stay inside
-  `zed::control`; the adapter owns thread state and command submission.
+  `telos::control`; the adapter owns thread state and command submission.
 
 HTTP handlers talk only to the `AgentBackend` trait, so a new platform
 (LangGraph Server over REST/SSE, an in-process Rust agent) plugs in by
@@ -67,19 +67,19 @@ status in the `agents` map.
 ## Configuration
 
 Agents are declared in `~/.actus/config.toml` (or `ACTUS_CONFIG`). When
-the file is absent, a single default `zed` agent is derived from the CLI
+the file is absent, a single default `telos` agent is derived from the CLI
 flags and environment (`LLM_API_KEY`, `LLM_PROVIDER`, `LLM_BASE_URL`,
 `LLM_MODEL`).
 
 ```toml
 [[agents]]
-name = "zed"             # default agent; routed when no agent is named
-kind = "zed"             # zed | langgraph | native (only zed has an adapter yet)
+name = "telos"             # default agent; routed when no agent is named
+kind = "telos"             # telos | langgraph | native (only telos has an adapter yet)
 provider = "deepseek"
 model = "deepseek-chat"
 base_url = "https://api.deepseek.com/v1"
 api_key = "sk-..."
-bin = "helix/.bin/helix-zed-headless-arm64"
+bin = "../telos/target/telos-release/tel"
 ws_port = 8080
 tool_approval = "always"  # always | ask | never (drives the fork's approval policy)
 
@@ -95,13 +95,13 @@ tool_approval = "always"  # always | ask | never (drives the fork's approval pol
 
 [[agents]]
 name = "research"
-kind = "zed"
+kind = "telos"
 provider = "anthropic"
 model = "claude-sonnet-4"
 ws_port = 8081
 ```
 
-Each agent inherits any omitted field from the defaults. Every `zed`
+Each agent inherits any omitted field from the defaults. Every `telos`
 agent needs a unique `ws_port`; thread state is persisted per agent under
 `~/.actus/threads/{name}/`. Chat and thread endpoints accept an `agent`
 field to route to a specific agent. MCP servers declared under an agent
@@ -111,12 +111,12 @@ the headless agent, exposing their tools to the model.
 `tool_approval` sets the tool call approval policy. `always` auto-approves
 tool calls (headless task execution); `ask` waits for a human or approval
 bridge; `never` rejects them. The mode is carried to the fork via the
-`ZED_TOOL_APPROVAL` environment variable.
+`TELOS_TOOL_APPROVAL` environment variable.
 
 ## `@` Mention Context
 
 Typing `@` in the CLI injects context into the message before it is sent,
-mirroring Zed's mention picker:
+mirroring Telos's mention picker:
 
 | Form | Source | Example |
 |---|---|---|
@@ -136,7 +136,7 @@ picker opens only for explicit `@?query`.
 
 | Agent | Role | Protocol |
 |---|---|---|
-| Zed Headless | Code generation, editing, file operations | ACP over WebSocket |
+| Telos | Code generation, editing, file operations | ACP over WebSocket |
 | (future) Research Agent | Literature search, experiment design | TBD |
 | (future) Review Agent | Code review, compliance checking | TBD |
 | (future) Deploy Agent | CI/CD, infrastructure management | TBD |
@@ -147,7 +147,8 @@ picker opens only for explicit `@?query`.
 
 - Rust toolchain
 - Python 3.12+
-- A pre-built headless Zed binary (or build with `helix/build.sh`)
+- A built telos binary (build the sibling `telos` repo; default path
+  `../telos/target/telos-release/tel`)
 
 ### Quick Start
 
@@ -171,7 +172,7 @@ picker opens only for explicit `@?query`.
 # Build base image (actus binary only)
 docker build .
 
-# Build full integration image (includes Zed bootstrapping)
+# Build full integration image (includes Telos bootstrapping)
 docker build --target full .
 ```
 
@@ -191,6 +192,28 @@ docker build --target full .
 | `/v1/git/log` | GET | Recent commit history |
 | `/v1/cancel` | POST | Cancel current agent turn |
 
+### API Authentication
+
+Every endpoint except `/health` requires a bearer token sent as
+`Authorization: Bearer <token>`. The server resolves the effective token
+in this order: the `--api-token` CLI argument, the `ACTUS_API_TOKEN`
+environment variable, the persisted token file `~/.actus/api_token`, or a
+freshly generated token. The effective token is written to
+`~/.actus/api_token` (mode 0600) at startup, so the CLI and shell
+consumers read the same value the server enforces. Authentication is
+enabled by default and has no disable switch yet; `/health` stays open so
+readiness probes work before a token exists.
+
+Browser access is governed separately. Pass `--cors-origins` with a
+comma-separated origin list to allow cross-origin requests from those
+origins only. The default (empty) sends no CORS headers, so browsers
+enforce same-origin policy.
+
+Consumers on the same machine share the token file: when a second server
+instance starts, it overwrites `~/.actus/api_token`, so file-based
+consumers may then hold a token valid only for the later instance. The
+runtime targets a single local instance.
+
 ## Project Structure
 
 ```
@@ -201,18 +224,13 @@ actus/
 │   ├── server.rs        REST API routes and handlers
 │   ├── files.rs         File search and mention
 │   ├── git.rs           Git operations
-│   └── zed/
-│       ├── mod.rs       Zed lifecycle and session management
-│       ├── backend.rs   ZedBackend adapter (AgentBackend impl)
+│   └── telos/
+│       ├── mod.rs       Telos lifecycle and session management
+│       ├── backend.rs   TelosBackend adapter (AgentBackend impl)
 │       ├── control.rs   WebSocket bridge and event dispatch
 │       └── types.rs     Protocol type definitions
-├── helix/
-│   ├── build.sh         Clone → patch → build Zed headless
-│   ├── patch/           Patches for Helix Zed fork
-│   └── subtree/         Helix Zed fork (git subtree)
 ├── runner.py            Server launcher (build + run)
 ├── terminal.py          Interactive chat CLI
-├── actus-server.py      Python reference server
 ├── run.sh               Gateway: build, test, launch
 ├── Dockerfile           Multi-stage image builder
 └── .github/workflows/
@@ -235,4 +253,8 @@ knowledge and action.
 
 ## License
 
-BUSL-1.1
+Apache-2.0 (see `LICENSE`). Third-party licenses are reported via
+cargo-about; see NOTICE.md. Actus is the execution fabric; it
+launches and talks to agent processes over WebSocket. Agent binaries are
+separate projects with their own licenses and are not packaged with
+actus.

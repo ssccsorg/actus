@@ -4,7 +4,7 @@
 
 This devlog freezes the wire contract between actus and the headless agent binary it drives. It is the reference for the planned nyx binary: actus must accept nyx as a drop-in replacement with no code change beyond the binary path. The contract is recorded in actus's own words, derived from the protocol actus actually exercises, and pinned by the integration tests.
 
-The boundary from the previous devlog applies here too. The contract is a protocol interface, and the behavior actus depends on is documented as behavior, not as code copied from any fork. The upstream authoritative spec lives at `helix/subtree/crates/external_websocket_sync/PROTOCOL_SPEC.md`; this document records the subset actus uses and the semantics actus relies on.
+The boundary from the previous devlog applies here too. The contract is a protocol interface, and the behavior actus depends on is documented as behavior, not as code copied from any fork. The upstream authoritative spec lives in the telos repository's `external_websocket_sync` crate; this document records the subset actus uses and the semantics actus relies on.
 
 ## Roles
 
@@ -38,7 +38,7 @@ Actus runs one WebSocket server per agent on `127.0.0.1:{ws_port}` and launches 
 
 ## Behavioral Semantics Actus Depends On
 
-These are the hard-won failure modes from the zed integration work. A replacement binary must preserve them.
+These are the hard-won failure modes from the telos integration work. A replacement binary must preserve them.
 
 - Cumulative content overwrite. `message_added` carries the full content of an entry, not a delta. A repeated `message_id` replaces the content in place.
 - Turn-end replay. The agent resends thread entries when a turn completes, and replays prior-turn entries on follow-up turns. Actus filters replays by matching both id and content, so renumbered new content survives while identical replays are dropped.
@@ -53,24 +53,22 @@ The upstream spec additionally defines `user_created_thread`, `thread_load_error
 
 ## Contract Pins
 
-- `tests/zed_types_test.rs`: wire format and serialization round trips for every event variant.
+- `tests/telos_types_test.rs`: wire format and serialization round trips for every event variant.
 - `tests/agent_test.rs`: replay filter, sentinel consumption, scoped message ids, error and cancel paths.
 - `tests/server_test.rs`: the HTTP API over the fabric, exercised through a real server.
-- `src/zed/types.rs`: the `SyncEvent` and `IncomingChatMessage` types.
+- `src/telos/types.rs`: the `SyncEvent` and `IncomingChatMessage` types.
 
 ## Binary Swap Points
 
-- `runner.py`: `--bin` argument and `ZED_BIN` detection.
-- `run.sh`: `ZED_BIN` environment variable and `ensure_zed_binary`.
-- `src/main.rs`: `launch_zed` receives the binary path per agent config.
+- `runner.py`: `--bin` argument and `TELOS_BIN` detection.
+- `run.sh`: `TELOS_BIN` environment variable and `ensure_telos_binary`.
+- `src/main.rs`: `launch_telos` receives the binary path per agent config.
 
 ## Nyx Implication
 
-A nyx binary that speaks this subset and emits `agent_ready` after connecting can replace the helix headless binary without actus changes. The actus test suite doubles as the conformance suite for nyx: run `run.sh --test` with `ZED_BIN` pointing at the nyx binary, and the existing endpoint, protocol, and behavior tests become the acceptance gate.
+A nyx binary that speaks this subset and emits `agent_ready` after connecting can replace the telos binary without actus changes. The actus test suite doubles as the conformance suite for nyx: run `run.sh --test` with `TELOS_BIN` pointing at the nyx binary, and the existing endpoint, protocol, and behavior tests become the acceptance gate.
 
 ## References
 
-- `helix/subtree/crates/external_websocket_sync/PROTOCOL_SPEC.md`: authoritative upstream protocol spec
-- `helix/subtree/crates/external_websocket_sync/src/protocol_test.rs`: upstream conformance flows
-- actus: `src/zed/types.rs`, `src/zed/control.rs`, `src/zed/backend.rs`, `tests/zed_types_test.rs`, `tests/agent_test.rs`, `tests/server_test.rs`
-- `docs/devlogs/2026-08-29-helix-sync-reference.md`: prior license boundary and behavior analysis
+- telos repository's `external_websocket_sync` crate: authoritative protocol spec and conformance tests
+- actus: `src/telos/types.rs`, `src/telos/control.rs`, `src/telos/backend.rs`, `tests/telos_types_test.rs`, `tests/agent_test.rs`, `tests/server_test.rs`

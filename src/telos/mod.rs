@@ -1,14 +1,15 @@
-// Zed headless management — process lifecycle, WebSocket bridge, and protocol types.
+// Telos management — process lifecycle, WebSocket bridge, and protocol types.
 
 pub mod backend;
 pub mod control;
 pub mod types;
 
 use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Channel sender for WebSocket commands to Zed. Shared between
-/// `AppState` and `ZedManager` so cancel can send without acquiring the
-/// `ZedManager` RwLock (avoiding lock contention with long-running SSE
+/// Channel sender for WebSocket commands to Telos. Shared between
+/// `AppState` and `TelosManager` so cancel can send without acquiring the
+/// `TelosManager` RwLock (avoiding lock contention with long-running SSE
 /// handlers).
 pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
 
@@ -26,36 +27,35 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-// Zed manager — WebSocket connection, session management, and settings bootstrap
+// Telos manager — WebSocket connection, session management, and settings bootstrap
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json;
-use tokio::process::Command;
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{mpsc, watch, Notify, RwLock};
 use uuid::Uuid;
 
-/// Manages a single Zed WebSocket connection and message dispatch.
+/// Manages a single Telos WebSocket connection and message dispatch.
 #[allow(dead_code)]
-pub struct ZedManager {
+pub struct TelosManager {
     pub session_id: String,
     pub ws_host: String,
-    pub zed_connected: bool,
+    pub telos_connected: bool,
     pub agent_ready: bool,
-    /// Channel to send WebSocket commands to Zed
+    /// Channel to send WebSocket commands to Telos
     pub ws_tx: Option<mpsc::UnboundedSender<String>>,
-    /// Threads managed by this Zed instance
+    /// Threads managed by this Telos instance
     pub threads: HashMap<String, ThreadSession>,
     /// Mapping from request_id to acp_thread_id (for correlating responses)
     pub pending_requests: HashMap<String, String>,
-    /// Mapping from zed_thread_id to local_thread_id (for reverse lookup)
+    /// Mapping from telos_thread_id to local_thread_id (for reverse lookup)
     pub thread_id_map: HashMap<String, String>,
     /// Path to the threads persistence file
     pub threads_file: PathBuf,
-    /// Threads that have been activated (context sent) in the current Zed session
+    /// Threads that have been activated (context sent) in the current Telos session
     pub threads_activated: HashSet<String>,
     /// Notifier for thread state changes (SSE consumers)
     pub thread_notify: watch::Sender<u64>,
@@ -64,7 +64,7 @@ pub struct ZedManager {
     /// Monotonically increasing reconnect counter. Incremented each time
     /// a new WS connection is established (for SSE consumers to detect).
     pub reconnect_count: u64,
-    /// Timestamp of the last PING received from Zed (for keepalive).
+    /// Timestamp of the last PING received from Telos (for keepalive).
     pub last_ping_time: Instant,
     /// Timestamp of the last meaningful SSE event (message_added,
     /// message_completed, thread_created, agent_ready).
@@ -73,11 +73,13 @@ pub struct ZedManager {
     /// Pending chat messages that need to be re-sent after reconnection.
     /// Stores (request_id, thread_id, message) tuples.
     pub pending_chat_queue: Vec<(String, String, String)>,
+    /// Dirty flag for the debounced background thread-saver.
+    pub threads_dirty: AtomicBool,
     /// Tool-call authorizations awaiting a human decision, keyed by
     /// tool_call_id (ask mode).
     pub pending_authorizations: HashMap<String, PendingAuthorization>,
     /// Snapshot of (scoped message id → content) from the most recent
-    /// completed turn of each thread. Zed's flush_streaming_throttle
+    /// completed turn of each thread. Telos's flush_streaming_throttle
     /// resends ALL ACP thread entries on turn completion and replays prior
     /// turn entries on follow-up turns; a resend whose id and content both
     /// match this snapshot is a replay and is dropped instead of being
@@ -89,7 +91,7 @@ pub struct ZedManager {
     pub sentinel_cap: usize,
 }
 
-impl ZedManager {
+impl TelosManager {
     pub fn new(session_id: String, ws_host: String, threads_dir: &Path) -> Self {
         let threads_file = threads_dir.join("threads.json");
         let threads = Self::load_threads(&threads_file);
@@ -107,7 +109,7 @@ impl ZedManager {
         Self {
             session_id,
             ws_host,
-            zed_connected: false,
+            telos_connected: false,
             agent_ready: false,
             ws_tx: None,
             threads,
@@ -124,11 +126,12 @@ impl ZedManager {
             pending_authorizations: HashMap::new(),
             prior_message_content: HashMap::new(),
             sentinel_cap: 512,
+            threads_dirty: AtomicBool::new(false),
         }
     }
 
     /// Prepare the user message, injecting conversation context if this
-    /// thread has not been activated in the current Zed session yet.
+    /// thread has not been activated in the current Telos session yet.
     pub fn prepare_message(&mut self, thread_id: &str, user_message: &str) -> String {
         if !self.threads_activated.contains(thread_id) {
             // Clear stale acp_thread_id from previous sessions
@@ -173,8 +176,8 @@ impl ZedManager {
     }
 
     /// Look up the ACP thread ID for a given local thread ID.
-    /// ACP threads are created by Zed and stored in thread_id_map.
-    /// Returns None for new threads (Zed will create a fresh ACP thread).
+    /// ACP threads are created by Telos and stored in thread_id_map.
+    /// Returns None for new threads (Telos will create a fresh ACP thread).
     pub fn get_acp_thread_id(&self, local_id: &str) -> Option<String> {
         for (acp_id, lid) in &self.thread_id_map {
             if lid == local_id {
@@ -240,7 +243,8 @@ impl ZedManager {
             .take_while(|m| m.role == "assistant")
         {
             if let Some(id) = &m.message_id {
-                self.prior_message_content.insert(id.clone(), m.content.clone());
+                self.prior_message_content
+                    .insert(id.clone(), m.content.clone());
             }
         }
     }
@@ -254,7 +258,8 @@ impl ZedManager {
         if request_id.is_empty() {
             return;
         }
-        self.pending_requests.insert(request_id.to_string(), String::new());
+        self.pending_requests
+            .insert(request_id.to_string(), String::new());
         if self.pending_requests.len() > self.sentinel_cap {
             // Drop enough consumed entries (empty values) to get back under
             // the cap. The entry just inserted is always kept; active
@@ -280,7 +285,7 @@ impl ZedManager {
     /// signature is intentionally wide.
     ///
     /// Matching is by id anywhere in the thread, not just the last message:
-    /// Zed emits updates for several interleaved messages in one turn
+    /// Telos emits updates for several interleaved messages in one turn
     /// (thinking, tool call, then the answer), so the same id reappears
     /// non-consecutively. Comparing only against the tail used to append a
     /// duplicate every time, swelling a single turn into dozens of
@@ -380,7 +385,7 @@ impl ZedManager {
         self.thread_notify.send_modify(|v| *v = v.wrapping_add(1));
     }
 
-    /// Send a cancel_current_turn command to Zed via WebSocket.
+    /// Send a cancel_current_turn command to Telos via WebSocket.
     pub fn cancel_current_turn(&self) -> Result<(), String> {
         let cmd = serde_json::json!({
             "type": "cancel_current_turn",
@@ -391,6 +396,16 @@ impl ZedManager {
 
     /// Persist all threads to the JSON file.
     pub fn save_threads(&self) {
+        // Debounced: mark dirty and let the background saver persist. The
+        // previous implementation wrote the full file synchronously while
+        // the caller held the manager write lock; on a slow or full disk
+        // that blocked every other manager user and froze the server.
+        self.threads_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Write the full threads file synchronously. Used at shutdown, where
+    /// the process is about to exit and the debounced saver may not run.
+    pub fn flush_threads(&self) {
         match serde_json::to_string_pretty(&self.threads) {
             Ok(json) => {
                 if let Err(e) = std::fs::write(&self.threads_file, &json) {
@@ -401,6 +416,44 @@ impl ZedManager {
                 tracing::error!("Failed to serialize threads: {}", e);
             }
         }
+    }
+
+    /// Background persistence loop: every second, if the dirty flag is set,
+    /// snapshot the threads under a read lock, release it, and write the
+    /// file on a blocking thread. Keeps the heavy JSON serialization and
+    /// disk write off the manager lock and off the async runtime.
+    pub fn spawn_thread_saver(manager: Arc<RwLock<TelosManager>>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let dirty = manager
+                    .read()
+                    .await
+                    .threads_dirty
+                    .swap(false, Ordering::SeqCst);
+                if !dirty {
+                    continue;
+                }
+                let (snapshot, path) = {
+                    let mgr = manager.read().await;
+                    (mgr.threads.clone(), mgr.threads_file.clone())
+                };
+                tokio::task::spawn_blocking(move || {
+                    match serde_json::to_string_pretty(&snapshot) {
+                        Ok(json) => {
+                            if let Err(e) = std::fs::write(&path, &json) {
+                                tracing::error!("Failed to write threads file: {}", e);
+                            }
+                        }
+                        Err(e) => tracing::error!("Failed to serialize threads: {}", e),
+                    }
+                })
+                .await
+                .ok();
+            }
+        });
     }
 
     /// Load threads from a JSON file. Returns an empty map if the file does not exist or is unreadable.
@@ -429,7 +482,7 @@ impl ZedManager {
                     }
                     // Repair a historical bug where streaming updates to the
                     // same message id were appended instead of replaced
-                    // (Zed emits thinking, tool call, and answer messages
+                    // (Telos emits thinking, tool call, and answer messages
                     // with interleaved ids), swelling a turn into dozens of
                     // duplicate entries. Keep the last occurrence of each id
                     // and drop the earlier duplicates; user messages and
@@ -437,7 +490,8 @@ impl ZedManager {
                     for thread in threads.values_mut() {
                         let mut seen: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
-                        let mut kept: Vec<ThreadMessage> = Vec::with_capacity(thread.messages.len());
+                        let mut kept: Vec<ThreadMessage> =
+                            Vec::with_capacity(thread.messages.len());
                         for m in std::mem::take(&mut thread.messages) {
                             match &m.message_id {
                                 Some(id) if !seen.insert(id.clone()) => {
@@ -497,7 +551,7 @@ impl ZedManager {
         }
     }
 
-    /// Send a JSON command to Zed via WebSocket. Returns error if not connected.
+    /// Send a JSON command to Telos via WebSocket. Returns error if not connected.
     pub fn send_command(&self, cmd: &str) -> Result<(), String> {
         match &self.ws_tx {
             Some(tx) => tx.send(cmd.to_string()).map_err(|e| e.to_string()),
@@ -506,44 +560,71 @@ impl ZedManager {
     }
 }
 
-pub async fn launch_zed(
+/// Build the telos launch command. Kept separate from spawning so the
+/// launch contract (argv and the `TELOS_*` env set) is unit-testable
+/// without a real telos binary.
+fn telos_command(
     bin_path: &Path,
     workdir: &Path,
     user_data_dir: &Path,
     session_id: &str,
     ws_host: &str,
     tool_approval: &str,
-) -> anyhow::Result<tokio::process::Child> {
-    tracing::info!("Launching Zed headless...");
-
-    let stderr_log = std::fs::File::create("/tmp/-headless.log")?;
-    let child = Command::new(bin_path)
-        .args(["--headless", "--allow-multiple-instances"])
+    stderr_log: std::fs::File,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin_path);
+    cmd.args(["--headless", "--allow-multiple-instances"])
         .arg("--user-data-dir")
         .arg(user_data_dir)
         .arg(workdir)
-        .env("ZED_EXTERNAL_SYNC_ENABLED", "true")
-        .env("ZED_WEBSOCKET_SYNC_ENABLED", "true")
-        .env("ZED_HELIX_URL", ws_host)
-        .env("ZED_HELIX_TOKEN", "test-token")
-        .env("HELIX_SESSION_ID", session_id)
-        .env("ZED_STATELESS", "1")
-        .env("ZED_WORK_DIR", workdir)
-        .env("ZED_TOOL_APPROVAL", tool_approval)
+        .env("TELOS_EXTERNAL_SYNC_ENABLED", "true")
+        .env("TELOS_WEBSOCKET_SYNC_ENABLED", "true")
+        .env("TELOS_WS_URL", ws_host)
+        .env("TELOS_WS_TOKEN", "test-token")
+        .env("TELOS_STATELESS", "1")
+        .env("TELOS_SESSION_ID", session_id)
+        .env("TELOS_TOOL_APPROVAL", tool_approval)
         .env("RUST_LOG", "info")
         .stdout(std::process::Stdio::null())
-        .stderr(stderr_log)
-        .spawn()?;
+        .stderr(std::process::Stdio::from(stderr_log));
+    cmd
+}
 
-    tracing::info!("Zed started (PID: {:?})", child.id());
+pub async fn launch_telos(
+    bin_path: &Path,
+    workdir: &Path,
+    user_data_dir: &Path,
+    session_id: &str,
+    ws_host: &str,
+    tool_approval: &str,
+    stderr_log: &Path,
+) -> anyhow::Result<std::process::Child> {
+    tracing::info!("Launching telos...");
+
+    let stderr_log = std::fs::File::create(stderr_log)
+        .map_err(|e| anyhow::anyhow!("cannot create stderr log {}: {}", stderr_log.display(), e))?;
+    let mut cmd = telos_command(
+        bin_path,
+        workdir,
+        user_data_dir,
+        session_id,
+        ws_host,
+        tool_approval,
+        stderr_log,
+    );
+    let child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("cannot spawn {}: {}", bin_path.display(), e))?;
+
+    tracing::info!("telos started (PID: {:?})", child.id());
     Ok(child)
 }
 
-// ── Zed settings bootstrap ─────────────────────────────────────────────
+// ── Telos settings bootstrap ─────────────────────────────────────────────
 
-pub fn ensure_zed_settings(
+pub fn ensure_telos_settings(
     data_dir: &Path,
-    api_key: &str,
+    api_key: Option<&str>,
     provider: &str,
     base_url: &str,
     model_name: &str,
@@ -552,6 +633,10 @@ pub fn ensure_zed_settings(
 ) -> anyhow::Result<()> {
     use std::fs;
     use std::io::Write;
+
+    let api_key = api_key.ok_or_else(|| {
+        anyhow::anyhow!("telos agent requires an LLM API key (LLM_API_KEY or --api-key)")
+    })?;
 
     let settings_dir = data_dir.join("config");
     fs::create_dir_all(&settings_dir)?;
@@ -581,7 +666,7 @@ pub fn ensure_zed_settings(
         });
     }
 
-    // MCP servers: map each declaration to Zed's `context_servers` entry.
+    // MCP servers: map each declaration to Telos's `context_servers` entry.
     // Stdio servers become `{ command, args, env }`; HTTP servers become
     // `{ url, headers }`. The headless agent's context server registry
     // starts these and exposes their tools to the model.
@@ -639,6 +724,71 @@ pub fn ensure_zed_settings(
     let mut f = fs::File::create(&creds_file)?;
     f.write_all(serde_json::to_string_pretty(&creds)?.as_bytes())?;
 
-    tracing::info!("Zed settings written to {}", settings_file.display());
+    tracing::info!("Telos settings written to {}", settings_file.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::telos_command;
+    use std::collections::HashMap;
+
+    #[test]
+    fn launch_contract_sets_expected_args_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("work");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let user_data_dir = dir.path().join("user");
+        std::fs::create_dir_all(&user_data_dir).unwrap();
+        let log = std::fs::File::create(dir.path().join("telos.log")).unwrap();
+        let bin = dir.path().join("tel");
+
+        let cmd = telos_command(
+            &bin,
+            &workdir,
+            &user_data_dir,
+            "ses_actus-test",
+            "127.0.0.1:8080",
+            "always",
+            log,
+        );
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let pair = [
+            "--user-data-dir".to_string(),
+            user_data_dir.to_string_lossy().into_owned(),
+        ];
+        assert!(args.windows(2).any(|w| w == pair), "args: {args:?}");
+        assert!(args.contains(&workdir.to_string_lossy().into_owned()));
+        assert!(args.iter().any(|a| a == "--headless"));
+        assert!(args.iter().any(|a| a == "--allow-multiple-instances"));
+
+        let envs: HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|value| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        let expect = [
+            ("TELOS_EXTERNAL_SYNC_ENABLED", "true"),
+            ("TELOS_WEBSOCKET_SYNC_ENABLED", "true"),
+            ("TELOS_WS_URL", "127.0.0.1:8080"),
+            ("TELOS_WS_TOKEN", "test-token"),
+            ("TELOS_STATELESS", "1"),
+            ("TELOS_SESSION_ID", "ses_actus-test"),
+            ("TELOS_TOOL_APPROVAL", "always"),
+            ("RUST_LOG", "info"),
+        ];
+        for (key, value) in expect {
+            assert_eq!(envs.get(key).map(String::as_str), Some(value), "env {key}");
+        }
+    }
 }

@@ -3,13 +3,13 @@
 : REST chat client for the Rust  server.
 
 Connects to the Rust HTTP server at localhost:9090 which already manages
-Zed headless.  No subprocess, no WebSocket, no API key needed here.
+Telos.  No subprocess, no WebSocket, no API key needed here.
 
 Usage:
   ./terminal.py                              # default port 9090
   ./terminal.py --port 9091                  # custom port
-  ./terminal.py --workdir /path/to/project   # no-zed fallback info
-  ./terminal.py --no-zed                     # fallback mode
+  ./terminal.py --workdir /path/to/project   # no-telos fallback info
+  ./terminal.py --no-telos                     # fallback mode
 
 Commands:
   /exit, /quit    - exit
@@ -29,6 +29,11 @@ import json
 import os
 import sys
 from pathlib import Path
+
+try:
+    import fcntl  # unix only; used to restore blocking stdio
+except ImportError:
+    fcntl = None
 
 try:
     import httpx
@@ -64,12 +69,32 @@ class C:
 
 # ── HTTP client ──────────────────────────────────────────────────────────
 
+def _api_token(arg: str | None) -> str | None:
+    """Resolve the API bearer token: CLI arg, ACTUS_API_TOKEN env, then the
+    token file the server writes at startup."""
+    token = arg or os.environ.get("ACTUS_API_TOKEN")
+    if token:
+        return token
+    token_file = Path.home() / ".actus" / "api_token"
+    if token_file.exists():
+        token = token_file.read_text().strip()
+        if token:
+            return token
+    return None
+
+
 class NexClient:
     """Thin wrapper over the Rust server's REST API."""
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, token: str | None = None):
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0)
+        self.token = token
+        headers = {"Authorization": f"Bearer {token}"} if token else None
+        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0, headers=headers)
+
+    def auth_headers(self) -> dict | None:
+        """Authorization header for aiohttp calls made outside the httpx client."""
+        return {"Authorization": f"Bearer {self.token}"} if self.token else None
 
     async def close(self):
         await self.client.aclose()
@@ -212,14 +237,14 @@ def print_banner(h: dict):
     print(f"{C.BOLD}{C.HEADER}╚══════════════════════════════════════╝{C.END}")
     ok = h and h.get("status") == "ok"
     if ok:
-        zed = h.get("zed_connected", False)
+        telos = h.get("telos_connected", False)
         agent = h.get("agent_ready", False)
         print(f"  {C.GREEN}✓{C.END} Server: {h.get('status', '?')}")
-        print(f"  {C.GREEN}✓{C.END} Zed connected: {zed}")
+        print(f"  {C.GREEN}✓{C.END} Telos connected: {telos}")
         print(f"  {C.GREEN}✓{C.END} Agent ready: {agent}")
         print(f"  {C.DIM}Active threads: {h.get('active_threads', 0)}{C.END}")
-        if not zed or not agent:
-            print(f"\n{C.YELLOW}⚠ Waiting for Zed to connect...{C.END}")
+        if not telos or not agent:
+            print(f"\n{C.YELLOW}⚠ Waiting for Telos to connect...{C.END}")
     else:
         print(f"  {C.RED}✗{C.END} Server unreachable")
     print()
@@ -416,7 +441,7 @@ async def _resolve_mention(client: NexClient, token: str) -> str:
         syms = await client.search_symbols(q)
         threads = await client.list_threads()
         candidates = [
-            ("file", f"{f.get('relative_path', f.get('path', '?'))}", f)
+            ("file", f"{f.get('relative_path', '?')}", f)
             for f in (files or [])[:6]
         ]
         candidates += [
@@ -517,7 +542,7 @@ async def send_chat(client: NexClient, message: str):
 
     Uses async submission (returns immediately) and polls for new content
     at 300ms intervals. This avoids the SSE streaming issues with the
-    WebSocket event delivery from Zed.
+    WebSocket event delivery from Telos.
     """
     global current_thread_id, show_raw
 
@@ -559,6 +584,7 @@ async def send_chat(client: NexClient, message: str):
             try:
                 async with session.get(
                     f"{client.base_url}/v1/threads/{current_thread_id}",
+                    headers=client.auth_headers(),
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as resp:
                     if resp.status == 200:
@@ -578,6 +604,7 @@ async def send_chat(client: NexClient, message: str):
             async with session.post(
                 f"{client.base_url}/v1/chat/async",
                 json=body,
+                headers=client.auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 if resp.status != 200:
@@ -619,6 +646,7 @@ async def send_chat(client: NexClient, message: str):
                 async with session.get(
                     f"{client.base_url}/v1/threads/{current_thread_id}/poll",
                     params={"since": content_len, "turn": known_turn},
+                    headers=client.auth_headers(),
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as resp:
                     if resp.status != 200:
@@ -894,18 +922,44 @@ async def chat_session(client: NexClient) -> str | None:
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
+def _restore_blocking_stdio() -> None:
+    """Clear O_NONBLOCK on the standard streams.
+
+    When this CLI is launched by a tool runner or an agent shell, the
+    standard streams can arrive as non-blocking pipes. A print() then
+    raises BlockingIOError(35) once the pipe buffer fills, which crashes
+    the client mid-session. Restoring blocking mode makes writes wait for
+    the reader instead of raising, which is the correct behaviour for an
+    interactive terminal.
+    """
+    if fcntl is None:
+        return
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            fd = stream.fileno()
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            if flags & os.O_NONBLOCK:
+                fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+        except (AttributeError, OSError, ValueError):
+            continue
+
+
 def main():
+    _restore_blocking_stdio()
     parser = argparse.ArgumentParser(description=": REST chat client for Rust  server")
     parser.add_argument("--port", type=int, default=9090,
                         help="Server port (default: 9090)")
     parser.add_argument("--workdir", default=os.getcwd(),
-                        help="Working directory hint (for --no-zed fallback)")
-    parser.add_argument("--no-zed", action="store_true",
-                        help="Fallback mode: do not expect Zed to be managed")
+                        help="Working directory hint (for --no-telos fallback)")
+    parser.add_argument("--no-telos", action="store_true",
+                        help="Fallback mode: do not expect Telos to be managed")
+    parser.add_argument("--api-token", default=None,
+                        help="Bearer token for the actus HTTP API (default: ACTUS_API_TOKEN env or ~/.actus/api_token)")
     args = parser.parse_args()
 
     base_url = f"http://localhost:{args.port}"
     workdir = os.path.abspath(args.workdir)
+    token = _api_token(args.api_token)
 
     # Load .env file (informational only)
     env_file = Path(__file__).parent / ".env"
@@ -918,7 +972,7 @@ def main():
 
     async def async_main():
         global current_thread_id, _chat_queue
-        client = NexClient(base_url)
+        client = NexClient(base_url, token)
 
         # Health check
         h = await client.health()
@@ -929,7 +983,7 @@ def main():
             print(f"  {C.DIM}Server:{C.END} {base_url}")
             print(f"  {C.DIM}Workdir:{C.END} {workdir}")
             print()
-            if h.get("zed_connected") and h.get("agent_ready"):
+            if h.get("telos_connected") and h.get("agent_ready"):
                 print(f"{C.BOLD}Enter a message. /exit returns to thread selection.{C.END}")
                 print(f"{C.DIM}Example: \"What's in this directory?\"{C.END}")
 
@@ -985,8 +1039,15 @@ def main():
         asyncio.run(async_main())
     except KeyboardInterrupt:
         print(f"\n{C.YELLOW}Shutdown{C.END}")
+    except BlockingIOError:
+        # The output pipe went away or filled up (non-interactive runner).
+        # Exit quietly instead of dumping a traceback into a dead stream.
+        pass
     finally:
-        print(f"{C.GREEN}Done{C.END}")
+        try:
+            print(f"{C.GREEN}Done{C.END}")
+        except (BlockingIOError, OSError):
+            pass
 
 
 if __name__ == "__main__":

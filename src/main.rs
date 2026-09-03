@@ -1,7 +1,8 @@
-// : Headless Zed AI agent — REST API server
+// Actus — agent execution runtime (REST API server)
 //
-// Launches Zed in --headless mode, connects via WebSocket,
-// and exposes a REST API for multi-thread chat with async task queue.
+// Launches and supervises agent adapters (Telos over WebSocket, the
+// in-process native reference adapter, future platforms) and exposes a
+// REST API for multi-thread chat with an async task queue.
 //
 // Usage:
 //    --workdir /path/to/project
@@ -12,22 +13,22 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use actus::agent::config::{load_config, AgentDefaults};
+use actus::agent::native::NativeAgent;
 use actus::agent::AgentKind;
 use actus::agent::AgentRegistry;
-use actus::server::run_http_server;
-use actus::server::{AppState, WsCommandTx};
-use actus::zed::backend::ZedBackend;
-use actus::zed::control::run_ws_server;
-use actus::zed::{ensure_zed_settings, launch_zed, ZedManager};
+use actus::server::{run_http_server, AppState};
+use actus::telos::backend::TelosBackend;
+use actus::telos::control::run_ws_server;
+use actus::telos::{ensure_telos_settings, launch_telos, TelosManager, WsCommandTx};
 
 #[derive(clap::Parser, Debug, Clone)]
-#[command(name = "", version, about = "Headless Zed AI agent server")]
+#[command(name = "", version, about = "Actus agent runtime server")]
 struct Args {
-    /// Helix headless Zed binary path
+    /// Telos binary path
     #[arg(long)]
     bin: Option<PathBuf>,
 
-    /// Working directory for Zed
+    /// Working directory for agents
     #[arg(long, default_value = ".")]
     workdir: PathBuf,
 
@@ -35,7 +36,7 @@ struct Args {
     #[arg(long, default_value = "9090")]
     http_port: u16,
 
-    /// WebSocket port for Zed to connect to
+    /// WebSocket port a spawned agent process connects back to
     #[arg(long, default_value = "8080")]
     ws_port: u16,
 
@@ -58,24 +59,96 @@ struct Args {
     /// Server-only mode: don't auto-start CLI
     #[arg(long, default_value_t = false)]
     server_only: bool,
+
+    /// Bearer token required by the HTTP API. Falls back to the
+    /// ACTUS_API_TOKEN env var, then to ~/.actus/api_token, then to a
+    /// freshly generated token persisted to that file.
+    #[arg(long)]
+    api_token: Option<String>,
+
+    /// Comma-separated list of CORS origins allowed to call the HTTP API
+    /// from a browser. Empty (default) sends no CORS headers, so browsers
+    /// enforce same-origin and cross-origin reads are blocked.
+    #[arg(long, default_value = "")]
+    cors_origins: String,
+}
+
+/// Location of the persisted API token shared with the CLI and scripts.
+fn api_token_file() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".actus").join("api_token"))
+        .unwrap_or_else(|| PathBuf::from(".actus/api_token"))
+}
+
+/// Write the effective token to ~/.actus/api_token with mode 0600 so the
+/// CLI, run.sh, and curl can read the same value the server enforces.
+fn persist_api_token(token: &str) -> anyhow::Result<()> {
+    let file = api_token_file();
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true).mode(0o600);
+    let mut f = opts.open(&file)?;
+    std::io::Write::write_all(&mut f, token.as_bytes())?;
+    Ok(())
+}
+
+/// Resolve the HTTP API bearer token: CLI arg, then ACTUS_API_TOKEN env,
+/// then the persisted token file, then a freshly generated token. The
+/// effective token is persisted so every consumer reads the same value.
+fn resolve_api_token(arg: Option<String>) -> anyhow::Result<String> {
+    if let Some(t) = arg {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            persist_api_token(&t)?;
+            return Ok(t);
+        }
+    }
+    if let Ok(t) = std::env::var("ACTUS_API_TOKEN") {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            persist_api_token(&t)?;
+            return Ok(t);
+        }
+    }
+    if let Ok(t) = std::fs::read_to_string(api_token_file()) {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Ok(t);
+        }
+    }
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    persist_api_token(&token)?;
+    tracing::warn!(
+        "Generated API token starting {}...; full value written to {}",
+        &token[..4],
+        api_token_file().display()
+    );
+    Ok(token)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Args = clap::Parser::parse();
 
-    // Init logging — always to stderr
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe { std::env::set_var("RUST_LOG", "actus=info"); }
-    }
+    // Init logging — always to stderr. The filter falls back to
+    // `actus=info` when RUST_LOG is unset or invalid.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("actus=info"));
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()?)
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 
     // Environment values from a `.env` file may carry surrounding quotes
     // (`LLM_MODEL="deepseek-v4-flash"`). Strip them defensively here so a
-    // quoted value never leaks into Zed's settings.json or credentials,
+    // quoted value never leaks into Telos's settings.json or credentials,
     // where a `"deepseek-v4-flash"` model name or quoted key fails the
     // lookup and aborts every turn.
     let unquote = |s: &str| -> String {
@@ -90,50 +163,49 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Resolve API key
+    // Resolve the LLM API key. Optional at the fabric level; the Telos
+    // adapter requires one when it launches an agent.
     let api_key = args
         .api_key
         .or_else(|| std::env::var("LLM_API_KEY").ok())
-        .map(|k| unquote(&k))
-        .ok_or_else(|| anyhow::anyhow!("API key required: set LLM_API_KEY or --api-key"))?;
+        .map(|k| unquote(&k));
 
-    // Resolve binary path
+    // Resolve the Telos binary path: --bin, TELOS_BIN, or the sibling
+    // build. Used by the Telos adapter only; existence is checked at
+    // launch so non-Telos agents do not require it.
     let bin_path = if let Some(p) = args.bin {
         p
+    } else if let Ok(p) = std::env::var("TELOS_BIN") {
+        PathBuf::from(p)
     } else {
-        let arch_suffix = match std::env::consts::ARCH {
-            "aarch64" => "arm64",
-            "x86_64" => "amd64",
-            other => other,
-        };
-        let bin_name = format!("helix-zed-headless-{}", arch_suffix);
-        let candidates = vec![
-            dirs::home_dir()
-                .map(|h| h.join(format!(".bin/{}", bin_name)))
-                .unwrap_or_default(),
-            PathBuf::from(format!("../.bin/{}", bin_name)),
-            PathBuf::from(format!(".bin/{}", bin_name)),
-            PathBuf::from(format!("helix/.bin/{}", bin_name)),
-        ];
-        candidates
-            .into_iter()
-            .find(|p| p.exists())
-            .ok_or_else(|| anyhow::anyhow!("helix-zed-headless binary not found"))?
+        PathBuf::from("../telos/target/telos-release/tel")
     };
 
     let workdir = std::fs::canonicalize(&args.workdir)?;
+
+    // The HTTP API requires a bearer token. Resolution order: CLI arg,
+    // ACTUS_API_TOKEN env, the persisted token file, then a freshly
+    // generated token. The effective token is always persisted to
+    // ~/.actus/api_token (mode 0600) so the CLI, run.sh, and curl can
+    // read the same value.
+    let api_token = resolve_api_token(args.api_token.clone())?;
+    let cors_origins: Vec<String> = args
+        .cors_origins
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     // Read model/provider config from args or env
     let provider = unquote(&std::env::var("LLM_PROVIDER").unwrap_or(args.provider));
     let base_url = unquote(&std::env::var("LLM_BASE_URL").unwrap_or(args.base_url));
     let model_name =
         unquote(&std::env::var("LLM_MODEL").unwrap_or_else(|_| format!("{}-chat", provider)));
-    let model_display = unquote(
-        &std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone()),
-    );
+    let model_display =
+        unquote(&std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone()));
 
     // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
-    // Missing file (or no override) means a single default zed agent.
+    // Missing file (or no override) means a single default telos agent.
     let config_path = std::env::var("ACTUS_CONFIG")
         .ok()
         .map(PathBuf::from)
@@ -171,27 +243,37 @@ async fn main() -> anyhow::Result<()> {
 
     // Launch every configured agent and register it in the fabric.
     let mut registry = AgentRegistry::new();
-    let mut children: Vec<tokio::process::Child> = Vec::new();
+    let mut children: Vec<std::process::Child> = Vec::new();
     // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
-    let mut monitors: Vec<(Arc<RwLock<ZedManager>>, WsCommandTx)> = Vec::new();
-    // Per-agent user data dirs stay alive for the process lifetime; Zed
+    let mut monitors: Vec<(Arc<RwLock<TelosManager>>, WsCommandTx)> = Vec::new();
+    // Per-agent user data dirs stay alive for the process lifetime; Telos
     // reads settings at startup and watches them while running.
     let mut _user_data_dirs: Vec<tempfile::TempDir> = Vec::new();
 
-    let default_name = if specs.iter().any(|s| s.name == "zed") {
-        "zed".to_string()
-    } else {
-        specs[0].name.clone()
-    };
+    // The first configured agent is the fabric default.
+    let default_name = specs[0].name.clone();
 
     for spec in &specs {
         match spec.kind {
-            AgentKind::Zed => {
+            AgentKind::Telos => {
+                let api_key = spec.api_key.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "agent '{}': LLM API key required (LLM_API_KEY or --api-key)",
+                        spec.name
+                    )
+                })?;
+                if !spec.bin.exists() {
+                    return Err(anyhow::anyhow!(
+                        "agent '{}': telos binary not found at {}",
+                        spec.name,
+                        spec.bin.display()
+                    ));
+                }
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
-                ensure_zed_settings(
+                ensure_telos_settings(
                     user_data_dir.path(),
-                    &spec.api_key,
+                    Some(api_key),
                     &spec.provider,
                     &spec.base_url,
                     &spec.model,
@@ -205,7 +287,7 @@ async fn main() -> anyhow::Result<()> {
                     spec.name,
                     &uuid::Uuid::new_v4().to_string()[..8]
                 );
-                let manager = Arc::new(RwLock::new(ZedManager::new(
+                let manager = Arc::new(RwLock::new(TelosManager::new(
                     session_id.clone(),
                     ws_host.clone(),
                     &threads_dir,
@@ -213,7 +295,7 @@ async fn main() -> anyhow::Result<()> {
                 let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
                 monitors.push((manager.clone(), ws_tx.clone()));
 
-                // Per-agent WebSocket server (Zed connects back here).
+                // Per-agent WebSocket server (Telos connects back here).
                 tokio::spawn({
                     let host = ws_host.clone();
                     let mgr = manager.clone();
@@ -224,15 +306,18 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 });
+                // Debounced thread persistence (see TelosManager::save_threads).
+                TelosManager::spawn_thread_saver(manager.clone());
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-                let child = launch_zed(
+                let child = launch_telos(
                     &spec.bin,
                     &workdir,
                     user_data_dir.path(),
                     &session_id,
                     &ws_host,
                     spec.tool_approval.as_str(),
+                    &threads_dir.join("telos.log"),
                 )
                 .await?;
                 _user_data_dirs.push(user_data_dir);
@@ -245,17 +330,24 @@ async fn main() -> anyhow::Result<()> {
                 );
                 children.push(child);
 
-                let backend = Arc::new(ZedBackend {
+                let backend = Arc::new(TelosBackend {
                     manager: manager.clone(),
                     ws_tx: ws_tx.clone(),
                 });
                 registry.register(backend, spec.name == default_name);
             }
-            AgentKind::LangGraph | AgentKind::Native => {
+            AgentKind::Native => {
+                let backend = Arc::new(NativeAgent::new(spec.name.clone()));
+                registry.register(backend, spec.name == default_name);
+                tracing::info!(
+                    "Agent '{}' running (native reference adapter, in-process)",
+                    spec.name
+                );
+            }
+            AgentKind::LangGraph => {
                 tracing::warn!(
-                    "Agent '{}': kind {:?} has no adapter yet, skipping",
-                    spec.name,
-                    spec.kind
+                    "Agent '{}': kind langgraph has no adapter yet, skipping",
+                    spec.name
                 );
             }
         }
@@ -271,12 +363,16 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("  Threads:    {}", threads_root.display());
 
     // Build app state and start HTTP server
-    let state = Arc::new(AppState::new(registry, workdir.clone()));
+    let state = Arc::new(AppState::new(
+        registry,
+        workdir.clone(),
+        Some(api_token.clone()),
+    ));
 
     let http_server = tokio::spawn({
         let state = state.clone();
         let addr = format!("127.0.0.1:{}", args.http_port);
-        async move { run_http_server(&addr, state).await }
+        async move { run_http_server(&addr, state, cors_origins).await }
     });
 
     // Resolve CLI path (terminal.py) — skip if --server-only
@@ -284,15 +380,15 @@ async fn main() -> anyhow::Result<()> {
         None
     } else {
         args.cli.or_else(|| {
-        // Auto-detect relative to binary or CWD
-        let candidates = vec![
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.join("terminal.py"))),
-            Some(PathBuf::from("terminal.py")),
-        ];
-        candidates.into_iter().flatten().find(|p| p.exists())
-    })
+            // Auto-detect relative to binary or CWD
+            let candidates = vec![
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|p| p.join("terminal.py"))),
+                Some(PathBuf::from("terminal.py")),
+            ];
+            candidates.into_iter().flatten().find(|p| p.exists())
+        })
     };
 
     // Wait for the default agent to be ready before starting the CLI.
@@ -320,12 +416,12 @@ async fn main() -> anyhow::Result<()> {
         let monitors = monitors.clone();
 
         tokio::spawn(async move {
-            let mut sigterm = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            ).expect("Failed to register SIGTERM handler");
-            let mut sigint = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::interrupt(),
-            ).expect("Failed to register SIGINT handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("Failed to register SIGINT handler");
 
             tokio::select! {
                 _ = sigterm.recv() => {}
@@ -342,7 +438,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 {
                     let g = mgr.read().await;
-                    g.save_threads();
+                    g.flush_threads();
                 }
             }
 
@@ -373,7 +469,7 @@ async fn main() -> anyhow::Result<()> {
                     let (connected, elapsed, active_turn) = {
                         let g = mgr.read().await;
                         (
-                            g.zed_connected,
+                            g.telos_connected,
                             g.last_sse_event_time.elapsed(),
                             !g.pending_chat_queue.is_empty(),
                         )
@@ -384,13 +480,13 @@ async fn main() -> anyhow::Result<()> {
                             "Health monitor: no events for {}s during an active turn, forcing reconnection",
                             elapsed.as_secs()
                         );
-                        // Force reconnection: clear zed_connected and the
+                        // Force reconnection: clear telos_connected and the
                         // shared command channel. The WS read loop's
                         // periodic check breaks, and the connection loop
-                        // accepts a new connection (Zed auto-reconnects).
+                        // accepts a new connection (Telos auto-reconnects).
                         {
                             let mut g = mgr.write().await;
-                            g.zed_connected = false;
+                            g.telos_connected = false;
                         }
                         {
                             let mut guard = ws_tx.lock().await;
@@ -408,6 +504,7 @@ async fn main() -> anyhow::Result<()> {
             .arg(&cli_path)
             .arg("--port")
             .arg(args.http_port.to_string())
+            .env("ACTUS_API_TOKEN", &api_token)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -418,7 +515,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             r = http_server => {
                 cli.kill().await.ok();
-                for c in children.iter_mut() { c.kill().await.ok(); }
+                for c in children.iter_mut() { c.kill().ok(); }
                 r.unwrap()?
             },
             result = cli.wait() => {
@@ -429,7 +526,7 @@ async fn main() -> anyhow::Result<()> {
             },
             _ = shutdown_rx => {
                 cli.kill().await.ok();
-                for c in children.iter_mut() { c.kill().await.ok(); }
+                for c in children.iter_mut() { c.kill().ok(); }
                 tracing::info!("Shutdown complete");
             },
         }
@@ -438,11 +535,11 @@ async fn main() -> anyhow::Result<()> {
         // Wait for servers or shutdown signal
         tokio::select! {
             r = http_server => {
-                for c in children.iter_mut() { c.kill().await.ok(); }
+                for c in children.iter_mut() { c.kill().ok(); }
                 r.unwrap()?
             },
             _ = shutdown_rx => {
-                for c in children.iter_mut() { c.kill().await.ok(); }
+                for c in children.iter_mut() { c.kill().ok(); }
                 tracing::info!("Shutdown complete");
             },
         }

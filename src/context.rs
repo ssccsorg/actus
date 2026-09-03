@@ -1,6 +1,6 @@
 // Context mention sources for the `@` mention feature.
 //
-// Zed's mention picker offers files, symbols, threads, rules, and fetch as
+// Telos's mention picker offers files, symbols, threads, rules, and fetch as
 // prompt-injection context. This module implements the server-side sources
 // that do not need a language server: definition-pattern symbol search and
 // project rule file discovery.
@@ -118,7 +118,7 @@ pub fn find_rules(workdir: &Path) -> Vec<RuleFile> {
     let mut walk = ignore::WalkBuilder::new(workdir);
     walk.standard_filters(true);
     // Rules conventionally live in hidden directories (.github, .cursor,
-    // .zed), so hidden entries must be searched; .git is pruned.
+    // .telos), so hidden entries must be searched; .git is pruned.
     walk.hidden(false);
     walk.require_git(false);
     walk.filter_entry(|e| e.file_name() != std::ffi::OsStr::new(".git"));

@@ -1,13 +1,13 @@
 // MCP coverage for the production six-server set (issue #7).
 //
-// Mirrors the servers configured in the user's Zed IDE:
+// Mirrors the servers configured in the user's Telos IDE:
 //   stdio: memory, sequentialthinking, filesystem, context7
 //   http:  cloudflare-api, mcp-server-github
 // Unit tests cover config parsing and settings injection; the scenario
 // test proves an injected stdio entry spawns a working MCP server.
 
 use actus::agent::config::{load_config, AgentDefaults, McpServer};
-use actus::zed::ensure_zed_settings;
+use actus::telos::ensure_telos_settings;
 use std::path::PathBuf;
 
 fn defaults() -> AgentDefaults {
@@ -16,8 +16,8 @@ fn defaults() -> AgentDefaults {
         model: "deepseek-chat".to_string(),
         model_display: "deepseek-chat".to_string(),
         base_url: "https://api.deepseek.com/v1".to_string(),
-        api_key: "sk-test".to_string(),
-        bin: PathBuf::from("/bin/zed"),
+        api_key: Some("sk-test".to_string()),
+        bin: PathBuf::from("/bin/telos"),
         ws_port: 8080,
     }
 }
@@ -25,7 +25,7 @@ fn defaults() -> AgentDefaults {
 /// The production six-server TOML, token redacted.
 const SIX_SERVER_TOML: &str = r#"
 [[agents]]
-name = "zed"
+name = "telos"
 ws_port = 8080
 
 [[agents.mcp]]
@@ -79,13 +79,19 @@ fn six_server_config_parses() {
     assert!(memory.args.iter().any(|a| a.contains("server-memory")));
 
     let seq = by_name("sequentialthinking");
-    assert!(seq.args.iter().any(|a| a.contains("server-sequential-thinking")));
+    assert!(seq
+        .args
+        .iter()
+        .any(|a| a.contains("server-sequential-thinking")));
 
     let fs = by_name("filesystem");
     assert!(fs.args.iter().any(|a| a == "./"));
 
     let ctx7 = by_name("context7");
-    assert_eq!(ctx7.env.get("DEFAULT_MINIMUM_TOKENS").map(String::as_str), Some(""));
+    assert_eq!(
+        ctx7.env.get("DEFAULT_MINIMUM_TOKENS").map(String::as_str),
+        Some("")
+    );
 
     // http servers
     let cf = by_name("cloudflare-api");
@@ -93,7 +99,10 @@ fn six_server_config_parses() {
     assert!(cf.command.is_none());
 
     let gh = by_name("mcp-server-github");
-    assert_eq!(gh.url.as_deref(), Some("https://api.githubcopilot.com/mcp/"));
+    assert_eq!(
+        gh.url.as_deref(),
+        Some("https://api.githubcopilot.com/mcp/")
+    );
     assert_eq!(
         gh.headers.get("Authorization").map(String::as_str),
         Some("Bearer <PAT>")
@@ -110,9 +119,9 @@ fn six_server_settings_injection_schema() {
         std::fs::write(&cfg, SIX_SERVER_TOML).unwrap();
         load_config(Some(&cfg), &defaults()).unwrap()
     };
-    ensure_zed_settings(
+    ensure_telos_settings(
         data_dir,
-        "sk-test",
+        Some("sk-test"),
         "deepseek",
         "https://api.deepseek.com/v1",
         "deepseek-chat",
@@ -121,10 +130,15 @@ fn six_server_settings_injection_schema() {
     )
     .unwrap();
 
-    let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config/settings.json")).unwrap())
-            .unwrap();
-    let servers = settings.get("context_servers").unwrap().as_object().unwrap();
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(data_dir.join("config/settings.json")).unwrap(),
+    )
+    .unwrap();
+    let servers = settings
+        .get("context_servers")
+        .unwrap()
+        .as_object()
+        .unwrap();
     assert_eq!(servers.len(), 6);
 
     // stdio entries carry command/args; context7 also carries env
@@ -168,7 +182,11 @@ for line in sys.stdin:
     sys.stdout.flush()
 "#;
 
-fn mcp_rpc(server: &mut std::process::Child, method: &str, params: Option<serde_json::Value>) -> serde_json::Value {
+fn mcp_rpc(
+    server: &mut std::process::Child,
+    method: &str,
+    params: Option<serde_json::Value>,
+) -> serde_json::Value {
     use std::io::{BufRead, Write};
     let stdin = server.stdin.as_mut().unwrap();
     let stdout = server.stdout.as_mut().unwrap();
@@ -190,7 +208,11 @@ fn mcp_rpc(server: &mut std::process::Child, method: &str, params: Option<serde_
 #[test]
 fn scenario_injected_stdio_server_is_spawnable() {
     // A python3 interpreter is required for the scenario.
-    if std::process::Command::new("python3").arg("--version").output().is_err() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         eprintln!("skipping: python3 not available");
         return;
     }
@@ -209,9 +231,9 @@ fn scenario_injected_stdio_server_is_spawnable() {
         headers: Default::default(),
         timeout: None,
     }];
-    ensure_zed_settings(
+    ensure_telos_settings(
         dir.path(),
-        "sk-test",
+        Some("sk-test"),
         "deepseek",
         "https://api.deepseek.com/v1",
         "deepseek-chat",
@@ -248,7 +270,11 @@ fn scenario_injected_stdio_server_is_spawnable() {
     let tools = mcp_rpc(&mut server, "tools/list", None);
     assert_eq!(tools["result"]["tools"][0]["name"], "echo");
 
-    let call = mcp_rpc(&mut server, "tools/call", Some(serde_json::json!({"name": "echo", "arguments": {}})));
+    let call = mcp_rpc(
+        &mut server,
+        "tools/call",
+        Some(serde_json::json!({"name": "echo", "arguments": {}})),
+    );
     assert_eq!(call["result"]["content"][0]["text"], "pong");
 
     server.kill().ok();

@@ -1,18 +1,14 @@
 #![allow(dead_code)]
 
-// Protocol types for Zed headless communication.
+// Protocol types for the actus-telos WebSocket contract.
 //
-// Ported from helixml/zed's external_websocket_sync crate (types.rs)
-// with only the types actually needed by actus. The original crate
-// contained HTTP server types, MCP config, thread summaries, etc.
-// that are not relevant for a headless server that manages its own
-// lifecycle and thread state.
-//
-// See helix/crates/external_websocket_sync/src/types.rs for reference.
+// The wire shapes mirror the sync events exchanged with the telos agent.
+// Only the types actus actually needs are kept; the upstream crate that
+// defines the full protocol lives in the telos repository.
 
 use serde::{Deserialize, Serialize};
 
-/// Outgoing WebSocket message from Zed to actus.
+/// Outgoing WebSocket message from Telos to actus.
 /// Matches the API's SyncMessage format: { event_type, data }.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutgoingMessage {
@@ -20,19 +16,19 @@ pub struct OutgoingMessage {
     pub data: serde_json::Value,
 }
 
-/// Events that Zed sends to actus via WebSocket.
-/// Per WEBSOCKET_PROTOCOL_SPEC — Zed is stateless and only knows
+/// Events that Telos sends to actus via WebSocket.
+/// Per WEBSOCKET_PROTOCOL_SPEC — Telos is stateless and only knows
 /// about acp_thread_id.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "data")]
 pub enum SyncEvent {
-    /// Sent when Zed creates a new ACP thread in response to a chat_message.
+    /// Sent when Telos creates a new ACP thread in response to a chat_message.
     #[serde(rename = "thread_created")]
     ThreadCreated {
         acp_thread_id: String,
         request_id: String,
     },
-    /// Sent when thread title changes in Zed.
+    /// Sent when thread title changes in Telos.
     #[serde(rename = "thread_title_changed")]
     ThreadTitleChanged {
         acp_thread_id: String,
@@ -150,7 +146,7 @@ impl SyncEvent {
     }
 }
 
-/// Incoming command from actus to Zed.
+/// Incoming command from actus to Telos.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IncomingChatMessage {
     /// None = create new thread, Some(id) = use existing.

@@ -10,8 +10,8 @@ fn defaults() -> AgentDefaults {
         model: "deepseek-chat".to_string(),
         model_display: "deepseek-chat".to_string(),
         base_url: "https://api.deepseek.com/v1".to_string(),
-        api_key: "sk-test".to_string(),
-        bin: PathBuf::from("/bin/zed"),
+        api_key: Some("sk-test".to_string()),
+        bin: PathBuf::from("/bin/telos"),
         ws_port: 8080,
     }
 }
@@ -23,15 +23,15 @@ fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn no_file_yields_single_default_zed() {
+fn no_file_yields_single_default_telos() {
     let specs = load_config(None, &defaults()).unwrap();
     assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].name, "zed");
-    assert_eq!(specs[0].kind, AgentKind::Zed);
+    assert_eq!(specs[0].name, "telos");
+    assert_eq!(specs[0].kind, AgentKind::Telos);
     assert_eq!(specs[0].provider, "deepseek");
     assert_eq!(specs[0].model, "deepseek-chat");
-    assert_eq!(specs[0].api_key, "sk-test");
-    assert_eq!(specs[0].bin, PathBuf::from("/bin/zed"));
+    assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
+    assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
     assert_eq!(specs[0].ws_port, 8080);
     assert_eq!(specs[0].tool_approval, ToolApproval::Always);
 }
@@ -43,7 +43,7 @@ fn tool_approval_modes_parsed() {
         dir.path(),
         r#"
 [[agents]]
-name = "zed"
+name = "telos"
 tool_approval = "never"
 ws_port = 8080
 
@@ -65,7 +65,7 @@ fn toml_fills_missing_fields_from_defaults() {
         dir.path(),
         r#"
 [[agents]]
-name = "zed"
+name = "telos"
 ws_port = 8080
 
 [[agents]]
@@ -79,10 +79,10 @@ base_url = "https://api.anthropic.com/v1"
     let specs = load_config(Some(&path), &defaults()).unwrap();
     assert_eq!(specs.len(), 2);
 
-    // zed inherits everything from defaults
-    assert_eq!(specs[0].kind, AgentKind::Zed);
-    assert_eq!(specs[0].api_key, "sk-test");
-    assert_eq!(specs[0].bin, PathBuf::from("/bin/zed"));
+    // telos inherits everything from defaults
+    assert_eq!(specs[0].kind, AgentKind::Telos);
+    assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
+    assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
 
     // claude overrides provider/model/base_url, inherits api_key
     assert_eq!(specs[1].kind, AgentKind::LangGraph);
@@ -90,12 +90,12 @@ base_url = "https://api.anthropic.com/v1"
     assert_eq!(specs[1].model, "claude-sonnet-4");
     assert_eq!(specs[1].model_display, "claude-sonnet-4");
     assert_eq!(specs[1].base_url, "https://api.anthropic.com/v1");
-    assert_eq!(specs[1].api_key, "sk-test");
+    assert_eq!(specs[1].api_key.as_deref(), Some("sk-test"));
     assert_eq!(specs[1].ws_port, 8080);
 }
 
 #[test]
-fn duplicate_ports_rejected_for_zed_kind() {
+fn duplicate_ports_rejected_for_telos_kind() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(
         dir.path(),
@@ -120,10 +120,10 @@ fn duplicate_names_rejected() {
         dir.path(),
         r#"
 [[agents]]
-name = "zed"
+name = "telos"
 
 [[agents]]
-name = "zed"
+name = "telos"
 "#,
     );
     let err = load_config(Some(&path), &defaults()).unwrap_err();
@@ -153,7 +153,7 @@ fn mcp_servers_parsed_stdio_and_http() {
         dir.path(),
         r#"
 [[agents]]
-name = "zed"
+name = "telos"
 ws_port = 8080
 
 [[agents.mcp]]

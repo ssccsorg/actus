@@ -1,0 +1,26 @@
+# Local dev-only nested telos checkout; never part of the build context.
+# This directory holds a 1GB+ clone of the separate telos repository and
+# would otherwise be uploaded with every build.
+agents
+
+# Rust build output
+target
+
+# VCS and IDE noise
+.git
+.DS_Store
+*.swp
+
+# Secrets and local environments
+.env
+.env.local
+.env.*.local
+
+# Python caches
+__pycache__
+*.pyc
+
+# Not needed inside the image
+docs
+script
+.github

@@ -15,17 +15,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
-HELIX_DIR="$SCRIPT_DIR/helix"
 RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
-# Respect pre-configured ZED_BIN (e.g. CI sets ZED_BIN=/bin/true)
-if [ -z "${ZED_BIN:-}" ]; then
-    ACTUS_ARCH="$(uname -m)"
-    case "$ACTUS_ARCH" in
-        x86_64|amd64) ACTUS_ARCH="amd64" ;;
-        aarch64|arm64) ACTUS_ARCH="arm64" ;;
-    esac
-    ZED_BIN="$HELIX_DIR/.bin/helix-zed-headless-$ACTUS_ARCH"
+# Respect a pre-configured TELOS_BIN (e.g. CI sets TELOS_BIN=/bin/true);
+# default to the sibling telos build, the only agent binary actus runs.
+if [ -z "${TELOS_BIN:-}" ]; then
+    TELOS_BIN="$SCRIPT_DIR/../telos/target/telos-release/tel"
 fi
 SERVER_LOG="/tmp/actus-server.log"
 HTTP_PORT="${ACTUS_HTTP_PORT:-9090}"
@@ -47,8 +42,12 @@ warn() { echo -e "${WARN} $*" >&2; }
 step() { echo -e "\n${INFO} ${BOLD}$*${END}"; }
 
 cleanup() {
-    pkill -f "target/debug/" 2>/dev/null || true
-    pkill -f "helix-zed-headless" 2>/dev/null || true
+    # Kill only the processes this repo's flows spawn. Scoping to the
+    # explicit binary paths avoids clobbering sibling cargo builds whose
+    # rustc command lines also contain "target/debug".
+    pkill -f "$SCRIPT_DIR/target/debug/" 2>/dev/null || true
+    pkill -f "$SCRIPT_DIR/../telos/target/telos-release/" 2>/dev/null || true
+    pkill -f "$SCRIPT_DIR/runner.py" 2>/dev/null || true
     sleep 1
 }
 
@@ -97,19 +96,39 @@ test_static_shell() {
     fi
 }
 
+# ── API auth header ────────────────────────────────────────────────────
+
+# Bearer token for the authenticated endpoints. The Rust server persists
+# its effective token to ~/.actus/api_token at startup, so this stays in
+# sync even when runner.py started the server with a generated token.
+# /health is exempt from auth, so readiness probes work without it.
+AUTH_H=()
+
+setup_auth_header() {
+    local token="${ACTUS_API_TOKEN:-}"
+    if [ -z "$token" ] && [ -f "$HOME/.actus/api_token" ]; then
+        token="$(cat "$HOME/.actus/api_token")"
+    fi
+    if [ -n "$token" ]; then
+        AUTH_H=(-H "Authorization: Bearer $token")
+    else
+        AUTH_H=()
+    fi
+}
+
 # ── API endpoint tests (server required) ──────────────────────────────
 
 test_health() {
     step "Test: Health endpoint"
     local h
-    h=$(curl -s http://127.0.0.1:$HTTP_PORT/health 2>/dev/null || echo '{"status":"error"}')
+    h=$(curl -s --max-time 5 http://127.0.0.1:$HTTP_PORT/health 2>/dev/null || echo '{"status":"error"}')
     if echo "$h" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='ok' else 1)" 2>/dev/null; then
         pass "Server health: ok"
-        local zed agent threads
-        zed=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('zed_connected',False))")
+        local telos agent threads
+        telos=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('telos_connected',False))")
         agent=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('agent_ready',False))")
         threads=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('active_threads',0))")
-        pass "Zed connected: $zed"
+        pass "Telos connected: $telos"
         pass "Agent ready: $agent"
         pass "Active threads: $threads"
     else
@@ -120,7 +139,7 @@ test_health() {
 test_files() {
     step "Test: File search"
     local r
-    r=$(curl -s "http://127.0.0.1:$HTTP_PORT/v1/files?q=run.sh&max=3" 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" "http://127.0.0.1:$HTTP_PORT/v1/files?q=run.sh&max=3" 2>/dev/null)
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
     if [ "$count" -gt 0 ]; then
@@ -133,7 +152,7 @@ test_files() {
 test_file_mention() {
     step "Test: File mention"
     local r
-    r=$(curl -s "http://127.0.0.1:$HTTP_PORT/v1/files/mention?q=run.sh" 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" "http://127.0.0.1:$HTTP_PORT/v1/files/mention?q=run.sh" 2>/dev/null)
     local length
     length=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('mention','')))" 2>/dev/null || echo "0")
     if [ "$length" -gt 0 ]; then
@@ -146,7 +165,7 @@ test_file_mention() {
 test_threads() {
     step "Test: Thread listing"
     local r
-    r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/threads 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" http://127.0.0.1:$HTTP_PORT/v1/threads 2>/dev/null)
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('threads',[])))" 2>/dev/null || echo "0")
     pass "Threads: $count"
@@ -156,7 +175,7 @@ test_threads() {
     first_id=$(echo "$r" | python3 -c "import sys,json; ts=json.load(sys.stdin).get('threads',[]); print(ts[0]['id'] if ts else '')" 2>/dev/null)
     if [ -n "$first_id" ]; then
         local detail
-        detail=$(curl -s "http://127.0.0.1:$HTTP_PORT/v1/threads/$first_id" 2>/dev/null)
+        detail=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" "http://127.0.0.1:$HTTP_PORT/v1/threads/$first_id" 2>/dev/null)
         local has_id
         has_id=$(echo "$detail" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'id' in d else 1)" 2>/dev/null && echo "1" || echo "0")
         if [ "$has_id" = "1" ]; then
@@ -177,7 +196,7 @@ test_git_status() {
     # top-level ok flag. Retry briefly: the server may still be settling
     # when the first request arrives.
     for _ in 1 2 3 4 5; do
-        r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/git/status 2>/dev/null)
+        r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" http://127.0.0.1:$HTTP_PORT/v1/git/status 2>/dev/null)
         ok=$(echo "$r" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('ok') else 1)" 2>/dev/null && echo "1" || echo "0")
         [ "$ok" = "1" ] && break
         sleep 1
@@ -192,7 +211,7 @@ test_git_status() {
 test_git_log() {
     step "Test: Git log"
     local r
-    r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/git/log?max=3 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" http://127.0.0.1:$HTTP_PORT/v1/git/log?max=3 2>/dev/null)
     local count
     count=$(echo "$r" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('commits',[])))" 2>/dev/null || echo "0")
     if [ "$count" -gt 0 ]; then
@@ -205,7 +224,7 @@ test_git_log() {
 test_git_diff() {
     step "Test: Git diff"
     local r
-    r=$(curl -s http://127.0.0.1:$HTTP_PORT/v1/git/diff 2>/dev/null)
+    r=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" http://127.0.0.1:$HTTP_PORT/v1/git/diff 2>/dev/null)
     local ok
     ok=$(echo "$r" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'diff' in d or 'error' in d else 1)" 2>/dev/null && echo "1" || echo "0")
     if [ "$ok" = "1" ]; then
@@ -216,7 +235,13 @@ test_git_diff() {
 }
 
 test_llm_chat() {
-    step "Test: LLM chat (requires API key)"
+    step "Test: LLM chat round trip (opt-in)"
+    # Never spend LLM tokens from an automatic run. The round trip runs
+    # only when LLM_CHAT=1 is set explicitly on top of a real key.
+    if [ "${LLM_CHAT:-0}" != "1" ]; then
+        warn "Skipped: set LLM_CHAT=1 to run the live LLM round trip"
+        return 0
+    fi
     local api_key="${LLM_API_KEY:-}"
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
         api_key=$(grep -E '^LLM_API_KEY=' "$SCRIPT_DIR/.env" | head -1 | cut -d= -f2-)
@@ -227,42 +252,60 @@ test_llm_chat() {
     fi
 
     local r
-    r=$(curl -s -X POST http://127.0.0.1:$HTTP_PORT/v1/chat/async \
+    r=$(curl -s --max-time 10 -X POST http://127.0.0.1:$HTTP_PORT/v1/chat/async \
+        "${AUTH_H[@]+"${AUTH_H[@]}"}" \
         -H "Content-Type: application/json" \
         -d '{"message":"hello, respond with just ok","require_approval":false}' 2>/dev/null)
-    local task_id
+    local task_id thread_id
     task_id=$(echo "$r" | python3 -c "import sys,json; print(json.load(sys.stdin).get('task_id',''))" 2>/dev/null || echo "")
-    if [ -n "$task_id" ]; then
-        pass "Chat async returned task_id: ${task_id:0:12}..."
+    thread_id=$(echo "$r" | python3 -c "import sys,json; print(json.load(sys.stdin).get('thread_id',''))" 2>/dev/null || echo "")
+    if [ -n "$task_id" ] && [ -n "$thread_id" ]; then
+        pass "Chat async returned task_id: ${task_id:0:12}... thread: ${thread_id:0:12}..."
     else
-        warn "Chat async did not return task_id"
+        warn "Chat async did not return task_id/thread_id"
+        return 0
     fi
+
+    # Poll the thread until the turn completes. This verifies the full
+    # loop end to end: actus -> agent -> LLM -> completion. The timeout
+    # must be generous: a real provider turn routinely takes 10-60s.
+    local timeout="${LLM_CHAT_TIMEOUT:-90}"
+    local i
+    for i in $(seq 1 "$timeout"); do
+        local poll completed content
+        poll=$(curl -s --max-time 5 "${AUTH_H[@]+"${AUTH_H[@]}"}" "http://127.0.0.1:$HTTP_PORT/v1/threads/$thread_id/poll" 2>/dev/null || echo "")
+        completed=$(echo "$poll" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('completed') else 1)" 2>/dev/null && echo "1" || echo "0")
+        if [ "$completed" = "1" ]; then
+            content=$(echo "$poll" | python3 -c "import sys,json; print(json.load(sys.stdin).get('new_content','') or '')" 2>/dev/null || echo "")
+            if [ -n "$content" ]; then
+                pass "Turn completed after ${i}s: $(echo "$content" | head -c 60)..."
+            else
+                warn "Turn completed after ${i}s but content is empty"
+            fi
+            return 0
+        fi
+        sleep 1
+    done
+
+    warn "Chat did not complete within ${timeout}s (thread $thread_id)"
 }
 
 # ── Server start ──────────────────────────────────────────────────────
 
-ensure_zed_binary() {
-    if [ -f "$ZED_BIN" ]; then
-        pass "Zed binary: $ZED_BIN"
+ensure_telos_binary() {
+    if [ -f "$TELOS_BIN" ]; then
+        pass "Agent binary: $TELOS_BIN"
         return 0
     fi
-    info "Zed binary not found at $ZED_BIN"
-    if [ -f "$HELIX_DIR/build.sh" ]; then
-        info "Building Zed from source via helix/build.sh..."
-        bash "$HELIX_DIR/build.sh" --build-only --release || {
-            warn "Zed build failed — integration tests will be skipped"
-            return 1
-        }
-    else
-        warn "helix/build.sh not found — integration tests will be skipped"
-        return 1
-    fi
+    info "Agent binary not found at $TELOS_BIN"
+    warn "Build the sibling telos repo first (cargo build --profile telos-release -p telos), then retry. Agent integration tests are skipped until the binary exists."
+    return 1
 }
 
 start_server() {
     step "Starting Actus server via runner.py"
 
-    ensure_zed_binary
+    ensure_telos_binary
 
     local api_key="${LLM_API_KEY:-}"
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
@@ -278,8 +321,8 @@ start_server() {
         "--server-only"
     )
     [ -n "$api_key" ] && runner_args+=("--api-key" "$api_key")
-    if [ -f "$ZED_BIN" ]; then
-        runner_args+=("--bin" "$ZED_BIN")
+    if [ -f "$TELOS_BIN" ]; then
+        runner_args+=("--bin" "$TELOS_BIN")
     fi
 
     info "HTTP:  http://127.0.0.1:$HTTP_PORT"
@@ -293,18 +336,31 @@ start_server() {
     SERVER_PID=$!
     pass "Server started via runner.py (PID: $SERVER_PID)"
 
-    # Wait for HTTP server to be ready
-    for i in $(seq 1 15); do
+    # Wait for the HTTP server AND the agent to come up. The agent takes a
+    # few seconds to connect and report agent_ready (telos sends it ~5s
+    # after the WebSocket connects), so gating on a bare HTTP response
+    # would let the agent-dependent tests (health, chat) race the connect.
+    # Use --max-time so a stalled server fails the readiness loop instead
+    # of hanging the suite.
+    for i in $(seq 1 20); do
         sleep 1
-        if curl -s http://127.0.0.1:$HTTP_PORT/health >/dev/null 2>&1; then
-            pass "HTTP server ready after ${i}s"
+        local health
+        health=$(curl -s --max-time 2 http://127.0.0.1:$HTTP_PORT/health 2>/dev/null || echo '')
+        local ready
+        ready=$(echo "$health" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('telos_connected') and d.get('agent_ready') else 1)" 2>/dev/null && echo 1 || echo 0)
+        if [ "$ready" = "1" ]; then
+            pass "Server and agent ready after ${i}s"
             return 0
         fi
     done
 
-    warn "Server did not become ready within 15s"
+    warn "Server/agent did not become ready within 20s"
     tail -10 "$SERVER_LOG"
-    return 1
+    # Stub agents (/bin/true in CI) never connect. The suite continues
+    # with the server-only checks; agent-contract E2E runs against the
+    # fake backend in the telos CI workflow.
+    info "Agent not connected; running server-only integration checks"
+    return 0
 }
 
 # ── Test runner ───────────────────────────────────────────────────────
@@ -318,6 +374,7 @@ run_tests() {
 
     info "\n${BOLD}Integration tests${END}"
     start_server
+    setup_auth_header
     echo ""
     test_health
     test_files
@@ -331,6 +388,37 @@ run_tests() {
 
     echo ""
     info "${BOLD}All tests passed.${END}"
+}
+
+# ── Real-scenario tests ────────────────────────────────────────────────
+
+run_scenarios() {
+    local fake="${ACTUS_FAKE:-0}"
+    if [ "$fake" = "1" ]; then
+        info "${BOLD}Deterministic contract scenarios (fake backend, no LLM)${END}"
+        # The fake backend answers every prompt with a fixed string, so the
+        # scenario checks are reproducible without an API key.
+        export TELOS_FAKE_BACKEND=1
+        export ACTUS_FAKE=1
+        LLM_API_KEY=""
+        DEEPSEEK_API_KEY=""
+    else
+        info "${BOLD}Real-scenario tests (tool turns, concurrency, reconnect, soak)${END}"
+    fi
+    start_server
+    echo ""
+    local soak="${SOAK_MINUTES:-2}"
+    # -u: stream scenario progress unbuffered; the launcher redirects the
+    # output to a log, and buffered prints would hide a long-running
+    # scenario until it exits.
+    if ACTUS_HTTP_PORT="$HTTP_PORT" ACTUS_WS_PORT="$WS_PORT" \
+        TELOS_BIN="$TELOS_BIN" SOAK_MINUTES="$soak" \
+        python3 -u "$SCRIPT_DIR/tests/scenarios.py"; then
+        pass "Scenarios passed"
+    else
+        fail "Scenarios failed"
+    fi
+    cleanup
 }
 
 # ── Interactive CLI ───────────────────────────────────────────────────
@@ -354,12 +442,15 @@ Actus launcher and test suite
 Modes:
   (default)       Build, start server, then launch CLI
   --test          Run static checks and integration tests
+  --scenarios     Run deterministic contract scenarios (fake backend, no LLM)
+  --scenarios-llm Run live scenarios against the real LLM (opt-in, consumes API)
   --server-only   Start server only (background)
   --cli           CLI only (connect to already-running server)
   --help          Show this help
 
 Environment:
   LLM_API_KEY      Provider API key
+  LLM_CHAT         Set to 1 to run the live LLM chat round trip in --test
   LLM_PROVIDER     Provider name (default: deepseek)
   LLM_BASE_URL     API base URL
   LLM_MODEL        Model name
@@ -375,8 +466,19 @@ case "$MODE" in
     --test|-t)
         run_tests
         ;;
-    --server-only|-s)
-        ensure_zed_binary
+    --scenarios|-s)
+        # Deterministic by default: never spend LLM tokens unless the
+        # caller explicitly opts into the live tier with --scenarios-llm.
+        ACTUS_FAKE=1 run_scenarios
+        ;;
+    --scenarios-fake|-sf)
+        ACTUS_FAKE=1 run_scenarios
+        ;;
+    --scenarios-llm|-sl)
+        ACTUS_FAKE=0 run_scenarios
+        ;;
+    --server-only|-o)
+        ensure_telos_binary
         info "Starting server only via runner.py"
         python3 "$RUNNER" --server-only --workdir "$PROJECT_DIR" &
         SERVER_PID=$!
@@ -390,7 +492,7 @@ case "$MODE" in
         show_help
         ;;
     *)
-        ensure_zed_binary
+        ensure_telos_binary
         info "Building and starting Actus..."
         python3 "$RUNNER" --workdir "$PROJECT_DIR"
         ;;

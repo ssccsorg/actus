@@ -18,6 +18,7 @@ For production, run the Rust binary directly:
 
 import argparse
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -30,13 +31,8 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent  # actus/
 PROJECT_DIR = SCRIPT_DIR                        # actus/ = project root
 ACTUS_BIN = PROJECT_DIR / "target" / "debug" / "actus"
-import platform
-_arch = platform.machine().lower()
-if _arch in ("x86_64", "amd64"):
-    _arch = "amd64"
-elif _arch in ("aarch64", "arm64"):
-    _arch = "arm64"
-ZED_BIN = SCRIPT_DIR / "helix" / ".bin" / f"helix-zed-headless-{_arch}"
+# Default agent binary: the sibling telos repo's release build.
+TELOS_BIN = PROJECT_DIR.parent / "telos" / "target" / "telos-release" / "tel"
 TERMINAL = SCRIPT_DIR / "terminal.py"
 
 
@@ -75,14 +71,16 @@ def build_rust_cmd(bin_path: Path, args: argparse.Namespace) -> list[str]:
     ]
     if args.bin:
         cmd += ["--bin", args.bin]
-    elif ZED_BIN.exists():
-        cmd += ["--bin", str(ZED_BIN)]
+    elif TELOS_BIN.exists():
+        cmd += ["--bin", str(TELOS_BIN)]
     if args.api_key:
         cmd += ["--api-key", args.api_key]
     if args.provider:
         cmd += ["--provider", args.provider]
     if args.base_url:
         cmd += ["--base-url", args.base_url]
+    if args.api_token:
+        cmd += ["--api-token", args.api_token]
     return cmd
 
 
@@ -93,13 +91,14 @@ def main():
     parser.add_argument("--workdir", default=os.getcwd(), help="Working directory")
     parser.add_argument("--http-port", type=int, default=int(os.environ.get("ACTUS_HTTP_PORT", "9090")), help="HTTP API port")
     parser.add_argument("--ws-port", type=int, default=int(os.environ.get("ACTUS_WS_PORT", "8080")), help="WebSocket port")
-    parser.add_argument("--bin", help="Zed headless binary path")
+    parser.add_argument("--bin", help="Telos binary path")
     parser.add_argument("--api-key", help="LLM API key")
     parser.add_argument("--provider", default=os.environ.get("LLM_PROVIDER", ""), help="LLM provider")
     parser.add_argument("--base-url", default=os.environ.get("LLM_BASE_URL", ""), help="LLM base URL")
     parser.add_argument("--server-only", action="store_true", help="Server only, no CLI")
     parser.add_argument("--build-only", action="store_true", help="Build Rust binary only and exit")
     parser.add_argument("--no-build", action="store_true", help="Skip build (use existing binary)")
+    parser.add_argument("--api-token", help="Bearer token for the HTTP API (default: ACTUS_API_TOKEN env, ~/.actus/api_token, or generated)")
     args = parser.parse_args()
 
     if args.build_only:
@@ -117,7 +116,7 @@ def main():
                 value = v.strip()
                 # Strip surrounding quotes so `KEY="value"` yields `value`,
                 # not `"value"`. A quoted LLM_MODEL leaks the quotes into
-                # Zed's settings.json and the model lookup fails, aborting
+                # Telos's settings.json and the model lookup fails, aborting
                 # every turn.
                 if (
                     len(value) >= 2
@@ -131,6 +130,19 @@ def main():
     api_key = args.api_key or os.environ.get("LLM_API_KEY", "")
     if not api_key:
         print(f"{C.YELLOW}Warning: No API key set. Set LLM_API_KEY.{C.END}")
+
+    # Resolve the API bearer token: CLI arg, env, token file, or generated.
+    # The Rust server persists its effective token to ~/.actus/api_token, so
+    # reading that file keeps this runner in sync with a server it did not
+    # start.
+    api_token = args.api_token or os.environ.get("ACTUS_API_TOKEN", "")
+    if not api_token:
+        token_file = Path.home() / ".actus" / "api_token"
+        if token_file.exists():
+            api_token = token_file.read_text().strip()
+    if not api_token:
+        api_token = secrets.token_urlsafe(32)
+    args.api_token = api_token
 
     # Build Rust binary
     if not args.no_build:
@@ -158,12 +170,12 @@ def main():
     # Signal handler for clean shutdown
     def shutdown(signum, frame):
         print(f"\n{C.YELLOW}Shutting down...{C.END}", file=sys.stderr)
-        server_proc.terminate()
-        try:
-            server_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        # Never call server_proc.wait() here: the main path may already be
+        # inside wait() holding _waitpid_lock, so a second wait() from the
+        # handler deadlocks and the SIGTERM is never acknowledged. Use a
+        # non-blocking poll and kill instead.
+        if server_proc.poll() is None:
             server_proc.kill()
-            server_proc.wait()
         log_file.close()
         print(f"{C.GREEN}Done.{C.END}", file=sys.stderr)
         sys.exit(0)
@@ -200,9 +212,11 @@ def main():
         if TERMINAL.exists():
             term_env = os.environ.copy()
             term_env["TERMINAL_PORT"] = str(args.http_port)
+            term_env["ACTUS_API_TOKEN"] = api_token
             term_proc = subprocess.Popen(
                 [sys.executable, str(TERMINAL), "--port", str(args.http_port)],
                 stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+                env=term_env,
             )
             try:
                 term_proc.wait()

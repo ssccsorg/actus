@@ -2,13 +2,15 @@
 
 use axum::response::sse::Event;
 use axum::{
-    Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::{Json, Sse},
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
+    response::{Json, Response, Sse},
     routing::{get, post},
+    Router,
 };
 use futures_util::stream::Stream;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -20,7 +22,7 @@ use crate::agent::{AgentBackend, AgentRegistry, AgentStatus};
 use crate::context;
 use crate::files;
 use crate::git;
-pub use crate::zed::WsCommandTx;
+pub use crate::telos::WsCommandTx;
 
 // ── App State ──────────────────────────────────────────────────────────
 
@@ -29,12 +31,62 @@ pub struct AppState {
     /// to the default agent.
     pub agents: AgentRegistry,
     pub workdir: PathBuf,
+    /// Bearer token required on every route except /health. None disables
+    /// authentication.
+    pub api_token: Option<String>,
 }
 
 impl AppState {
-    pub fn new(agents: AgentRegistry, workdir: PathBuf) -> Self {
-        Self { agents, workdir }
+    pub fn new(agents: AgentRegistry, workdir: PathBuf, api_token: Option<String>) -> Self {
+        Self {
+            agents,
+            workdir,
+            api_token,
+        }
     }
+}
+
+/// Bearer-token gate for every route except /health. Byte comparison is
+/// constant-time for equal-length tokens; a length mismatch returns
+/// immediately, so the length of a presented token is observable. Tokens
+/// are generated with a fixed length, so this leaks nothing useful.
+async fn require_auth(
+    State(state): State<SharedState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // Readiness probes (runner.py, run.sh) hit /health before a token is
+    // available; it exposes only connectivity booleans and agent names.
+    if req.uri().path() == "/health" {
+        return Ok(next.run(req).await);
+    }
+    let Some(token) = &state.api_token else {
+        return Ok(next.run(req).await);
+    };
+    let provided = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if !constant_time_eq(provided.as_bytes(), token.as_bytes()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(req).await)
+}
+
+/// Compare byte strings without early exit on a mismatching byte. Lengths
+/// are compared first; an equal-length comparison then runs in time
+/// proportional to the length regardless of content.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub type SharedState = Arc<AppState>;
@@ -64,7 +116,7 @@ async fn agent_for(
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
-    pub zed_connected: bool,
+    pub telos_connected: bool,
     pub agent_ready: bool,
     pub active_threads: usize,
     /// Per-agent runtime state from the execution fabric.
@@ -87,16 +139,6 @@ pub struct ChatResponse {
     pub task_id: String,
     pub status: String,
     pub thread_id: String,
-}
-
-#[derive(Serialize)]
-#[allow(dead_code)]
-pub struct TaskStatus {
-    pub id: String,
-    pub status: String,
-    pub thread_id: String,
-    pub message: String,
-    pub created_at: String,
 }
 
 #[derive(Serialize)]
@@ -130,7 +172,7 @@ pub struct AgentQuery {
 
 async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
     let agents = state.agents.statuses().await;
-    let (zed_connected, agent_ready, active_threads) = match state.agents.default_agent() {
+    let (telos_connected, agent_ready, active_threads) = match state.agents.default_agent() {
         Some(agent) => {
             let status = agent.status().await;
             let threads = agent.threads().await.len();
@@ -140,7 +182,7 @@ async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
     };
     Json(HealthResponse {
         status: "ok".to_string(),
-        zed_connected,
+        telos_connected,
         agent_ready,
         active_threads,
         agents,
@@ -196,7 +238,9 @@ async fn chat_stream(
 
     tracing::debug!(
         "chat_stream: SSE stream created for thread {} (turn_id={}, new={})",
-        tid, turn_id, is_new
+        tid,
+        turn_id,
+        is_new
     );
     let agent_stream = agent.clone();
     let stream = async_stream::stream! {
@@ -230,6 +274,9 @@ async fn chat_stream(
 
         let mut poll_count = 0u64;
         let start = std::time::Instant::now();
+        // Emit a ping event after long periods of silence so intermediaries
+        // do not drop the stream while the agent is thinking.
+        let mut last_emit = std::time::Instant::now();
         // Long turns (code review, multi-tool research) take minutes; the
         // stream ends on turn completion, so this is a stuck-agent safety
         // ceiling, not the expected path. 30 minutes matches the CLI poll.
@@ -300,6 +347,10 @@ async fn chat_stream(
                             "tool_name": tool_name,
                             "tool_status": tool_status,
                         })).unwrap()));
+                    last_emit = std::time::Instant::now();
+                } else if last_emit.elapsed() >= Duration::from_secs(15) {
+                    yield Ok(Event::default().event("ping").data("{}"));
+                    last_emit = std::time::Instant::now();
                 }
 
                 // Check completion: wait for the turn we started
@@ -442,7 +493,7 @@ pub struct PollResponse {
 /// Poll for new thread state.
 ///
 /// Alternative to SSE for clients that cannot maintain a persistent connection
-/// or when WebSocket events from Zed are unreliable. The client calls this
+/// or when WebSocket events from Telos are unreliable. The client calls this
 /// endpoint at regular intervals (e.g., every 500ms).
 ///
 /// The response serves the full content of the most recent assistant
@@ -459,7 +510,10 @@ async fn poll_thread(
     Query(query): Query<PollQuery>,
 ) -> Result<Json<PollResponse>, StatusCode> {
     let agent = agent_for(&state, query.agent.as_deref()).await?;
-    let thread = agent.thread(&thread_id).await.ok_or(StatusCode::NOT_FOUND)?;
+    let thread = agent
+        .thread(&thread_id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let known_turn = query.turn.unwrap_or(0);
 
@@ -468,11 +522,7 @@ async fn poll_thread(
     // turn produced several assistant messages (thinking, tool calls,
     // answer): the index landed on an arbitrary message from an earlier
     // turn, so the client saw stale content and never the actual answer.
-    let current = thread
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant");
+    let current = thread.messages.iter().rev().find(|m| m.role == "assistant");
 
     let completed = thread.turn_completed > known_turn;
     match current {
@@ -523,25 +573,24 @@ async fn search_files_handler(
     State(state): State<SharedState>,
     params: Query<FileQuery>,
 ) -> Json<FileSearchResponse> {
+    let max = if params.max > 0 { params.max } else { 100 };
     let opts = files::FileSearchOptions {
         query: params.q.clone().unwrap_or_default(),
         dir: params.dir.clone(),
-        max_results: params.max,
+        max_results: max,
         ..Default::default()
     };
-    let results = files::search_files(&state.workdir, &opts);
-    let max = if opts.max_results > 0 {
-        opts.max_results
-    } else {
-        100
-    };
-    let truncated = results.len() > max;
-    let files: Vec<_> = results.into_iter().take(max).collect();
-    let count = files.len();
+    // The tree walk is synchronous and can be slow on large workspaces;
+    // keep it off the async runtime.
+    let workdir = state.workdir.clone();
+    let result = tokio::task::spawn_blocking(move || files::search_files(&workdir, &opts))
+        .await
+        .unwrap_or_default(); // panicked walk: an empty list is a valid response
+    let count = result.files.len();
     Json(FileSearchResponse {
-        files,
+        files: result.files,
         count,
-        truncated,
+        truncated: result.truncated,
     })
 }
 
@@ -557,11 +606,14 @@ async fn mention_files_handler(
         max_results: 10,
         ..Default::default()
     };
-    let results = files::search_files(&state.workdir, &opts);
-    let mention = files::format_mention(&results, &query);
+    let workdir = state.workdir.clone();
+    let result = tokio::task::spawn_blocking(move || files::search_files(&workdir, &opts))
+        .await
+        .unwrap_or_default(); // panicked walk: an empty list is a valid response
+    let mention = files::format_mention(&result.files, &query);
     Json(serde_json::json!({
         "mention": mention,
-        "count": results.len(),
+        "count": result.files.len(),
     }))
 }
 
@@ -579,7 +631,12 @@ async fn search_symbols_handler(
     State(state): State<SharedState>,
     params: Query<SymbolQuery>,
 ) -> Json<serde_json::Value> {
-    let symbols = context::search_symbols(&state.workdir, &params.q, params.max.unwrap_or(20));
+    let workdir = state.workdir.clone();
+    let q = params.q.clone();
+    let max = params.max.unwrap_or(20);
+    let symbols = tokio::task::spawn_blocking(move || context::search_symbols(&workdir, &q, max))
+        .await
+        .unwrap_or_default(); // panicked walk: an empty list is a valid response
     Json(serde_json::json!({
         "symbols": symbols,
         "count": symbols.len(),
@@ -588,7 +645,10 @@ async fn search_symbols_handler(
 
 /// GET /v1/rules — project rule files (AGENTS.md, *.mdc) as mention context.
 async fn rules_handler(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let rules = context::find_rules(&state.workdir);
+    let workdir = state.workdir.clone();
+    let rules = tokio::task::spawn_blocking(move || context::find_rules(&workdir))
+        .await
+        .unwrap_or_default(); // panicked walk: an empty list is a valid response
     Json(serde_json::json!({
         "rules": rules,
         "count": rules.len(),
@@ -615,33 +675,126 @@ fn strip_html(s: &str) -> String {
     out
 }
 
-/// GET /v1/fetch?url= — fetch a URL and return its text for @ mention.
+/// Cap on fetched response bodies; the content is only used as mention
+/// context, so a multi-megabyte page is a waste of memory.
+const MAX_FETCH_BYTES: usize = 4 * 1024 * 1024;
+
+/// True when `ip` is loopback, private, link-local, or otherwise not a
+/// public address. Keeps /v1/fetch from reaching internal services.
+fn is_non_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_non_public_ip(std::net::IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
+/// Validate a fetch target and build a client with a timeout and no
+/// redirects. Redirects are disabled because a response could bounce to
+/// an internal address after the host check already passed.
+///
+/// The host check runs at resolution time and the connection re-resolves
+/// DNS, so a hostile resolver could swap the address between check and
+/// connect (DNS rebinding). This is accepted for a loopback-bound server
+/// whose fetch endpoint only adds mention context; treat the guard as
+/// defense in depth, not a general-purpose SSRF boundary.
+async fn fetch_client(url_str: &str) -> Result<(String, reqwest::Client), String> {
+    let parsed = reqwest::Url::parse(url_str).map_err(|e| format!("invalid url: {}", e))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err("url must use http or https".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| "url has no port".to_string())?;
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
+        return Err("url host must be a public address".to_string());
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => {
+            if is_non_public_ip(ip) {
+                return Err("url host must be a public address".to_string());
+            }
+        }
+        Err(_) => {
+            let addrs = tokio::net::lookup_host((host, port))
+                .await
+                .map_err(|e| format!("cannot resolve host: {}", e))?;
+            for addr in addrs {
+                if is_non_public_ip(addr.ip()) {
+                    return Err("url host resolves to a private address".to_string());
+                }
+            }
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok((parsed.to_string(), client))
+}
+
+/// GET /v1/fetch?url= — fetch a public URL and return its text for @ mention.
 async fn fetch_handler(Query(q): Query<FetchQuery>) -> Json<serde_json::Value> {
     let url = q.url.trim().to_string();
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": "url must start with http(s)://"
-        }));
+    if url.is_empty() {
+        return Json(serde_json::json!({"ok": false, "error": "url is required"}));
     }
-    match reqwest::get(&url).await {
+    let (url, client) = match fetch_client(&url).await {
+        Ok(v) => v,
+        Err(e) => return Json(serde_json::json!({"ok": false, "error": e})),
+    };
+    match client.get(&url).send().await {
         Ok(resp) => match resp.error_for_status() {
-            Ok(resp) => match resp.text().await {
-                Ok(text) => {
-                    let text = strip_html(&text);
-                    let content = if text.len() > 12_000 {
-                        let mut end = 12_000;
-                        while !text.is_char_boundary(end) {
-                            end -= 1;
+            Ok(resp) => {
+                let mut body: Vec<u8> = Vec::new();
+                let mut stream = resp.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(c) => {
+                            if body.len() + c.len() > MAX_FETCH_BYTES {
+                                return Json(serde_json::json!({
+                                    "ok": false,
+                                    "error": "response too large"
+                                }));
+                            }
+                            body.extend_from_slice(&c);
                         }
-                        format!("{}...", &text[..end])
-                    } else {
-                        text
-                    };
-                    Json(serde_json::json!({"ok": true, "url": url, "content": content}))
+                        Err(e) => {
+                            return Json(serde_json::json!({"ok": false, "error": e.to_string()}))
+                        }
+                    }
                 }
-                Err(e) => Json(serde_json::json!({"ok": false, "error": e.to_string()})),
-            },
+                let text = strip_html(&String::from_utf8_lossy(&body));
+                let content = if text.len() > 12_000 {
+                    let mut end = 12_000;
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &text[..end])
+                } else {
+                    text.to_string()
+                };
+                Json(serde_json::json!({"ok": true, "url": url, "content": content}))
+            }
             Err(e) => Json(serde_json::json!({"ok": false, "error": e.to_string()})),
         },
         Err(e) => Json(serde_json::json!({"ok": false, "error": e.to_string()})),
@@ -656,7 +809,9 @@ pub struct GitLogQuery {
     max: usize,
 }
 
-fn default_git_log_count() -> usize { 10 }
+fn default_git_log_count() -> usize {
+    10
+}
 
 #[derive(Deserialize)]
 pub struct GitDiffQuery {
@@ -665,13 +820,14 @@ pub struct GitDiffQuery {
 }
 
 /// GET /v1/git/status — git working tree status.
-async fn git_status(
-    State(state): State<SharedState>,
-) -> Json<serde_json::Value> {
-    match git::get_status(&state.workdir) {
-        Ok(Some(status)) => Json(serde_json::json!({"ok": true, "status": status})),
-        Ok(None) => Json(serde_json::json!({"ok": false, "error": "Not a git repository"})),
-        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+async fn git_status(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let workdir = state.workdir.clone();
+    let result = tokio::task::spawn_blocking(move || git::get_status(&workdir)).await;
+    match result {
+        Ok(Ok(Some(status))) => Json(serde_json::json!({"ok": true, "status": status})),
+        Ok(Ok(None)) => Json(serde_json::json!({"ok": false, "error": "Not a git repository"})),
+        Ok(Err(e)) => Json(serde_json::json!({"ok": false, "error": e})),
+        Err(_) => Json(serde_json::json!({"ok": false, "error": "git check interrupted"})),
     }
 }
 
@@ -680,10 +836,14 @@ async fn git_diff(
     State(state): State<SharedState>,
     params: Query<GitDiffQuery>,
 ) -> Json<serde_json::Value> {
-    match git::get_diff(&state.workdir, params.staged) {
-        Ok(Some(diff)) => Json(serde_json::json!({"ok": true, "diff": diff})),
-        Ok(None) => Json(serde_json::json!({"ok": false, "error": "Not a git repository"})),
-        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+    let workdir = state.workdir.clone();
+    let staged = params.staged;
+    let result = tokio::task::spawn_blocking(move || git::get_diff(&workdir, staged)).await;
+    match result {
+        Ok(Ok(Some(diff))) => Json(serde_json::json!({"ok": true, "diff": diff})),
+        Ok(Ok(None)) => Json(serde_json::json!({"ok": false, "error": "Not a git repository"})),
+        Ok(Err(e)) => Json(serde_json::json!({"ok": false, "error": e})),
+        Err(_) => Json(serde_json::json!({"ok": false, "error": "git diff interrupted"})),
     }
 }
 
@@ -692,10 +852,14 @@ async fn git_log(
     State(state): State<SharedState>,
     params: Query<GitLogQuery>,
 ) -> Json<serde_json::Value> {
-    match git::get_log(&state.workdir, params.max) {
-        Ok(Some(commits)) => Json(serde_json::json!({"ok": true, "commits": commits})),
-        Ok(None) => Json(serde_json::json!({"ok": false, "error": "Not a git repository"})),
-        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+    let workdir = state.workdir.clone();
+    let max = params.max;
+    let result = tokio::task::spawn_blocking(move || git::get_log(&workdir, max)).await;
+    match result {
+        Ok(Ok(Some(commits))) => Json(serde_json::json!({"ok": true, "commits": commits})),
+        Ok(Ok(None)) => Json(serde_json::json!({"ok": false, "error": "Not a git repository"})),
+        Ok(Err(e)) => Json(serde_json::json!({"ok": false, "error": e})),
+        Err(_) => Json(serde_json::json!({"ok": false, "error": "git log interrupted"})),
     }
 }
 
@@ -765,14 +929,26 @@ async fn cancel_turn(State(state): State<SharedState>) -> Json<serde_json::Value
 /// Build the axum router over the given state. Kept separate from
 /// `run_http_server` so integration tests can serve the same router on
 /// an ephemeral port without binding a fixed address.
-pub fn build_router(state: SharedState) -> Router {
-    Router::new()
+///
+/// `cors_origins` lists origins allowed to call the API from a browser.
+/// Empty means no CORS headers are sent, so browsers enforce same-origin
+/// and cross-origin reads are blocked. The CORS layer sits outside the
+/// auth middleware so preflight OPTIONS requests are answered before the
+/// token check runs.
+pub fn build_router(state: SharedState, cors_origins: &[String]) -> Router {
+    let router = Router::new()
         .route("/health", get(health))
         .route("/v1/chat", post(chat_stream))
         .route("/v1/chat/async", post(chat_async))
         .route("/v1/cancel", post(cancel_turn))
-        .route("/v1/agents/tool-calls/pending", get(pending_tool_calls_handler))
-        .route("/v1/agents/tool-calls/resolve", post(resolve_tool_call_handler))
+        .route(
+            "/v1/agents/tool-calls/pending",
+            get(pending_tool_calls_handler),
+        )
+        .route(
+            "/v1/agents/tool-calls/resolve",
+            post(resolve_tool_call_handler),
+        )
         .route("/v1/threads", get(list_threads))
         .route("/v1/threads", post(create_thread_handler))
         .route("/v1/threads/{thread_id}", get(get_thread))
@@ -785,12 +961,32 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/v1/git/status", get(git_status))
         .route("/v1/git/diff", get(git_diff))
         .route("/v1/git/log", get(git_log))
-        .layer(tower_http::cors::CorsLayer::permissive())
-        .with_state(state)
+        .with_state(state.clone());
+
+    let router = router.layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+    if cors_origins.is_empty() {
+        router
+    } else {
+        let origins: Vec<HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
+        router.layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(origins)
+                // The API only reads the bearer token and JSON bodies, so
+                // the preflight response is pinned to those plus OPTIONS.
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]),
+        )
+    }
 }
 
-pub async fn run_http_server(addr: &str, state: SharedState) -> anyhow::Result<()> {
-    let app = build_router(state);
+pub async fn run_http_server(
+    addr: &str,
+    state: SharedState,
+    cors_origins: Vec<String>,
+) -> anyhow::Result<()> {
+    let app = build_router(state, &cors_origins);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("HTTP API server listening on http://{}", addr);

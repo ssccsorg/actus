@@ -1,14 +1,14 @@
-// WebSocket control — server loop and event dispatch for Zed headless communication.
+// WebSocket control — server loop and event dispatch for Telos communication.
 //
-// Manages the WebSocket connection between actus (server) and the Zed headless
+// Manages the WebSocket connection between actus (server) and the Telos
 // process (client). The connection loop handles:
-// - Accepting incoming WS connections from Zed
-// - Forwarding commands (chat_message, cancel) from actus to Zed
-// - Receiving events (message_added, message_completed) from Zed
+// - Accepting incoming WS connections from Telos
+// - Forwarding commands (chat_message, cancel) from actus to Telos
+// - Receiving events (message_added, message_completed) from Telos
 // - Automatic reconnection when the WS drops
 //
-// This replaces helixml/zed's external_websocket_sync::websocket_sync module
-// with a simpler, single-runtime implementation.
+// This is the actus-side counterpart to the websocket_sync module the
+// telos binary vendors: a simpler, single-runtime implementation.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,23 +16,24 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::accept_async_with_config;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::server::WsCommandTx;
-use crate::zed::ZedManager;
+use crate::telos::TelosManager;
 
-/// Run the WebSocket server that accepts connections from the Zed headless process.
+/// Run the WebSocket server that accepts connections from the Telos process.
 ///
 /// Connection lifecycle:
 ///   1. Listen on ws_host
-///   2. Accept connection from Zed
+///   2. Accept connection from Telos
 ///   3. Set up send/receive channels
 ///   4. Process events until disconnect
-///   5. On disconnect, accept the next connection (Zed auto-reconnects)
+///   5. On disconnect, accept the next connection (Telos auto-reconnects)
 pub async fn run_ws_server(
     ws_host: &str,
-    zed_manager: Arc<RwLock<ZedManager>>,
+    telos_manager: Arc<RwLock<TelosManager>>,
     ws_tx: WsCommandTx,
 ) -> anyhow::Result<()> {
     let port = ws_host.split(':').nth(1).unwrap_or("8080");
@@ -45,19 +46,27 @@ pub async fn run_ws_server(
     // Connection loop: accept → read → disconnect → accept again
     loop {
         let (stream, peer) = listener.accept().await?;
-        tracing::info!("Zed connecting from {}", peer);
+        tracing::info!("Telos connecting from {}", peer);
 
-        let ws_stream = accept_async(stream).await?;
+        // The agent's tool results can be large (a broad find_path glob on a
+        // big workspace produced a 28MB message). The tungstenite default
+        // cap of 16MB kills the connection when exceeded, aborting the turn;
+        // raise the ceiling so large tool output flows instead of breaking
+        // the WebSocket.
+        let mut ws_config = WebSocketConfig::default();
+        ws_config.max_message_size = Some(256 * 1024 * 1024);
+        ws_config.max_frame_size = Some(256 * 1024 * 1024);
+        let ws_stream = accept_async_with_config(stream, Some(ws_config)).await?;
         let (mut write, mut read) = ws_stream.split();
 
         // Increment reconnect counter and mark connected
         {
-            let mut mgr = zed_manager.write().await;
+            let mut mgr = telos_manager.write().await;
             mgr.reconnect_count += 1;
-            mgr.zed_connected = true;
+            mgr.telos_connected = true;
             mgr.agent_ready = false;
             tracing::info!(
-                "Zed WebSocket connected (reconnect #{})",
+                "Telos WebSocket connected (reconnect #{})",
                 mgr.reconnect_count
             );
         }
@@ -69,18 +78,18 @@ pub async fn run_ws_server(
 
         // Register command sender
         {
-            let mut mgr = zed_manager.write().await;
+            let mut mgr = telos_manager.write().await;
             mgr.set_ws_tx(tx);
         }
         {
             let mut tx_guard = ws_tx.lock().await;
             *tx_guard = Some(tx_for_shared);
         }
-        tracing::info!("Zed WebSocket re-established");
+        tracing::info!("Telos WebSocket re-established");
 
         // Resend any pending messages from before the disconnect
         {
-            let mgr = zed_manager.read().await;
+            let mgr = telos_manager.read().await;
             for (rid, tid, cmd) in &mgr.pending_chat_queue {
                 tracing::info!(
                     "Resending pending message request_id={}, thread_id={}",
@@ -92,7 +101,7 @@ pub async fn run_ws_server(
         }
 
         // Clone for spawned tasks
-        let zed_manager_for_read = zed_manager.clone();
+        let telos_manager_for_read = telos_manager.clone();
         let _ws_tx_for_read = ws_tx.clone();
 
         // Write handle: forward commands from both normal and resend channels
@@ -118,19 +127,29 @@ pub async fn run_ws_server(
         // Read handle: process incoming events with periodic health check
         let read_handle = tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    msg = read.next() => {
-                        if !handle_ws_message(&zed_manager_for_read, msg).await {
-                            break;
-                        }
-                    },
-                    // Health check: break if zed_connect was cleared by the
+                // Pick the branch with select, but acquire the manager lock
+                // only AFTER the select resolves. Acquiring a tokio RwLock
+                // read guard inside a select arm risks the branch being
+                // cancelled mid-acquire (the ping arm wins while the read
+                // is pending), which can corrupt the semaphore permit count
+                // and stall every later reader forever.
+                let msg = tokio::select! {
+                    m = read.next() => Some(m),
+                    // Health check: break if telos_connect was cleared by the
                     // health monitor (forces reconnection loop iteration).
-                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                        if !zed_manager_for_read.read().await.zed_connected {
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => None,
+                };
+                match msg {
+                    Some(m) => {
+                        if !handle_ws_message(&telos_manager_for_read, m).await {
                             break;
                         }
-                    },
+                    }
+                    None => {
+                        if !telos_manager_for_read.read().await.telos_connected {
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -148,21 +167,21 @@ pub async fn run_ws_server(
     }
 }
 
-/// Process a single WebSocket message from Zed.
+/// Process a single WebSocket message from Telos.
 /// Returns false if the connection should be closed.
 async fn handle_ws_message(
-    zed_manager: &Arc<RwLock<ZedManager>>,
+    telos_manager: &Arc<RwLock<TelosManager>>,
     msg: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
 ) -> bool {
     match msg {
         Some(Ok(Message::Text(text))) => {
             tracing::debug!("WS recv ({} bytes): {}", text.len(), &text[..text.len().min(200)]);
-            handle_zed_event(zed_manager, &text).await;
+            handle_telos_event(telos_manager, &text).await;
             true
         }
         Some(Ok(Message::Binary(data))) => {
             if let Ok(text) = String::from_utf8(data.to_vec()) {
-                handle_zed_event(zed_manager, &text).await;
+                handle_telos_event(telos_manager, &text).await;
             } else {
                 tracing::warn!("Non-UTF-8 binary WS message ({} bytes)", data.len());
             }
@@ -170,18 +189,18 @@ async fn handle_ws_message(
         }
         Some(Ok(Message::Ping(_))) => true,
         Some(Ok(Message::Close(_))) => {
-            tracing::info!("Zed WebSocket closed");
-            zed_manager.write().await.zed_connected = false;
+            tracing::info!("Telos WebSocket closed");
+            telos_manager.write().await.telos_connected = false;
             false
         }
         Some(Err(e)) => {
             tracing::error!("WebSocket read error: {}", e);
-            zed_manager.write().await.zed_connected = false;
+            telos_manager.write().await.telos_connected = false;
             false
         }
         None => {
             tracing::info!("WebSocket stream ended");
-            zed_manager.write().await.zed_connected = false;
+            telos_manager.write().await.telos_connected = false;
             false
         }
         _ => true,
@@ -192,7 +211,7 @@ async fn handle_ws_message(
 ///
 /// Public so integration tests can drive the event loop directly without
 /// a WebSocket connection.
-pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str) {
+pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text: &str) {
     tracing::debug!("WS event: {}", &text[..text.len().min(200)]);
 
     let msg: serde_json::Value = match serde_json::from_str(text) {
@@ -213,7 +232,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
     // Ping only updates ping time; all others update SSE event time
     // so the monitor can detect stalled event flow.
     {
-        let mut mgr = zed_manager.write().await;
+        let mut mgr = telos_manager.write().await;
         if event_type == "ping" {
             mgr.last_ping_time = Instant::now();
         } else {
@@ -230,7 +249,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
     match event_type {
         "ping" => {}
         "agent_ready" => {
-            let mut mgr = zed_manager.write().await;
+            let mut mgr = telos_manager.write().await;
             mgr.agent_ready = true;
             tracing::info!(
                 "Agent ready ({})",
@@ -250,7 +269,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut mgr = zed_manager.write().await;
+            let mut mgr = telos_manager.write().await;
             tracing::info!("Thread created: {}", acp_id);
 
             // Map request_id → local thread_id, and acp_thread_id →
@@ -304,7 +323,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                 .and_then(|v| v.as_str())
                 .unwrap_or("assistant")
                 .to_string();
-            // Message ids are only unique within one ACP thread: Zed starts
+            // Message ids are only unique within one ACP thread: Telos starts
             // numbering from 1 again for each new thread, and a local actus
             // thread accumulates messages from several ACP threads over
             // its lifetime (each resume creates a fresh ACP thread). Scope
@@ -326,7 +345,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                 content.len()
             );
 
-            let mut mgr = zed_manager.write().await;
+            let mut mgr = telos_manager.write().await;
             // Write to the canonical local thread. The acp_id → local_id
             // mapping is established by thread_created (or rebuilt from
             // persisted threads), which always precedes message_added on
@@ -356,7 +375,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut mgr = zed_manager.write().await;
+            let mut mgr = telos_manager.write().await;
             // Consume the request mapping instead of deleting it: a
             // duplicate completion (interrupt race, wrapper replay) for
             // the same request_id finds the empty sentinel and is dropped,
@@ -425,7 +444,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut mgr = zed_manager.write().await;
+            let mut mgr = telos_manager.write().await;
             // Drop a duplicate error for an already-consumed request_id,
             // and record the turn so the poll/SSE index stays aligned. The
             // pending entry is consumed so a later message_completed for
@@ -472,7 +491,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                 .unwrap_or("")
                 .to_string();
             let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-            let mut mgr = zed_manager.write().await;
+            let mut mgr = telos_manager.write().await;
             // A cancelled turn never fires message_completed; consume the
             // pending entry so reconnection does not resend it, the health
             // monitor does not stall on it, and a later completion for the
@@ -530,7 +549,7 @@ pub async fn handle_zed_event(zed_manager: &Arc<RwLock<ZedManager>>, text: &str)
                 .and_then(|v| v.as_str())
                 .unwrap_or("?")
                 .to_string();
-            let mut mgr = zed_manager.write().await;
+            let mut mgr = telos_manager.write().await;
             mgr.pending_authorizations.insert(
                 tool_call_id.clone(),
                 crate::agent::PendingAuthorization {

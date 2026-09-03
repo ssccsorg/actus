@@ -2,8 +2,9 @@
 name = "actus"
 version = "0.1.0"
 edition = "2021"
-license = "BUSL-1.1"
+license = "Apache-2.0"
 description = "Agent execution runtime across a shared knowledge space"
+publish = false
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -17,13 +18,12 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 anyhow = "1.0.102"
 tempfile = "3.27.0"
 dirs = "6.0.0"
 clap = { version = "4", features = ["derive"] }
 async-stream = "0.3.6"
-tokio-stream = "0.1.18"
 walkdir = "2.5.0"
 ignore = "0.4.23"
 mime_guess = "2.0.5"

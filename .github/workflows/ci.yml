@@ -18,9 +18,10 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: Build image
+      - name: Build the test image
         run: |
           docker buildx build --load \
+            --target test \
             --cache-from type=gha,scope=shared-actus \
             --cache-to type=gha,mode=min,scope=shared-actus \
             -t actus:ci \
@@ -28,8 +29,16 @@ jobs:
 
       - name: Run tests
         run: |
+          # Mock-only policy: the agent is a stub (/bin/true) and the chat
+          # round trip is skipped (ci-skip key plus the LLM_CHAT gate), so
+          # CI never spends LLM tokens. The suite compiles and runs the Rust
+          # unit and integration tests (tests/*.rs) and exercises the HTTP
+          # endpoints; live runs require LLM_CHAT=1 and a real key locally.
+          # Contract E2E against the fake backend runs in the telos CI
+          # workflow.
           docker run --rm \
-            -e ZED_BIN=/bin/true \
+            -e TELOS_BIN=/bin/true \
             -e LLM_API_KEY=ci-skip \
             --entrypoint ./run.sh \
             actus:ci --test
+

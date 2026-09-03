@@ -1,14 +1,13 @@
 name: Publish actus Docker Image
 
+# Publishing is release-gated: actus is pre-1.0 and has shipped no release
+# yet, so ordinary main commits push nothing. Pushing a `v*` tag cuts a
+# versioned image (and refreshes `latest`); a manual dispatch publishes a
+# `:dev` snapshot for preflight without touching `latest`.
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "Dockerfile"
-      - "Cargo.*"
-      - "src/**"
-      - ".github/workflows/publish-actus-image.yml"
   workflow_dispatch:
+  push:
+    tags: ["v*"]
 
 concurrency:
   group: "actus-image"
@@ -19,7 +18,7 @@ env:
   IMAGE_NAME: ssccsorg/actus
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 jobs:
@@ -38,12 +37,25 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Derive image tags
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Version tag (for example v0.1.0): tag the image with the
+            # version and refresh latest.
+            echo "tags=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >>"$GITHUB_OUTPUT"
+          else
+            # Manual dispatch: a dev snapshot that never touches latest.
+            echo "tags=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev" >>"$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          target: runtime
+          tags: ${{ steps.meta.outputs.tags }}
           push: true
           cache-from: type=gha,scope=shared-actus
           cache-to: type=gha,mode=min,scope=shared-actus

@@ -1,36 +1,26 @@
 # Licensing Notice
 
-## Overview
-
-This project contains components under different licenses.
-
-### Actus (BUSL-1.1)
+## Actus
 
 The actus source code (`src/`, `*.py`, `run.sh`, `Cargo.toml`) is licensed
-under the Business Source License 1.1 (see `LICENSE`).
+under the Apache License 2.0 (see `LICENSE`).
 
 Copyright (c) 2026 SSCCS Foundation.
 
-### Helix / Zed (GPL)
+## Agent processes
 
-The `helix/subtree/` directory contains a fork of the
-[Zed Editor](https://github.com/helixml/zed), which is licensed under the
-GNU General Public License v3.0 (GPL-3.0), see `LICENSE.helix`.
+Actus executes agent processes that are built and distributed from their
+own repositories. This repository vendors no agent source code.
 
-The `helix/build.sh` script may clone, patch, and build this code. The
-resulting binary (`helix-zed-headless-*`) is GPL-licensed and is executed
-as a separate process — it is not linked into the actus binary.
+- `telos` (the default ACP/WebSocket agent adapter) is a separate project
+  that contains a independent core. When it is distributed, that component
+  is subject to the GNU General Public License version 3, and its source is
+  published by the telos project. Actus connects to it over a local
+  WebSocket only; actus code is not linked with it.
+- Other adapters, including the deterministic in-process `native`
+  reference adapter, run without any external agent binary.
 
-### Docker Images
+## Third-party code
 
-- **`base` target**: Contains only the actus binary (BUSL-1.1).
-- **`full` target**: Contains both actus binary (BUSL-1.1) and the
-  helix-zed-headless binary (GPL-3.0). This is an aggregate work.
-  Both licenses apply to their respective components.
-
-### Compliance
-
-For the `full` Docker image, GPL compliance requires:
-- Access to the Zed source: https://github.com/helixml/zed
-- This notice is included in the image at `/NOTICE.md`
-- No modification or linking of GPL code into BUSL code occurs
+Dependencies are declared in `Cargo.toml` and resolved by the normal Rust
+toolchain; their respective licenses apply.
