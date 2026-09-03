@@ -14,7 +14,7 @@ use tokio::sync::{Notify, RwLock};
 use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadSession,
 };
-use crate::telos::{WsCommandTx, TelosManager};
+use crate::telos::{TelosManager, WsCommandTx};
 
 /// One Telos agent instance behind the fabric interface.
 pub struct TelosBackend {
@@ -43,6 +43,7 @@ impl AgentBackend for TelosBackend {
             kind: self.kind(),
             connected: mgr.telos_connected,
             ready: mgr.agent_ready,
+            capabilities: self.kind().capabilities(),
         }
     }
 

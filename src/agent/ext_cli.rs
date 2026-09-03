@@ -127,6 +127,7 @@ impl AgentBackend for ExtCliAgent {
             kind: AgentKind::ExtCli,
             connected: present,
             ready: present,
+            capabilities: AgentKind::ExtCli.capabilities(),
         }
     }
 

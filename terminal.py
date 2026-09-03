@@ -49,6 +49,7 @@ import aiohttp
 # ── Globals ──────────────────────────────────────────────────────────────
 
 current_thread_id = None
+current_agent = None
 show_raw = False
 
 
@@ -107,9 +108,10 @@ class NexClient:
         except Exception:
             return None
 
-    async def get_thread(self, thread_id: str) -> dict | None:
+    async def get_thread(self, thread_id: str, agent: str | None = None) -> dict | None:
         try:
-            r = await self.client.get(f"/v1/threads/{thread_id}")
+            params = {"agent": agent} if agent else None
+            r = await self.client.get(f"/v1/threads/{thread_id}", params=params)
             if r.status_code == 404:
                 return None
             r.raise_for_status()
@@ -151,9 +153,10 @@ class NexClient:
         except Exception:
             return None
 
-    async def list_threads(self) -> list[dict] | None:
+    async def list_threads(self, agent: str | None = None) -> list[dict] | None:
         try:
-            r = await self.client.get("/v1/threads")
+            params = {"agent": agent} if agent else None
+            r = await self.client.get("/v1/threads", params=params)
             r.raise_for_status()
             data = r.json()
             if isinstance(data, dict):
@@ -216,10 +219,11 @@ class NexClient:
         except Exception:
             return None
 
-    async def create_thread(self) -> str | None:
+    async def create_thread(self, agent: str | None = None) -> str | None:
         """Create a fresh thread immediately (no message)."""
         try:
-            r = await self.client.post("/v1/threads")
+            params = {"agent": agent} if agent else None
+            r = await self.client.post("/v1/threads", params=params)
             r.raise_for_status()
             data = r.json()
             if isinstance(data, dict):
@@ -544,7 +548,7 @@ async def send_chat(client: NexClient, message: str):
     at 300ms intervals. This avoids the SSE streaming issues with the
     WebSocket event delivery from Telos.
     """
-    global current_thread_id, show_raw
+    global current_thread_id, show_raw, current_agent
 
     if not message:
         return
@@ -563,6 +567,8 @@ async def send_chat(client: NexClient, message: str):
     body = {"message": message}
     if current_thread_id:
         body["thread_id"] = current_thread_id
+    if current_agent:
+        body["agent"] = current_agent
 
     if show_raw:
         print(f"\n{C.DIM}[ASYNC REQ] {json.dumps(body)}{C.END}")
@@ -584,6 +590,7 @@ async def send_chat(client: NexClient, message: str):
             try:
                 async with session.get(
                     f"{client.base_url}/v1/threads/{current_thread_id}",
+                    params={"agent": current_agent} if current_agent else None,
                     headers=client.auth_headers(),
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as resp:
@@ -643,9 +650,12 @@ async def send_chat(client: NexClient, message: str):
     try:
         while waited < max_wait:
             try:
+                poll_params = {"since": content_len, "turn": known_turn}
+                if current_agent:
+                    poll_params["agent"] = current_agent
                 async with session.get(
                     f"{client.base_url}/v1/threads/{current_thread_id}/poll",
-                    params={"since": content_len, "turn": known_turn},
+                    params=poll_params,
                     headers=client.auth_headers(),
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as resp:
@@ -751,7 +761,7 @@ async def chat_session(client: NexClient) -> str | None:
 
     Returns "quit" to exit the program, "exit" to return to the thread
     selection screen, or None."""
-    global current_thread_id, show_raw, _chat_queue
+    global current_thread_id, show_raw, _chat_queue, current_agent
 
     while True:
         text = await _readline()
@@ -767,7 +777,7 @@ async def chat_session(client: NexClient) -> str | None:
             return "quit"
 
         elif text == "/new":
-            tid = await client.create_thread()
+            tid = await client.create_thread(agent=current_agent)
             if tid:
                 current_thread_id = tid
                 print(f"{C.CYAN}New thread created: {current_thread_id}{C.END}")
@@ -779,6 +789,54 @@ async def chat_session(client: NexClient) -> str | None:
                 print(f"Current thread: {C.CYAN}{current_thread_id}{C.END}")
             else:
                 print(f"{C.YELLOW}No current thread (a new one will be created){C.END}")
+
+        elif text == "/agents":
+            h = await client.health()
+            agents = (h or {}).get("agents") or []
+            if not agents:
+                print(f"{C.YELLOW}No agents registered.{C.END}")
+                continue
+            print(f"\n{C.BOLD}Agents (current: {current_agent or 'default'}):{C.END}")
+            for a in agents:
+                cap = a.get("capabilities", {}) or {}
+                marks = []
+                if cap.get("sessionful"):
+                    marks.append("session")
+                if cap.get("parallel"):
+                    marks.append("parallel")
+                if cap.get("streaming"):
+                    marks.append("stream")
+                if cap.get("tools"):
+                    marks.append("tools")
+                is_current = a.get("name") == current_agent or (
+                    current_agent is None and a is agents[0]
+                )
+                marker = f"{C.GREEN}▶{C.END}" if is_current else " "
+                print(
+                    f"  {marker} {str(a.get('name', '?')):<12} "
+                    f"{str(a.get('kind', '?')):<10} "
+                    f"{(','.join(marks) or '-'):<20} "
+                    f"ready={a.get('ready')} transport={cap.get('transport')}"
+                )
+            print()
+
+        elif text.startswith("/agent "):
+            name = text[7:].strip()
+            h = await client.health()
+            agents = (h or {}).get("agents") or []
+            found = next((a for a in agents if a.get("name") == name), None)
+            if found is None:
+                print(f"{C.YELLOW}No agent named '{name}'. Use /agents to list.{C.END}")
+                continue
+            current_agent = name
+            current_thread_id = None
+            cap = found.get("capabilities", {}) or {}
+            shape = "sessionful" if cap.get("sessionful") else "one-shot"
+            print(
+                f"{C.GREEN}✓{C.END} Agent set to '{name}' "
+                f"({found.get('kind')}, {shape}, transport {cap.get('transport')}). "
+                f"Thread context reset."
+            )
 
         elif text.startswith("/switch "):
             arg = text[8:].strip()
@@ -793,7 +851,7 @@ async def chat_session(client: NexClient) -> str | None:
                 except ValueError:
                     print(f"{C.RED}Invalid argument: {arg}. Use a thread ID or number.{C.END}")
                     continue
-                threads = await client.list_threads()
+                threads = await client.list_threads(agent=current_agent)
                 if not threads:
                     print(f"{C.YELLOW}No threads available.{C.END}")
                     continue
@@ -810,7 +868,7 @@ async def chat_session(client: NexClient) -> str | None:
             if target is None:
                 print(f"{C.RED}No thread ID specified.{C.END}")
                 continue
-            t = await client.get_thread(target)
+            t = await client.get_thread(target, agent=current_agent)
             if t is None:
                 print(f"{C.RED}Thread '{target}' not found.{C.END}")
             else:
@@ -864,7 +922,7 @@ async def chat_session(client: NexClient) -> str | None:
                 print()
 
         elif text == "/history":
-            threads = await client.list_threads()
+            threads = await client.list_threads(agent=current_agent)
             if threads is None:
                 print(f"{C.RED}✗{C.END} Failed to retrieve threads")
             elif not threads:
@@ -902,6 +960,8 @@ async def chat_session(client: NexClient) -> str | None:
             print("  /exit          - back to thread selection")
             print("  /quit          - exit the program")
             print("  /new           - create a new thread immediately")
+            print("  /agents        - list registered agents with capabilities")
+            print("  /agent <name>  - select the agent for this session")
             print("  /thread        - show current thread ID")
             print("  /switch <id>   - switch to a different thread")
             print("  /raw           - toggle raw JSON display")

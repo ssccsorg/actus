@@ -59,6 +59,64 @@ impl AgentKind {
     pub fn parse(s: &str) -> Option<AgentKind> {
         AgentKind::ALL.iter().find(|k| k.as_str() == s).copied()
     }
+
+    /// Declared capabilities for this kind. A full ACP agent (Telos) is
+    /// sessionful; a raw-CLI agent is a one-shot, parallel act.
+    pub fn capabilities(self) -> AgentCapabilities {
+        match self {
+            AgentKind::Telos => AgentCapabilities {
+                sessionful: true,
+                streaming: true,
+                tools: true,
+                approval: true,
+                parallel: false,
+                transport: "acp_ws",
+            },
+            AgentKind::LangGraph => AgentCapabilities {
+                sessionful: true,
+                streaming: true,
+                tools: true,
+                approval: false,
+                parallel: false,
+                transport: "rest_sse",
+            },
+            AgentKind::Native => AgentCapabilities {
+                sessionful: true,
+                streaming: false,
+                tools: false,
+                approval: false,
+                parallel: false,
+                transport: "inproc",
+            },
+            AgentKind::ExtCli => AgentCapabilities {
+                sessionful: false,
+                streaming: false,
+                tools: false,
+                approval: false,
+                parallel: true,
+                transport: "cli",
+            },
+        }
+    }
+}
+
+/// Declared capabilities of one agent backend. Upper layers (the CLI, a
+/// future kineTic orchestrator) read these to decide which agent fits a
+/// situation instead of assuming every agent is a full session.
+#[derive(Clone, Debug, Serialize)]
+pub struct AgentCapabilities {
+    /// Multi-turn conversation with resume (Telos, Native).
+    pub sessionful: bool,
+    /// Intermediate streaming events during a turn.
+    pub streaming: bool,
+    /// Tool calls exposed to the client.
+    pub tools: bool,
+    /// Tool approval surface.
+    pub approval: bool,
+    /// Concurrent turns on one instance (one-shot acts).
+    pub parallel: bool,
+    /// Transport used to drive the agent.
+    pub transport: &'static str,
 }
 
 /// Runtime state snapshot of one agent backend.
@@ -68,6 +126,7 @@ pub struct AgentStatus {
     pub kind: AgentKind,
     pub connected: bool,
     pub ready: bool,
+    pub capabilities: AgentCapabilities,
 }
 
 /// A tool-call authorization awaiting a human decision (ask mode).
