@@ -15,6 +15,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
+# Export local secrets/config from .env so the server and every child
+# process (telos, ext_cli workers) inherit them.
+if [ -f "$PROJECT_DIR/.env" ]; then
+    set -a
+    . "$PROJECT_DIR/.env"
+    set +a
+fi
 RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
 # Respect a pre-configured TELOS_BIN (e.g. CI sets TELOS_BIN=/bin/true);

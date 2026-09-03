@@ -178,7 +178,7 @@ impl AgentBackend for ExtCliAgent {
         let mut cmd = tokio::process::Command::new(&self.bin);
         cmd.args(&cmd_args)
             .current_dir(&self.workdir)
-            .envs(&self.env)
+            .envs(resolve_env(&self.env))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         if self.prompt_mode == PromptMode::Stdin {
@@ -334,4 +334,23 @@ async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(mut pipe: Option<R>) -> Vec<
         }
         None => Vec::new(),
     }
+}
+
+/// Resolve declared environment for the child. A value of the form
+/// `$NAME` is replaced by the server process environment variable NAME,
+/// so profiles can map credentials without duplicating secrets, for
+/// example `{ ANTE_API_KEY = \"$LLM_API_KEY\" }`. Other values pass
+/// through literally. Inherited environment is always kept.
+fn resolve_env(
+    declared: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let mut resolved = std::collections::HashMap::with_capacity(declared.len());
+    for (key, value) in declared {
+        if let Some(name) = value.strip_prefix('$') {
+            resolved.insert(key.clone(), std::env::var(name).unwrap_or_default());
+        } else {
+            resolved.insert(key.clone(), value.clone());
+        }
+    }
+    resolved
 }

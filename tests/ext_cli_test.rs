@@ -137,6 +137,38 @@ async fn ext_cli_runs_turns_in_parallel() {
 }
 
 #[tokio::test]
+async fn ext_cli_env_literal_and_passthrough() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake_bin(
+        dir.path(),
+        "env-cli",
+        "#!/bin/sh\necho \"lit=$MY_LIT pass=$MY_PASS\"\n",
+    );
+    std::env::set_var("EXTCLI_TEST_SOURCE", "from-server");
+    let env = HashMap::from([
+        ("MY_LIT".to_string(), "abc".to_string()),
+        ("MY_PASS".to_string(), "$EXTCLI_TEST_SOURCE".to_string()),
+    ]);
+    let agent = ExtCliAgent::new(
+        "aux",
+        bin,
+        Vec::new(),
+        env,
+        PromptMode::Arg,
+        30,
+        dir.path().to_path_buf(),
+    );
+    let receipt = agent.submit(None, "hi").await.unwrap();
+    let content = wait_for_assistant(&agent, &receipt.thread_id).await;
+    std::env::remove_var("EXTCLI_TEST_SOURCE");
+    assert!(content.contains("lit=abc"), "unexpected: {content}");
+    assert!(
+        content.contains("pass=from-server"),
+        "unexpected: {content}"
+    );
+}
+
+#[tokio::test]
 async fn ext_cli_failure_records_exit_diagnostics() {
     let dir = tempfile::tempdir().unwrap();
     let bin = fake_bin(
