@@ -253,4 +253,8 @@ knowledge and action.
 
 ## License
 
-BUSL-1.1
+Apache-2.0 (see `LICENSE`). Actus is the execution fabric; it
+launches and talks to agent processes over WebSocket. Agent binaries are
+separate projects with their own licenses and are not packaged with
+actus. The default telos adapter contains a Zed-derived core and is
+distributed under GPL-3.0 by the telos project when shipped.
