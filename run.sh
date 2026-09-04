@@ -365,7 +365,7 @@ start_server() {
     tail -10 "$SERVER_LOG"
     # Stub agents (/bin/true in CI) never connect. The suite continues
     # with the server-only checks; agent-contract E2E runs against the
-    # fake backend in the telos CI workflow.
+    # stub backend in the telos CI workflow.
     info "Agent not connected; running server-only integration checks"
     return 0
 }
@@ -400,13 +400,13 @@ run_tests() {
 # ── Real-scenario tests ────────────────────────────────────────────────
 
 run_scenarios() {
-    local fake="${ACTUS_FAKE:-0}"
-    if [ "$fake" = "1" ]; then
-        info "${BOLD}Deterministic contract scenarios (fake backend, no LLM)${END}"
-        # The fake backend answers every prompt with a fixed string, so the
+    local stub="${ACTUS_STUB:-0}"
+    if [ "$stub" = "1" ]; then
+        info "${BOLD}Deterministic contract scenarios (stub backend, no LLM)${END}"
+        # The stub backend answers every prompt with a fixed string, so the
         # scenario checks are reproducible without an API key.
-        export TELOS_FAKE_BACKEND=1
-        export ACTUS_FAKE=1
+        export TELOS_STUB_BACKEND=1
+        export ACTUS_STUB=1
         LLM_API_KEY=""
         DEEPSEEK_API_KEY=""
     else
@@ -449,7 +449,7 @@ Actus launcher and test suite
 Modes:
   (default)       Build, start server, then launch CLI
   --test          Run static checks and integration tests
-  --scenarios     Run deterministic contract scenarios (fake backend, no LLM)
+  --scenarios     Run deterministic contract scenarios (stub backend, no LLM)
   --scenarios-llm Run live scenarios against the real LLM (opt-in, consumes API)
   --server-only   Start server only (background)
   --cli           CLI only (connect to already-running server)
@@ -476,13 +476,13 @@ case "$MODE" in
     --scenarios|-s)
         # Deterministic by default: never spend LLM tokens unless the
         # caller explicitly opts into the live tier with --scenarios-llm.
-        ACTUS_FAKE=1 run_scenarios
+        ACTUS_STUB=1 run_scenarios
         ;;
-    --scenarios-fake|-sf)
-        ACTUS_FAKE=1 run_scenarios
+    --scenarios-stub|-sf)
+        ACTUS_STUB=1 run_scenarios
         ;;
     --scenarios-llm|-sl)
-        ACTUS_FAKE=0 run_scenarios
+        ACTUS_STUB=0 run_scenarios
         ;;
     --server-only|-o)
         ensure_telos_binary

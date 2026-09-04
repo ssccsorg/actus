@@ -31,11 +31,11 @@ TELOS_BIN = os.environ.get(
     "TELOS_BIN", "../telos/target/telos-release/tel"
 )
 SOAK_MINUTES = float(os.environ.get("SOAK_MINUTES", "2"))
-# Deterministic contract mode: the agent runs with TELOS_FAKE_BACKEND=1 and
+# Deterministic contract mode: the agent runs with TELOS_STUB_BACKEND=1 and
 # answers every prompt with a fixed string. No LLM API key is involved, so
 # the checks are reproducible in CI. LLM-intelligence checks are skipped.
-FAKE_MODE = os.environ.get("ACTUS_FAKE", "0") == "1"
-FAKE_RESPONSE = os.environ.get("TELOS_FAKE_RESPONSE", "OK")
+STUB_MODE = os.environ.get("ACTUS_STUB", "0") == "1"
+STUB_RESPONSE = os.environ.get("TELOS_STUB_RESPONSE", "OK")
 PASS = 0
 FAIL = 0
 
@@ -124,13 +124,13 @@ def assistant_content(thread):
     )
 
 
-def check_fake_response(thread):
-    """In fake mode the assistant answer must be exactly the fixed string."""
-    if not FAKE_MODE:
+def check_stub_response(thread):
+    """In stub mode the assistant answer must be exactly the fixed string."""
+    if not STUB_MODE:
         return True
     content = assistant_content(thread)
-    ok = FAKE_RESPONSE in content
-    check("assistant answer is the deterministic fake response", ok, content[:60])
+    ok = STUB_RESPONSE in content
+    check("assistant answer is the deterministic stub response", ok, content[:60])
     return ok
 
 
@@ -208,33 +208,33 @@ def scenario_feature_baseline():
     check("file-read turn accepted", bool(tid), str(tid)[:18] if tid else "")
     if tid:
         check("file-read turn completed", bool(poll_thread(tid, timeout=150)))
-        if not FAKE_MODE:
+        if not STUB_MODE:
             thread = get_thread(tid) or {}
             content = assistant_content(thread)
             check("answer contains the file content",
                   "usr/bin/env" in content or "bash" in content,
                   "first line quoted")
         else:
-            check_fake_response(get_thread(tid) or {})
+            check_stub_response(get_thread(tid) or {})
     tid2 = chat_async(
         "@run.sh is mentioned; summarize what this script does in one line"
     )
     check("mention-format turn accepted", bool(tid2), str(tid2)[:18] if tid2 else "")
     if tid2:
         check("mention-format turn completed", bool(poll_thread(tid2, timeout=150)))
-        if FAKE_MODE:
-            check_fake_response(get_thread(tid2) or {})
+        if STUB_MODE:
+            check_stub_response(get_thread(tid2) or {})
 
 
 def scenario_tool_turn():
     print("== S1: tool-driven turn")
-    if FAKE_MODE:
-        # The fake backend has no tools; the turn still completes with text.
+    if STUB_MODE:
+        # The stub backend has no tools; the turn still completes with text.
         tid = chat_async("list the files in this workspace")
         check("async accepted a tool prompt", bool(tid), str(tid)[:18] if tid else "")
         if tid:
             check("tool turn completed", bool(poll_thread(tid, timeout=180)))
-            check_fake_response(get_thread(tid) or {})
+            check_stub_response(get_thread(tid) or {})
         return
     tid = chat_async(
         "list the files in this workspace with your file tool, then summarize the count"
@@ -343,9 +343,9 @@ def scenario_multi_turn_resume():
     check("follow-up accepted on the same thread", bool(tid2))
     poll = poll_thread(tid, timeout=120) if tid2 else None
     check("follow-up turn completed", bool(poll))
-    if FAKE_MODE:
-        # The fake backend keeps no context; only resume behavior is checked.
-        check_fake_response(get_thread(tid) or {})
+    if STUB_MODE:
+        # The stub backend keeps no context; only resume behavior is checked.
+        check_stub_response(get_thread(tid) or {})
         return
     thread = get_thread(tid) or {}
     content = " ".join(
@@ -382,8 +382,8 @@ def ensure_agent():
 
 def scenario_fetch_and_subagent():
     print("== S7: url fetch + sub-agent execution")
-    if FAKE_MODE:
-        # The fake backend has no fetch or spawn_agent tools; skip.
+    if STUB_MODE:
+        # The stub backend has no fetch or spawn_agent tools; skip.
         print("    skipped in deterministic mode (LLM-only tools)")
         return
     tid = chat_async(
