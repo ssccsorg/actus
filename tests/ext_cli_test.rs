@@ -1,6 +1,6 @@
 // Integration tests for the raw-CLI agent adapter.
 //
-// A fake CLI script stands in for any binary: the adapter spawns
+// A stub CLI script stands in for any binary: the adapter spawns
 // `bin <args...> <prompt>` (or writes the prompt to stdin), inherits the
 // environment plus the declared `cli_env`, and records stdout. One test
 // mirrors the Ante profile (`cli_args = ["-p", "{prompt}"]`).
@@ -14,7 +14,7 @@ use actus::agent::config::PromptMode;
 use actus::agent::ext_cli::ExtCliAgent;
 use actus::agent::AgentBackend;
 
-fn fake_bin(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+fn stub_bin(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
@@ -54,7 +54,7 @@ async fn wait_for_assistant(agent: &ExtCliAgent, thread_id: &str) -> String {
 #[tokio::test]
 async fn ext_cli_appends_prompt_without_marker() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = fake_bin(dir.path(), "fake-cli", "#!/bin/sh\necho \"got: $*\"\n");
+    let bin = stub_bin(dir.path(), "stub-cli", "#!/bin/sh\necho \"got: $*\"\n");
     let agent = agent_with(dir.path(), bin, Vec::new());
 
     let receipt = agent.submit(None, "summarize src").await.unwrap();
@@ -74,7 +74,7 @@ async fn ext_cli_appends_prompt_without_marker() {
 async fn ext_cli_marker_profile_replaces_prompt() {
     // Mirrors the Ante profile: fixed flags plus a {prompt} marker.
     let dir = tempfile::tempdir().unwrap();
-    let bin = fake_bin(
+    let bin = stub_bin(
         dir.path(),
         "flag-cli",
         "#!/bin/sh\necho \"flag=$1 prompt=$2\"\n",
@@ -98,7 +98,7 @@ async fn ext_cli_marker_profile_replaces_prompt() {
 #[tokio::test]
 async fn ext_cli_stdin_mode_writes_prompt_to_stdin() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = fake_bin(dir.path(), "stdin-cli", "#!/bin/sh\ncat\n");
+    let bin = stub_bin(dir.path(), "stdin-cli", "#!/bin/sh\ncat\n");
     let agent = ExtCliAgent::new(
         "aux",
         bin,
@@ -118,7 +118,7 @@ async fn ext_cli_stdin_mode_writes_prompt_to_stdin() {
 #[tokio::test]
 async fn ext_cli_runs_turns_in_parallel() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = fake_bin(
+    let bin = stub_bin(
         dir.path(),
         "slow-cli",
         "#!/bin/sh\nsleep 0.2\necho \"done: $*\"\n",
@@ -139,7 +139,7 @@ async fn ext_cli_runs_turns_in_parallel() {
 #[tokio::test]
 async fn ext_cli_env_literal_and_passthrough() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = fake_bin(
+    let bin = stub_bin(
         dir.path(),
         "env-cli",
         "#!/bin/sh\necho \"lit=$MY_LIT pass=$MY_PASS\"\n",
@@ -171,7 +171,7 @@ async fn ext_cli_env_literal_and_passthrough() {
 #[tokio::test]
 async fn ext_cli_failure_records_exit_diagnostics() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = fake_bin(
+    let bin = stub_bin(
         dir.path(),
         "failing-cli",
         "#!/bin/sh\necho \"boom\" >&2\nexit 3\n",

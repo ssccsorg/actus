@@ -162,7 +162,7 @@ fn six_server_settings_injection_schema() {
 
 /// A minimal stdio MCP server used to prove injected configs spawn
 /// working servers without the fork binary.
-const FAKE_MCP_SERVER: &str = r#"
+const STUB_MCP_SERVER: &str = r#"
 import json, sys
 for line in sys.stdin:
     try:
@@ -171,7 +171,7 @@ for line in sys.stdin:
         continue
     method = req.get("method")
     if method == "initialize":
-        result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1.0"}}
+        result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "stub", "version": "1.0"}}
     elif method == "tools/list":
         result = {"tools": [{"name": "echo", "description": "echo", "inputSchema": {"type": "object", "properties": {}}}]}
     elif method == "tools/call":
@@ -218,12 +218,12 @@ fn scenario_injected_stdio_server_is_spawnable() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    let server_script = dir.path().join("fake_mcp.py");
-    std::fs::write(&server_script, FAKE_MCP_SERVER).unwrap();
+    let server_script = dir.path().join("stub_mcp.py");
+    std::fs::write(&server_script, STUB_MCP_SERVER).unwrap();
 
-    // Inject a stdio MCP entry pointing at the fake server.
+    // Inject a stdio MCP entry pointing at the stub server.
     let mcp = vec![McpServer {
-        name: "fake".to_string(),
+        name: "stub".to_string(),
         command: Some("python3".to_string()),
         args: vec![server_script.to_string_lossy().to_string()],
         env: Default::default(),
@@ -247,7 +247,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
         &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
     )
     .unwrap();
-    let entry = &settings["context_servers"]["fake"];
+    let entry = &settings["context_servers"]["stub"];
     let command = entry["command"].as_str().unwrap();
     let args: Vec<String> = entry["args"]
         .as_array()
@@ -265,7 +265,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
         .expect("injected command must spawn");
 
     let init = mcp_rpc(&mut server, "initialize", None);
-    assert_eq!(init["result"]["serverInfo"]["name"], "fake");
+    assert_eq!(init["result"]["serverInfo"]["name"], "stub");
 
     let tools = mcp_rpc(&mut server, "tools/list", None);
     assert_eq!(tools["result"]["tools"][0]["name"], "echo");
