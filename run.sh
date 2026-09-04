@@ -53,7 +53,11 @@ cleanup() {
     # explicit binary paths avoids clobbering sibling cargo builds whose
     # rustc command lines also contain "target/debug".
     pkill -f "$SCRIPT_DIR/target/debug/" 2>/dev/null || true
-    pkill -f "$SCRIPT_DIR/../telos/target/telos-release/" 2>/dev/null || true
+    # The scenario relauncher canonicalizes the sibling path (abspath), so
+    # the launch-time /../ form never matches its argv0. Match the release
+    # dir suffix directly to catch both the server-spawned and the
+    # scenario-relaunched agent.
+    pkill -f "target/telos-release/" 2>/dev/null || true
     pkill -f "$SCRIPT_DIR/runner.py" 2>/dev/null || true
     sleep 1
 }

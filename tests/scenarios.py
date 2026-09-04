@@ -138,7 +138,7 @@ def check_stub_response(thread):
 
 def find_agent_pid():
     out = subprocess.run(
-        ["pgrep", "-f", "telos --headless"],
+        ["pgrep", "-f", "telos-release/(tel|telos) --headless"],
         capture_output=True, text=True,
     ).stdout.split()
     return int(out[0]) if out else None
@@ -149,7 +149,7 @@ def kill_all_agents():
     agent lifecycle; leaving relaunched agents running lets a stale one
     reconnect instantly and mask the disconnect window."""
     out = subprocess.run(
-        ["pgrep", "-f", "telos --headless"],
+        ["pgrep", "-f", "telos-release/(tel|telos) --headless"],
         capture_output=True, text=True,
     ).stdout.split()
     for pid in out:
