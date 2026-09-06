@@ -162,6 +162,20 @@ def main():
 
     # Build and start Rust server
     rust_cmd = build_rust_cmd(bin_path, args)
+    # Log the exact command line (token masked) so a launch failure is
+    # diagnosable from the runner output alone.
+    masked_cmd = []
+    mask_next = False
+    for piece in rust_cmd:
+        if mask_next:
+            masked_cmd.append("<redacted>")
+            mask_next = False
+        elif piece == "--api-token":
+            masked_cmd.append(piece)
+            mask_next = True
+        else:
+            masked_cmd.append(piece)
+    print(f"server cmd: {' '.join(masked_cmd)}", file=sys.stderr)
     log_path = "/tmp/actus-server.log"
     log_file = open(log_path, "w")
     server_proc = subprocess.Popen(rust_cmd, cwd=args.workdir, stderr=log_file)
