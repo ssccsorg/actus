@@ -3,8 +3,11 @@ name: Test actus
 on:
   push:
     branches: ["main"]
+    # Documentation-only changes (markdown, docs tree) skip CI entirely.
+    paths-ignore: ["**/*.md", "docs/**"]
   pull_request:
     branches: ["main"]
+    paths-ignore: ["**/*.md", "docs/**"]
   workflow_dispatch:
 
 env:
