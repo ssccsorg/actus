@@ -1,77 +1,69 @@
 # Actus: the act runtime of the SSCCS stack
 
-Actus is a headless execution runtime that performs acts over a shared
-knowledge space. The name joins act and us: the runtime exists for acts.
-An act is any unit of execution, from reading workspace context, editing
-files, running commands, resolving symbols, and fetching resources, to
-driving an autonomous agent through a task. The agent is the first type
-of act and only one type among several.
+Actus is a headless runtime that executes acts, directly and through
+agents. The name joins act and us: the runtime exists for acts. An act is
+any unit of execution, from reading workspace context, editing files,
+running commands, resolving symbols, and fetching resources, to driving
+an agent through a task. The agent is the first kind of act, not the
+only one.
 
-Actus plans with the LLM, holds conversation state and workspace context,
-and commands the execution agents that convert plans into system effects.
-The default execution agent is Telos. If neXus is the knowledge fabric
-(FIH blackboard, state space, storage), actus is the execution fabric:
-the runtime that spawns agents, routes messages, persists threads, and
-exposes a uniform HTTP API regardless of which agent or act type is
-underneath.
+Actus holds conversation state and workspace context, spawns and routes
+agents, persists threads, and exposes one uniform HTTP API. Planning
+happens inside the agents: Telos, the default execution agent, converts
+plans into system effects. Actus itself binds to no LLM and no agent
+implementation; direct acts run in-process and any agent kind attaches
+behind the same surface.
 
 ## Architecture
 
-```
-External Client (CLI / HTTP)
-        │
-        ▼
-  ┌─────────────────────────────────────┐
-  │          Actus Server (REST)         │
-  │  ┌─────────┐  ┌──────────┐          │
-  │  │ Session  │  │  Agent   │          │
-  │  │ Manager  │  │  Bridge  │          │
-  │  └─────────┘  └────┬─────┘          │
-  │  ┌────────────────────────────────┐  │
-  │  │   Direct acts (no agent)       │  │
-  │  │  File + Git · Rules · Fetch    │  │
-  │  └────────────────────────────────┘  │
-  └───────────────┬─────────────────────┘
-                  │
-        ┌─────────┴─────────┐
-        ▼                   ▼
-  ┌──────────┐      ┌──────────────┐
-  │ Telos    │      │   Future     │
-  │ (General │      │  Agent Types │
-  │ Execution)│      │ (Research,   │
-  │          │      │  Review,     │
-  │          │      │  Deploy...)  │
-  └──────────┘      └──────────────┘
+```mermaid
+flowchart LR
+    Client["External Client (CLI / HTTP)"] -->|REST + SSE, bearer auth| API
+
+    subgraph Server["Actus server (headless)"]
+        direction TB
+        API["HTTP API layer"]
+        Session["Session manager\nthreads + persistence"]
+        Direct["Direct acts\nFile · Git · Rules · Fetch"]
+        Bridge["Agent bridge\nAgentBackend registry"]
+        API --> Session
+        Session --> Bridge
+        Session --> Direct
+    end
+
+    Bridge -->|ACP over WebSocket| Telos["Telos\nsessionful agent"]
+    Bridge -->|one process per turn| Aux["Auxiliary agents\next_cli profiles (Ante, AURA, ...)"]
+    Bridge -->|in-process| Native["Native\nreference adapter"]
+    Telos -.->|meta dispatch\nvia actus-control MCP| Aux
 ```
 
 Direct acts run inside the server: file search and mention, symbol and
 rule lookup, URL fetch behind an SSRF guard, and git status, diff, and
 log. Delegated acts run through the agent bridge. Telos is the first
-default agent type: a general agent execution layer that converts plans
-into system effects without binding to a language or a domain. It carries
-file-system and git awareness, which suits code work, and the same
-surface reaches processes and network effects. The architecture accepts
-any act or agent that communicates over a contract, making actus a
-universal gateway for execution.
+default agent kind: a general agent execution layer that converts plans
+into system effects without binding to a language or a domain. The
+architecture accepts any act or agent that communicates over a contract,
+making actus a universal gateway for execution.
 
 ## Execution Fabric
 
-Like neXus weaves heterogeneous FIH storage types behind one thin
-knowledge fabric, actus weaves heterogeneous act types behind one thin
-execution fabric. Agents are the first implemented family of acts. Any
-agent platform can be orchestrated through the same actus surface; Telos
-is the default agent.
+Actus weaves heterogeneous act types behind one thin execution fabric.
+Agents are the first implemented family of acts. Any agent platform can
+be orchestrated through the same actus surface; Telos is the default
+agent.
 
-- `agent::AgentKind`: platform kinds (`telos`, `langgraph`, `native`),
-  extensible by adding a kind and an adapter.
+- `agent::AgentKind`: platform kinds (`telos`, `ext_cli`, `native`,
+  `langgraph` declared), extensible by adding a kind and an adapter.
 - `agent::AgentBackend`: uniform async trait (`status`, `submit`,
-  `cancel`, `thread`, `threads`, `subscribe`) implemented by every
-  platform adapter.
+  `cancel`, `cancel_request`, `thread`, `threads`, `subscribe`) implemented
+  by every platform adapter.
 - `agent::AgentRegistry`: name to running adapter map with a default
   agent.
 - `telos::backend::TelosBackend`: first adapter, wrapping `TelosManager`.
   ACP-over-WebSocket details (reconnect, event dispatch) stay inside
   `telos::control`; the adapter owns thread state and command submission.
+- `agent::ext_cli`: one-shot raw-CLI adapter that spawns a declared
+  binary per turn (probe, per-agent workdir, request-scoped cancel).
 - Direct acts: the server performs file, git, rules, fetch, and symbol
   services in-process; they are acts with no agent attached.
 
@@ -397,18 +389,36 @@ actus/
     └── publish-actus-image.yml  Publish runtime image on version tags or manual dispatch
 ```
 
-## Relationship to neXus
+## Where Actus Sits in the Stack
 
-| Layer | neXus | actus |
-|---|---|---|
-| Domain | Knowledge, state, storage | Execution: acts and agents |
-| Primitives | Fact, Intent, Hint | Act, Agent, Thread |
-| Interface | FIH Blackboard API | REST + WebSocket |
-| Role | Accumulate verified knowledge | Execute actions from knowledge |
+Actus is the execution plane of the stack. Orchestration decisions and
+the knowledge space live in the plane above (kineTic); agents and direct
+acts execute here and below. Actus owns no knowledge store: it executes
+acts, and the agents it drives exchange knowledge with the plane above.
 
-Actus agents read knowledge from neXus to make decisions and write
-execution results back as Facts, forming a stigmergic loop between
-knowledge and action.
+```mermaid
+flowchart TB
+    Upper["Orchestration and knowledge plane (kineTic)"]
+    Client["External clients (CLI / HTTP)"]
+    Actus["Actus: the execution plane\nsessions and threads · direct acts · agent bridge"]
+
+    Upper -.->|chooses acts and agents| Actus
+    Client -->|REST + SSE, bearer auth| Actus
+
+    subgraph Processes["act and agent processes"]
+        Telos["Telos\nsessionful agent, ACP over WebSocket"]
+        Aux["ext_cli agents\none-shot profiles (Ante, AURA, ...)"]
+        Native["native\nin-process reference adapter"]
+    end
+
+    Actus --> Telos
+    Actus --> Aux
+    Actus --> Native
+```
+
+Agents read knowledge from the plane above to decide and write execution
+results back as facts, forming a stigmergic loop between knowledge and
+action. Actus stays out of that loop's storage: its role is execution.
 
 ## License
 
