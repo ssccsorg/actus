@@ -125,7 +125,8 @@ ws_port = 8081
 Each agent inherits any omitted field from the defaults. Every `telos`
 agent needs a unique `ws_port`; thread state is persisted per agent under
 `~/.actus/threads/{name}/`. Chat and thread endpoints accept an `agent`
-field to route to a specific agent. MCP servers declared under an agent
+field to route to a specific agent; without it the first configured
+agent is the fabric default. MCP servers declared under an agent
 are injected into the agent's `context_servers` settings and started by
 the headless agent, exposing their tools to the model.
 
@@ -162,11 +163,13 @@ Per turn actus spawns `bin` with the declared arguments plus the message
 it in the server working directory with the server environment plus
 `cli_env`, and records stdout as the assistant reply. A non-zero exit
 records the exit code with stderr; a timeout kills the process. A
-`cli_env` value of the form `$NAME` is resolved from the server
-environment at spawn time, so secrets stay out of `config.toml`.
-`cli_prompt = "stdin"` writes the message to the child's stdin instead of
-passing an argument. `workdir` overrides the server working directory per
-agent for CLIs that resolve project scope from the current directory (for
+`cli_env` value of the form `$NAME` is replaced by the whole server
+environment variable NAME at spawn time (an unset variable becomes an
+empty string, combined forms such as `$A/suffix` stay literal), so
+secrets stay out of `config.toml`. `cli_prompt = "stdin"` writes the
+message to the child's stdin instead of passing an argument. `workdir`
+overrides the server working directory per agent for CLIs that resolve
+project scope from the current directory (for
 example AURA locating `.aura/permissions.json`); a relative path resolves
 against the directory actus was started from, and an unresolvable entry
 fails the launch with the agent name.
