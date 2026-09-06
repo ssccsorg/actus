@@ -165,7 +165,11 @@ records the exit code with stderr; a timeout kills the process. A
 `cli_env` value of the form `$NAME` is resolved from the server
 environment at spawn time, so secrets stay out of `config.toml`.
 `cli_prompt = "stdin"` writes the message to the child's stdin instead of
-passing an argument.
+passing an argument. `workdir` overrides the server working directory per
+agent for CLIs that resolve project scope from the current directory (for
+example AURA locating `.aura/permissions.json`); a relative path resolves
+against the directory actus was started from, and an unresolvable entry
+fails the launch with the agent name.
 
 Raw-CLI agents are one-shot and parallel. Threads stay in memory for the
 server lifetime, there is no streaming or tool approval surface, and the

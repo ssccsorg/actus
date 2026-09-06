@@ -71,6 +71,29 @@ async fn ext_cli_appends_prompt_without_marker() {
 }
 
 #[tokio::test]
+async fn ext_cli_workdir_controls_child_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let work_subdir = dir.path().join("agent-project");
+    std::fs::create_dir_all(&work_subdir).unwrap();
+    let bin = stub_bin(dir.path(), "pwd-cli", "#!/bin/sh\npwd\n");
+    let agent = ExtCliAgent::new(
+        "aux",
+        bin,
+        Vec::new(),
+        HashMap::new(),
+        PromptMode::Arg,
+        30,
+        work_subdir.clone(),
+    );
+
+    let receipt = agent.submit(None, "where am I").await.unwrap();
+    let content = wait_for_assistant(&agent, &receipt.thread_id).await;
+
+    let expected = std::fs::canonicalize(&work_subdir).unwrap();
+    assert_eq!(content, expected.to_string_lossy(), "unexpected: {content}");
+}
+
+#[tokio::test]
 async fn ext_cli_marker_profile_replaces_prompt() {
     // Mirrors the Ante profile: fixed flags plus a {prompt} marker.
     let dir = tempfile::tempdir().unwrap();

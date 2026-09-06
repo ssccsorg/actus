@@ -91,6 +91,10 @@ pub struct AgentSpec {
     pub ws_port: u16,
     /// Tool call approval policy; drives the fork's TELOS_TOOL_APPROVAL env.
     pub tool_approval: ToolApproval,
+    /// Working directory for spawned agent processes. None means the
+    /// server working directory; raw-CLI agents that resolve project
+    /// scope from the current directory use this field.
+    pub workdir: Option<PathBuf>,
     /// MCP servers attached to this agent.
     pub mcp: Vec<McpServer>,
     /// Fixed CLI arguments prepended before the prompt for cli-kind agents.
@@ -142,6 +146,8 @@ struct AgentSpecFile {
     #[serde(default)]
     tool_approval: Option<ToolApproval>,
     #[serde(default)]
+    workdir: Option<PathBuf>,
+    #[serde(default)]
     mcp: Vec<McpServer>,
     #[serde(default)]
     cli_args: Vec<String>,
@@ -187,6 +193,7 @@ pub fn load_config(
             bin: None,
             ws_port: None,
             tool_approval: None,
+            workdir: None,
             mcp: Vec::new(),
             cli_args: Vec::new(),
             cli_env: HashMap::new(),
@@ -232,6 +239,7 @@ pub fn load_config(
             bin: f.bin.unwrap_or_else(|| defaults.bin.clone()),
             ws_port,
             tool_approval: f.tool_approval.unwrap_or(ToolApproval::Always),
+            workdir: f.workdir,
             mcp: f.mcp,
             cli_args: f.cli_args,
             cli_env: f.cli_env,

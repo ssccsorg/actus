@@ -1,6 +1,6 @@
 // Integration tests for agent config loading (issue #7).
 
-use actus::agent::config::{load_config, AgentDefaults, ToolApproval};
+use actus::agent::config::{load_config, AgentDefaults, PromptMode, ToolApproval};
 use actus::agent::AgentKind;
 use std::path::PathBuf;
 
@@ -34,6 +34,65 @@ fn no_file_yields_single_default_telos() {
     assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
     assert_eq!(specs[0].ws_port, 8080);
     assert_eq!(specs[0].tool_approval, ToolApproval::Always);
+    assert!(specs[0].workdir.is_none());
+}
+
+#[test]
+fn ext_cli_profile_fields_parsed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        r#"
+[[agents]]
+name = "aux"
+kind = "ext_cli"
+bin = "ante"
+cli_args = ["-p", "{prompt}"]
+cli_env = { "FOO" = "bar", "KEY" = "$LLM_API_KEY" }
+cli_prompt = "stdin"
+cli_timeout_secs = 42
+workdir = "/tmp/aux-work"
+"#,
+    );
+    let specs = load_config(Some(&path), &defaults()).unwrap();
+    assert_eq!(specs.len(), 1);
+    let s = &specs[0];
+    assert_eq!(s.name, "aux");
+    assert_eq!(s.kind, AgentKind::ExtCli);
+    assert_eq!(s.bin, PathBuf::from("ante"));
+    assert_eq!(s.cli_args, vec!["-p".to_string(), "{prompt}".to_string()]);
+    assert_eq!(s.cli_env.get("FOO").map(String::as_str), Some("bar"));
+    assert_eq!(
+        s.cli_env.get("KEY").map(String::as_str),
+        Some("$LLM_API_KEY")
+    );
+    assert_eq!(s.cli_prompt, PromptMode::Stdin);
+    assert_eq!(s.cli_timeout_secs, 42);
+    assert_eq!(
+        s.workdir.as_deref(),
+        Some(std::path::Path::new("/tmp/aux-work"))
+    );
+}
+
+#[test]
+fn ext_cli_profile_defaults_when_fields_omitted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        r#"
+[[agents]]
+name = "aux"
+kind = "ext_cli"
+bin = "some-cli"
+"#,
+    );
+    let specs = load_config(Some(&path), &defaults()).unwrap();
+    let s = &specs[0];
+    assert!(s.cli_args.is_empty());
+    assert!(s.cli_env.is_empty());
+    assert_eq!(s.cli_prompt, PromptMode::Arg);
+    assert_eq!(s.cli_timeout_secs, 300);
+    assert!(s.workdir.is_none());
 }
 
 #[test]

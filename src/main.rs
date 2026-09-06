@@ -353,6 +353,21 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             AgentKind::ExtCli => {
+                // Per-agent working directory overrides the server
+                // workdir for cwd-sensitive CLIs; None falls back to the
+                // server workdir. The path is canonicalized at launch so
+                // a bad entry fails fast with the agent name.
+                let agent_workdir = match &spec.workdir {
+                    Some(p) => std::fs::canonicalize(p).map_err(|e| {
+                        anyhow::anyhow!(
+                            "agent '{}': cannot resolve workdir {}: {}",
+                            spec.name,
+                            p.display(),
+                            e
+                        )
+                    })?,
+                    None => workdir.clone(),
+                };
                 let backend = Arc::new(ExtCliAgent::new(
                     spec.name.clone(),
                     spec.bin.clone(),
@@ -360,13 +375,14 @@ async fn main() -> anyhow::Result<()> {
                     spec.cli_env.clone(),
                     spec.cli_prompt,
                     spec.cli_timeout_secs,
-                    workdir.clone(),
+                    agent_workdir.clone(),
                 ));
                 registry.register(backend, spec.name == default_name);
                 tracing::info!(
-                    "Agent '{}' running (ext_cli adapter, raw transport, bin {})",
+                    "Agent '{}' running (ext_cli adapter, raw transport, bin {}, workdir {})",
                     spec.name,
-                    spec.bin.display()
+                    spec.bin.display(),
+                    agent_workdir.display()
                 );
             }
             AgentKind::LangGraph => {
