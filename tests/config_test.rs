@@ -43,9 +43,9 @@ fn no_file_yields_single_default_telos() {
 fn llm_settings_resolution_env_wins_and_unquotes() {
     let env = |key: &str| -> Option<String> {
         match key {
-            "LLM_PROVIDER" => Some("\"deepseek\"".to_string()),
-            "LLM_BASE_URL" => Some("'https://api.deepseek.com'".to_string()),
-            "LLM_MODEL" => Some("\"deepseek-v4-flash\"".to_string()),
+            "LLM_PROVIDER" => Some("\"openai\"".to_string()),
+            "LLM_BASE_URL" => Some("'https://api.openai.com'".to_string()),
+            "LLM_MODEL" => Some("\"llm_model\"".to_string()),
             _ => None,
         }
     };
@@ -56,10 +56,10 @@ fn llm_settings_resolution_env_wins_and_unquotes() {
     );
     // The env values win over the flag and the default, and surrounding
     // quotes are stripped (issue #16 parity: local env drives the LLM).
-    assert_eq!(resolved.provider, "deepseek");
-    assert_eq!(resolved.base_url, "https://api.deepseek.com");
-    assert_eq!(resolved.model, "deepseek-v4-flash");
-    assert_eq!(resolved.model_display, "deepseek-v4-flash");
+    assert_eq!(resolved.provider, "openai");
+    assert_eq!(resolved.base_url, "https://api.openai.com");
+    assert_eq!(resolved.model, "llm_model");
+    assert_eq!(resolved.model_display, "llm_model");
 }
 
 #[test]
