@@ -1,6 +1,6 @@
-# Actus: the act runtime of the SSCCS stack
+# Actus: the act runtime
 
-Actus is a headless runtime that executes acts, directly and through
+Actus is a spatio-temporal runtime that executes acts, directly and through
 agents. The name joins act and us: the runtime exists for acts, the way
 nex-us exists for knowledge. An act is any unit of execution, from
 reading workspace context, editing files, running commands, resolving
