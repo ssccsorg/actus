@@ -201,7 +201,9 @@ async fn chat_async(
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
     Ok(Json(ChatResponse {
-        task_id: uuid::Uuid::new_v4().to_string(),
+        // The task id is the fabric request id, so POST /v1/cancel can
+        // accept it as request_id for a request-scoped cancel.
+        task_id: receipt.request_id.clone(),
         // The message is accepted for execution, not yet approved; the
         // hardcoded "approved" from the earlier approval design was
         // misleading because approval only applies in ask mode.
