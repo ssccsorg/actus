@@ -42,3 +42,40 @@ jobs:
             --entrypoint ./run.sh \
             actus:ci --test
 
+  # Real-agent tier: runs the suite against the actual headless agent
+  # binary from the prebuilt telos image (ssccsorg/telos). The image is
+  # never built here; the job skips with a notice until the telos publish
+  # workflow ships it (telos issue #7). A PAT with read:packages access
+  # to ghcr.io/ssccsorg/telos is required as the ACTUS_TELOS_PAT secret.
+  e2e-real-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Real-agent suite against the prebuilt telos image
+        env:
+          ACTUS_TELOS_PAT: ${{ secrets.ACTUS_TELOS_PAT }}
+        run: |
+          set -e
+          image="ghcr.io/ssccsorg/telos:latest"
+          if [ -z "$ACTUS_TELOS_PAT" ]; then
+            echo "::notice::e2e-real-agent skipped: ACTUS_TELOS_PAT is not set. Add a PAT with read:packages access to ghcr.io/ssccsorg/telos."
+            exit 0
+          fi
+          echo "$ACTUS_TELOS_PAT" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+          if ! docker pull "$image"; then
+            echo "::notice::e2e-real-agent skipped: prebuilt telos image not published yet (ssccsorg/telos issue #7)."
+            exit 0
+          fi
+          # Stub backend keeps the tier LLM-free while the real binary
+          # connects, so health reflects telos_connected/agent_ready true
+          # and the full endpoint suite runs against a real agent process.
+          docker run --rm \
+            -e TELOS_BIN=/workspace/target/telos-release/tel \
+            -e LLM_API_KEY=ci-skip \
+            -e TELOS_STUB_BACKEND=1 \
+            -v "$GITHUB_WORKSPACE:/workspace/actus" \
+            -w /workspace/actus \
+            "$image" \
+            bash run.sh --test
+

@@ -348,3 +348,72 @@ async fn ext_cli_timeout_kills_child() {
         "unexpected: {content}"
     );
 }
+
+#[tokio::test]
+async fn ext_cli_cancel_kills_all_running_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = stub_bin(
+        dir.path(),
+        "slow-cli",
+        "#!/bin/sh\nsleep 2\necho \"done: $*\"\n",
+    );
+    let agent = agent_with(dir.path(), bin, Vec::new());
+
+    let r1 = agent.submit(None, "one").await.unwrap();
+    let r2 = agent.submit(None, "two").await.unwrap();
+    // The agent-wide cancel kills every running child of this agent.
+    agent.cancel().await.unwrap();
+
+    let c1 = wait_for_assistant(&agent, &r1.thread_id).await;
+    let c2 = wait_for_assistant(&agent, &r2.thread_id).await;
+    assert_eq!(c1, "[ext-cli] cancelled", "unexpected: {c1}");
+    assert_eq!(c2, "[ext-cli] cancelled", "unexpected: {c2}");
+}
+
+#[tokio::test]
+async fn ext_cli_cancel_after_completion_is_a_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = stub_bin(dir.path(), "ok-cli", "#!/bin/sh\necho done\n");
+    let agent = agent_with(dir.path(), bin, Vec::new());
+
+    let receipt = agent.submit(None, "quick").await.unwrap();
+    let content = wait_for_assistant(&agent, &receipt.thread_id).await;
+    assert_eq!(content, "done");
+
+    // A finished turn has no running child left; cancelling it by id
+    // succeeds without touching the recorded reply.
+    agent.cancel_request(&receipt.request_id).await.unwrap();
+    let session = agent.thread(&receipt.thread_id).await.unwrap();
+    let last = session.messages.last().unwrap();
+    assert_eq!(last.content, "done");
+}
+
+#[tokio::test]
+async fn ext_cli_probe_accepts_long_running_binary() {
+    // A binary that stays alive without input must not block the launch
+    // probe: it is killed after the grace window and the agent registers
+    // as ready.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = stub_bin(dir.path(), "hang-cli", "#!/bin/sh\nsleep 30\n");
+    let started = std::time::Instant::now();
+    let agent = agent_with(dir.path(), bin, Vec::new());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "probe blocked on a hanging binary"
+    );
+    let status = agent.status().await;
+    assert!(status.ready, "unexpected: {status:?}");
+}
+
+#[tokio::test]
+async fn ext_cli_status_reports_binary_removed_after_construction() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = stub_bin(dir.path(), "ok-cli", "#!/bin/sh\necho ok\n");
+    let agent = agent_with(dir.path(), bin.clone(), Vec::new());
+    assert!(agent.status().await.ready);
+
+    std::fs::remove_file(&bin).unwrap();
+    let status = agent.status().await;
+    assert!(!status.ready);
+    assert_eq!(status.last_error.as_deref(), Some("binary not found"));
+}

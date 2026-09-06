@@ -327,3 +327,78 @@ async fn controller_dispatch_records_parent_thread() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn human_submit_without_identity_never_records_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, server) = spawn_server(test_state_with_agent(
+        std::path::PathBuf::from("python3"),
+        dir.path(),
+    ))
+    .await;
+
+    // A human API client has no controller identity, so even a provided
+    // parent_thread_id must not fabricate a dispatch origin.
+    let r = client()
+        .post(format!("{base}/v1/chat/async"))
+        .json(&serde_json::json!({
+            "agent": "aux",
+            "message": "human turn",
+            "parent_thread_id": "ses_human-1"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let thread_id = body["thread_id"].as_str().unwrap();
+    let detail: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{thread_id}?agent=aux"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(detail.get("parent").is_none(), "unexpected: {detail}");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn controller_cancel_denied_by_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, server) = spawn_server(test_state_with_agent(
+        std::path::PathBuf::from("python3"),
+        dir.path(),
+    ))
+    .await;
+
+    let body = submit_chat(&base, "fast turn").await;
+    let thread_id = body["thread_id"].as_str().unwrap().to_string();
+    let task_id = body["task_id"].as_str().unwrap().to_string();
+
+    // Agent-originated cancel without a policy rule is refused, and the
+    // human can still cancel the same turn afterwards.
+    let r = client()
+        .post(format!("{base}/v1/cancel"))
+        .header("x-actus-controller", "telos")
+        .json(&serde_json::json!({
+            "agent": "aux",
+            "request_id": task_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["status"], "error");
+    assert!(
+        body["error"].as_str().unwrap().contains("forbidden"),
+        "unexpected: {body}"
+    );
+
+    let content = wait_completed(&base, &thread_id).await;
+    assert_eq!(content, "echo:fast turn");
+
+    server.abort();
+}

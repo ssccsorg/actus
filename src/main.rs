@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use actus::agent::config::{load_config, load_control_policy, AgentDefaults};
+use actus::agent::config::{resolve_llm_settings, unquote_env_value};
 use actus::agent::ext_cli::ExtCliAgent;
 use actus::agent::native::NativeAgent;
 use actus::agent::AgentKind;
@@ -167,28 +168,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Environment values from a `.env` file may carry surrounding quotes
-    // (`LLM_MODEL="example-model"`). Strip them defensively here so a
-    // quoted value never leaks into the agent's settings.json or
-    // credentials, where a `"example-model"` model name or quoted key
-    // fails the lookup and aborts every turn.
-    let unquote = |s: &str| -> String {
-        let t = s.trim();
-        if t.len() >= 2
-            && ((t.starts_with('"') && t.ends_with('"'))
-                || (t.starts_with('\'') && t.ends_with('\'')))
-        {
-            t[1..t.len() - 1].to_string()
-        } else {
-            t.to_string()
-        }
-    };
-
-    // Resolve the LLM API key. Optional at the fabric level; the Telos
-    // adapter requires one when it launches an agent.
+    // (`LLM_MODEL="example-model"`). Strip them defensively so a quoted
+    // value never leaks into the agent's settings.json or credentials,
+    // where a quoted model name or key fails the lookup.
     let api_key = args
         .api_key
         .or_else(|| std::env::var("LLM_API_KEY").ok())
-        .map(|k| unquote(&k));
+        .map(|k| unquote_env_value(&k));
 
     // Resolve the Telos binary path: --bin, TELOS_BIN, or the sibling
     // build. Used by the Telos adapter only; existence is checked at
@@ -220,15 +206,15 @@ async fn main() -> anyhow::Result<()> {
     // environment. Actus ships no LLM-specific provider, model name, or
     // API host: the operator supplies them through LLM_PROVIDER,
     // LLM_MODEL, and LLM_BASE_URL (or the agent's config.toml entry).
-    let provider = unquote(&std::env::var("LLM_PROVIDER").unwrap_or(args.provider));
-    let base_url = std::env::var("LLM_BASE_URL")
-        .ok()
-        .map(|s| unquote(&s))
-        .or_else(|| args.base_url.as_deref().map(|s| unquote(s)))
-        .unwrap_or_default();
-    let model_name = unquote(&std::env::var("LLM_MODEL").unwrap_or_default());
-    let model_display =
-        unquote(&std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone()));
+    let llm = resolve_llm_settings(
+        |key| std::env::var(key).ok(),
+        args.provider.clone(),
+        args.base_url.clone(),
+    );
+    let provider = llm.provider;
+    let base_url = llm.base_url;
+    let model_name = llm.model;
+    let model_display = llm.model_display;
 
     // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
     // Missing file (or no override) means a single default telos agent.
