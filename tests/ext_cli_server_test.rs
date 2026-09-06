@@ -278,3 +278,52 @@ async fn controller_dispatch_allowed_by_policy_rule() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn controller_dispatch_records_parent_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy = ControlPolicy {
+        allow: vec![ControlRule {
+            controller: "telos".to_string(),
+            targets: vec!["aux".to_string()],
+        }],
+    };
+    let (base, server) = spawn_server(test_state_with_agent_and_policy(
+        std::path::PathBuf::from("python3"),
+        dir.path(),
+        policy,
+    ))
+    .await;
+
+    let r = client()
+        .post(format!("{base}/v1/chat/async"))
+        .header("x-actus-controller", "telos")
+        .json(&serde_json::json!({
+            "agent": "aux",
+            "message": "child turn",
+            "parent_thread_id": "ses_meta-123"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let thread_id = body["thread_id"].as_str().unwrap();
+    let content = wait_completed(&base, thread_id).await;
+    assert_eq!(content, "echo:child turn");
+
+    // The target thread carries the dispatch origin: controller agent
+    // plus the meta thread id.
+    let detail: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{thread_id}?agent=aux"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["parent"]["agent"], "telos");
+    assert_eq!(detail["parent"]["thread_id"], "ses_meta-123");
+
+    server.abort();
+}

@@ -19,7 +19,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 
 use crate::agent::config::ControlPolicy;
-use crate::agent::{AgentBackend, AgentRegistry, AgentStatus};
+use crate::agent::{AgentBackend, AgentRegistry, AgentStatus, ThreadParent};
 use crate::context;
 use crate::files;
 use crate::git;
@@ -113,19 +113,25 @@ async fn default_agent(state: &SharedState) -> Result<Arc<dyn AgentBackend>, Sta
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+/// Controller identity carried by agent-originated requests (the `actus
+/// control` proxy sets `X-Actus-Controller`).
+fn controller_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-actus-controller")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
 /// Meta-agent control gate. A request carrying an `X-Actus-Controller`
 /// identity header originates from an agent (the `actus control` MCP
 /// proxy) and may only dispatch to agents the policy allows. Requests
 /// without the header are human API clients and stay ungated.
 fn control_gate(state: &AppState, headers: &HeaderMap, target: &str) -> Result<(), StatusCode> {
-    let Some(controller) = headers
-        .get("x-actus-controller")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-    else {
+    let Some(controller) = controller_from_headers(headers) else {
         return Ok(());
     };
-    if state.control_policy.allows(controller, target) {
+    if state.control_policy.allows(&controller, target) {
         Ok(())
     } else {
         Err(StatusCode::FORBIDDEN)
@@ -165,6 +171,10 @@ pub struct ChatRequest {
     /// Agent name to route to; defaults to the fabric default agent.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Thread id of the dispatching meta agent; recorded as the parent
+    /// of the target thread together with the controller identity.
+    #[serde(default)]
+    pub parent_thread_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -195,6 +205,9 @@ pub struct ThreadDetailResponse {
     pub created_at: String,
     pub completed: bool,
     pub turn_completed: u64,
+    /// Dispatch origin of the thread, when a meta agent created it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ThreadParent>,
 }
 // ── Handlers ───────────────────────────────────────────────────────────
 
@@ -230,8 +243,18 @@ async fn chat_async(
 ) -> Result<Json<ChatResponse>, StatusCode> {
     let agent = agent_for(&state, req.agent.as_deref()).await?;
     control_gate(&state, &headers, agent.name())?;
+    // Dispatch origin: the controller identity from the header plus the
+    // meta thread id the controller passed. Humans without an identity
+    // header never set a parent.
+    let parent = match (&req.parent_thread_id, controller_from_headers(&headers)) {
+        (Some(thread_id), Some(controller)) => Some(ThreadParent {
+            agent: controller,
+            thread_id: thread_id.clone(),
+        }),
+        _ => None,
+    };
     let receipt = agent
-        .submit(req.thread_id.as_deref(), &req.message)
+        .submit_with_options(req.thread_id.as_deref(), &req.message, parent)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
@@ -492,6 +515,7 @@ async fn get_thread(
                 created_at: thread.created_at.to_rfc3339(),
                 completed: thread.completed,
                 turn_completed: thread.turn_completed,
+                parent: thread.parent.clone(),
             }))
         }
         None => Err(StatusCode::NOT_FOUND),

@@ -212,6 +212,7 @@ fn load_threads_repairs_turn_counter_drift() {
     let thread = actus::agent::ThreadSession {
         id: "t1".to_string(),
         title: Some("drift".to_string()),
+        parent: None,
         messages: vec![
             ThreadMessage {
                 role: "user".to_string(),

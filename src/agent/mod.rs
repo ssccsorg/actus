@@ -165,6 +165,15 @@ pub struct SubmitReceipt {
     pub is_new: bool,
 }
 
+/// Who dispatched a turn into another agent: the controlling agent and
+/// its thread. Populated when a meta agent submits through the control
+/// surface with a parent thread id.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThreadParent {
+    pub agent: String,
+    pub thread_id: String,
+}
+
 /// One conversation thread, shared across all platform adapters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ThreadSession {
@@ -182,6 +191,9 @@ pub struct ThreadSession {
     /// Monotonically increasing turn counter. SSE consumers wait for
     /// `turn_completed` to exceed the value captured at submit time.
     pub turn_completed: u64,
+    /// Dispatch origin of the first turn, when a meta agent submitted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ThreadParent>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -209,6 +221,18 @@ pub trait AgentBackend: Send + Sync {
     /// Errors when the agent is not connected or not ready.
     async fn submit(&self, thread_id: Option<&str>, message: &str)
         -> Result<SubmitReceipt, String>;
+
+    /// Submit with dispatch origin metadata (which meta agent and which
+    /// of its threads started this turn). Backends that cannot record it
+    /// fall back to the plain submit.
+    async fn submit_with_options(
+        &self,
+        thread_id: Option<&str>,
+        message: &str,
+        _parent: Option<ThreadParent>,
+    ) -> Result<SubmitReceipt, String> {
+        self.submit(thread_id, message).await
+    }
 
     /// Cancel the running turn, if any.
     async fn cancel(&self) -> Result<(), String>;

@@ -47,7 +47,8 @@ fn tool_schema(name: &str) -> Value {
             json!({
                 "agent": {"type": "string", "description": "target agent name"},
                 "message": {"type": "string", "description": "prompt to run"},
-                "thread_id": {"type": "string", "description": "resume an existing thread (optional)"}
+                "thread_id": {"type": "string", "description": "resume an existing thread (optional)"},
+                "parent_thread_id": {"type": "string", "description": "the meta agent's own thread id, recorded as the parent of the new thread"}
             }),
         ),
         "agent_poll" => object(
@@ -329,6 +330,9 @@ async fn call_tool(
             let mut body = json!({ "agent": agent, "message": message });
             if let Some(tid) = args.get("thread_id").and_then(|v| v.as_str()) {
                 body["thread_id"] = json!(tid);
+            }
+            if let Some(pid) = args.get("parent_thread_id").and_then(|v| v.as_str()) {
+                body["parent_thread_id"] = json!(pid);
             }
             api(
                 client,

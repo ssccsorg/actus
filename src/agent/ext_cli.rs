@@ -27,7 +27,7 @@ use tokio::sync::{watch, Mutex, RwLock};
 use crate::agent::config::PromptMode;
 use crate::agent::{
     truncate_title, AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt,
-    ThreadMessage, ThreadSession,
+    ThreadMessage, ThreadParent, ThreadSession,
 };
 
 /// Cap on the recorded assistant message, in characters. A CLI can emit
@@ -137,6 +137,7 @@ impl ExtCliAgent {
             completed: true,
             acp_thread_id: None,
             turn_completed: 0,
+            parent: None,
         }
     }
 
@@ -198,6 +199,15 @@ impl AgentBackend for ExtCliAgent {
         thread_id: Option<&str>,
         message: &str,
     ) -> Result<SubmitReceipt, String> {
+        self.submit_with_options(thread_id, message, None).await
+    }
+
+    async fn submit_with_options(
+        &self,
+        thread_id: Option<&str>,
+        message: &str,
+        parent: Option<ThreadParent>,
+    ) -> Result<SubmitReceipt, String> {
         let (tid, is_new) = self.get_or_create(thread_id).await;
         let request_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
@@ -209,6 +219,11 @@ impl AgentBackend for ExtCliAgent {
                 .ok_or_else(|| format!("thread '{}' vanished", tid))?;
             if session.title.is_none() {
                 session.title = Some(truncate_title(message));
+            }
+            // Record the dispatch origin once: the first submit into a
+            // thread decides its parent.
+            if session.parent.is_none() {
+                session.parent = parent;
             }
             session.messages.push(ThreadMessage {
                 role: "user".to_string(),

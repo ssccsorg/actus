@@ -45,6 +45,7 @@ impl NativeAgent {
             completed: true,
             acp_thread_id: None,
             turn_completed: 0,
+            parent: None,
         }
     }
 

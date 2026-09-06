@@ -167,6 +167,7 @@ impl TelosManager {
                     completed: false,
                     acp_thread_id: None,
                     turn_completed: 0,
+                    parent: None,
                 },
             );
             self.notify_thread_change();
