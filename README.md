@@ -130,6 +130,45 @@ tool calls (headless task execution); `ask` waits for a human or approval
 bridge; `never` rejects them. The mode is carried to the agent via the
 `TELOS_TOOL_APPROVAL` environment variable.
 
+### Auxiliary Raw-CLI Agents
+
+An `ext_cli` agent attaches any external binary that answers one prompt
+per process invocation. Specialized agents attach without code changes:
+Ante over its headless `-p` mode, AURA over its standalone `--query`
+mode. Declare the agent like any other, with the CLI profile fields
+`cli_args`, `cli_env`, `cli_prompt`, and `cli_timeout_secs`.
+
+```toml
+[[agents]]
+name = "ante"
+kind = "ext_cli"
+bin = "ante"
+cli_args = ["-p", "{prompt}"]   # {prompt} is replaced by the message
+
+[[agents]]
+name = "aura"
+kind = "ext_cli"
+bin = "aura"
+cli_args = ["--config", "/path/to/agent.toml", "--query", "{prompt}"]
+cli_timeout_secs = 600
+```
+
+Per turn actus spawns `bin` with the declared arguments plus the message
+(either at the `{prompt}` marker or appended as the final argument), runs
+it in the server working directory with the server environment plus
+`cli_env`, and records stdout as the assistant reply. A non-zero exit
+records the exit code with stderr; a timeout kills the process. A
+`cli_env` value of the form `$NAME` is resolved from the server
+environment at spawn time, so secrets stay out of `config.toml`.
+`cli_prompt = "stdin"` writes the message to the child's stdin instead of
+passing an argument.
+
+Raw-CLI agents are one-shot and parallel. Threads stay in memory for the
+server lifetime, there is no streaming or tool approval surface, and the
+model settings live inside the agent's own configuration, which actus
+does not read. The profile contract and integration notes are recorded in
+`docs/devlogs/2026-09-06-aux-agent-profiles.md`.
+
 ## `@` Mention Context
 
 Typing `@` in the CLI injects context into the message before it is sent,
@@ -160,7 +199,7 @@ external process behind the registry.
 | (planned) Research Agent | Literature search, experiment design | TBD |
 | (planned) Review Agent | Code review, compliance checking | TBD |
 | (planned) Deploy Agent | CI/CD, infrastructure management | TBD |
-| (trial) Auxiliary Agent | Lightweight input/output tasks alongside the professional core; first candidate is Ante, a single-binary terminal agent driven through its JSONL serve protocol or headless one-shot mode | JSONL |
+| (trial) Auxiliary Agent | Lightweight input/output tasks alongside the professional core, attached over a raw-CLI profile; first candidates are Ante (`-p` one-shot) and AURA (`--query` one-shot) | CLI (one process per turn) |
 
 ## Getting Started
 
