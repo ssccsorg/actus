@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use actus::agent::config::{load_config, AgentDefaults, PromptMode};
+use actus::agent::config::{load_config, AgentDefaults};
 use actus::agent::ext_cli::ExtCliAgent;
 use actus::agent::native::NativeAgent;
 use actus::agent::AgentKind;
@@ -45,13 +45,14 @@ struct Args {
     #[arg(long)]
     api_key: Option<String>,
 
-    /// LLM provider name (default: LLM_PROVIDER env or "deepseek")
-    #[arg(long, default_value = "deepseek")]
+    /// Provider label for the OpenAI-compatible API
+    /// (default: LLM_PROVIDER env or "openai-compatible")
+    #[arg(long, default_value = "openai-compatible")]
     provider: String,
 
-    /// LLM API base URL (default: LLM_BASE_URL env or "https://api.deepseek.com/v1")
-    #[arg(long, default_value = "https://api.deepseek.com/v1")]
-    base_url: String,
+    /// API base URL of the OpenAI-compatible endpoint (default: LLM_BASE_URL env)
+    #[arg(long)]
+    base_url: Option<String>,
 
     /// Path to terminal.py (auto-detected if not set)
     #[arg(long)]
@@ -148,10 +149,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Environment values from a `.env` file may carry surrounding quotes
-    // (`LLM_MODEL="deepseek-v4-flash"`). Strip them defensively here so a
-    // quoted value never leaks into Telos's settings.json or credentials,
-    // where a `"deepseek-v4-flash"` model name or quoted key fails the
-    // lookup and aborts every turn.
+    // (`LLM_MODEL="example-model"`). Strip them defensively here so a
+    // quoted value never leaks into the agent's settings.json or
+    // credentials, where a `"example-model"` model name or quoted key
+    // fails the lookup and aborts every turn.
     let unquote = |s: &str| -> String {
         let t = s.trim();
         if t.len() >= 2
@@ -197,11 +198,17 @@ async fn main() -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Read model/provider config from args or env
+    // Resolve the OpenAI-compatible endpoint from args or the local
+    // environment. Actus ships no LLM-specific provider, model name, or
+    // API host: the operator supplies them through LLM_PROVIDER,
+    // LLM_MODEL, and LLM_BASE_URL (or the agent's config.toml entry).
     let provider = unquote(&std::env::var("LLM_PROVIDER").unwrap_or(args.provider));
-    let base_url = unquote(&std::env::var("LLM_BASE_URL").unwrap_or(args.base_url));
-    let model_name =
-        unquote(&std::env::var("LLM_MODEL").unwrap_or_else(|_| format!("{}-chat", provider)));
+    let base_url = std::env::var("LLM_BASE_URL")
+        .ok()
+        .map(|s| unquote(&s))
+        .or_else(|| args.base_url.as_deref().map(|s| unquote(s)))
+        .unwrap_or_default();
+    let model_name = unquote(&std::env::var("LLM_MODEL").unwrap_or_default());
     let model_display =
         unquote(&std::env::var("LLM_MODEL_DISPLAY").unwrap_or_else(|_| model_name.clone()));
 

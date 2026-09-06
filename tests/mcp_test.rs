@@ -12,10 +12,10 @@ use std::path::PathBuf;
 
 fn defaults() -> AgentDefaults {
     AgentDefaults {
-        provider: "deepseek".to_string(),
-        model: "deepseek-chat".to_string(),
-        model_display: "deepseek-chat".to_string(),
-        base_url: "https://api.deepseek.com/v1".to_string(),
+        provider: "openai-compatible".to_string(),
+        model: "example-model".to_string(),
+        model_display: "example-model".to_string(),
+        base_url: "https://api.example.com/v1".to_string(),
         api_key: Some("sk-test".to_string()),
         bin: PathBuf::from("/bin/telos"),
         ws_port: 8080,
@@ -122,10 +122,10 @@ fn six_server_settings_injection_schema() {
     ensure_telos_settings(
         data_dir,
         Some("sk-test"),
-        "deepseek",
-        "https://api.deepseek.com/v1",
-        "deepseek-chat",
-        "deepseek-chat",
+        "openai-compatible",
+        "https://api.example.com/v1",
+        "example-model",
+        "example-model",
         &specs[0].mcp,
     )
     .unwrap();
@@ -158,6 +158,44 @@ fn six_server_settings_injection_schema() {
         gh.get("headers").unwrap().get("Authorization").unwrap(),
         "Bearer <PAT>"
     );
+}
+
+#[test]
+fn settings_injection_skipped_without_endpoint_config() {
+    // With no base URL or model (nothing set in the local environment or
+    // the agent config), actus writes no language_models entry: it ships
+    // no LLM endpoint of its own. Credentials stay written so an agent
+    // whose own built-in provider matches the label can still resolve the
+    // key.
+    let dir = tempfile::tempdir().unwrap();
+    ensure_telos_settings(
+        dir.path(),
+        Some("sk-test"),
+        "openai-compatible",
+        "",
+        "",
+        "",
+        &[],
+    )
+    .unwrap();
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        settings
+            .get("language_models")
+            .and_then(|lm| lm.get("openai_compatible"))
+            .is_none(),
+        "no provider entry expected without an endpoint: {settings}"
+    );
+
+    let creds: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("credentials/credentials.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(creds["provider/openai-compatible"]["api_key"], "sk-test");
 }
 
 /// A minimal stdio MCP server used to prove injected configs spawn
@@ -234,10 +272,10 @@ fn scenario_injected_stdio_server_is_spawnable() {
     ensure_telos_settings(
         dir.path(),
         Some("sk-test"),
-        "deepseek",
-        "https://api.deepseek.com/v1",
-        "deepseek-chat",
-        "deepseek-chat",
+        "openai-compatible",
+        "https://api.example.com/v1",
+        "example-model",
+        "example-model",
         &mcp,
     )
     .unwrap();
