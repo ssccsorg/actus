@@ -244,16 +244,19 @@ picker opens only for explicit `@?query`.
 
 ## Agent Types
 
-The agent family is the first implemented type of act. Each agent is an
-external process behind the registry.
+The agent family is the first implemented type of act. Sessionful agents
+run as external processes behind the registry; one-shot agents are
+spawned per turn.
 
 | Agent | Role | Protocol |
 |---|---|---|
-| Telos | General execution: converts plans into system effects across files, commands, and network | ACP over WebSocket |
+| Telos | General execution agent: converts plans into system effects across files, commands, and network; sessionful and meta-capable through the control surface | ACP over WebSocket |
+| Native | In-process reference adapter: deterministic loop that proves the fabric seam without an external process | in-process |
+| Auxiliary (`ext_cli`) | One-shot raw-CLI acts attached by profile; first candidates are Ante (`-p` one-shot) and AURA (`--query` one-shot) | CLI (one process per turn) |
+| LangGraph (declared) | Config entries parse; the adapter is not implemented yet and entries are skipped at launch with a warning | REST/SSE (future) |
 | (planned) Research Agent | Literature search, experiment design | TBD |
 | (planned) Review Agent | Code review, compliance checking | TBD |
 | (planned) Deploy Agent | CI/CD, infrastructure management | TBD |
-| (trial) Auxiliary Agent | Lightweight input/output tasks alongside the professional core, attached over a raw-CLI profile; first candidates are Ante (`-p` one-shot) and AURA (`--query` one-shot) | CLI (one process per turn) |
 
 ## Getting Started
 
@@ -291,17 +294,39 @@ docker build --target test -t actus:test .
 ```
 
 Published images are cut on version tags (a versioned image plus `latest`)
-or as manual dev snapshots. Development commits publish nothing.
+or as manual dev snapshots. Development commits publish nothing. Agent
+binaries stay separate: actus images never bundle telos or auxiliary
+agent executables.
+
+### CI tiers
+
+The workflow in `.github/workflows/ci.yml` runs two tiers:
+
+- `build`: builds the actus test image and runs `run.sh --test` against a
+  stub agent (`/bin/true`, no LLM tokens). Fast gate for the Rust unit
+  and integration suites and the HTTP endpoints.
+- `e2e-real-agent`: runs the same suite against the real headless agent
+  binary from the prebuilt telos image `ghcr.io/ssccsorg/telos`. The
+  image is pulled, never built here, and the agent runs with the stub
+  backend so the tier stays LLM-free while `telos_connected` and
+  `agent_ready` reflect a real process. The job needs the published
+  image and an `ACTUS_TELOS_PAT` secret (read:packages access); until
+  both exist it skips with a notice (telos publish tracking issue).
 
 ### API Endpoints
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | GET | Server status, agent connection state |
+| `/health` | GET | Server status, per-agent state with capabilities and launch errors |
 | `/v1/chat` | POST | Send message, SSE stream response |
-| `/v1/chat/async` | POST | Send message, return task ID |
-| `/v1/threads` | GET | List conversation threads |
-| `/v1/threads/{id}` | GET | Thread messages and metadata |
+| `/v1/chat/async` | POST | Send message, return task id and thread id |
+| `/v1/cancel` | POST | Cancel a turn; optional body `{ agent?, request_id? }` scopes the cancel (no body cancels the default agent's whole turn) |
+| `/v1/threads` | GET | List conversation threads of one agent |
+| `/v1/threads` | POST | Create a fresh thread without a message |
+| `/v1/threads/{id}` | GET | Thread messages and metadata (includes the dispatch `parent` when a meta agent created it) |
+| `/v1/threads/{id}/poll` | GET | Poll the latest turn until completion |
+| `/v1/agents/tool-calls/pending` | GET | Tool-call authorizations awaiting a human decision (ask mode) |
+| `/v1/agents/tool-calls/resolve` | POST | Approve or reject a pending tool call |
 | `/v1/files` | GET | Search workspace files (direct act) |
 | `/v1/files/mention` | GET | File mention for prompt injection |
 | `/v1/symbols` | GET | Symbol search (direct act) |
@@ -310,7 +335,12 @@ or as manual dev snapshots. Development commits publish nothing.
 | `/v1/git/status` | GET | Git working tree status |
 | `/v1/git/diff` | GET | Git diff (unstaged/staged) |
 | `/v1/git/log` | GET | Recent commit history |
-| `/v1/cancel` | POST | Cancel a turn; optional body `{ agent?, request_id? }` scopes the cancel (no body cancels the default agent's whole turn) |
+
+Chat and thread endpoints accept an `agent` field (query or body) to
+route to a specific agent; without it they use the first configured
+agent. Requests that carry an `X-Actus-Controller` identity header come
+from the `actus control` MCP proxy and are gated by the
+`[agent-control]` policy.
 
 ### API Authentication
 
@@ -339,22 +369,31 @@ runtime targets a single local instance.
 ```
 actus/
 ├── src/
-│   ├── main.rs          Server entry point
-│   ├── agent/           Execution fabric: AgentKind, AgentBackend, AgentRegistry, native reference adapter
+│   ├── main.rs          Server entry point (also `actus control` subcommand)
+│   ├── lib.rs           Library target for the integration tests
+│   ├── agent/
+│   │   ├── mod.rs       Execution fabric: AgentKind, AgentBackend, AgentRegistry, capabilities
+│   │   ├── config.rs    Config loading: agent specs, cli profiles, control policy, LLM env resolution
+│   │   ├── ext_cli.rs   ExtCliAgent: one-shot raw-CLI adapter (probe, workdir, cancel)
+│   │   └── native.rs    In-process reference adapter
 │   ├── server.rs        REST API routes and handlers
+│   ├── control.rs       `actus control` stdio MCP proxy for meta-agent dispatch
+│   ├── context.rs       Workspace context (symbols, rules)
 │   ├── files.rs         File search and mention (direct act)
 │   ├── git.rs           Git operations (direct act)
 │   └── telos/
-│       ├── mod.rs       Telos lifecycle and session management
+│       ├── mod.rs       Telos lifecycle, settings bootstrap, session management
 │       ├── backend.rs   TelosBackend adapter (AgentBackend impl)
 │       ├── control.rs   WebSocket bridge and event dispatch
 │       └── types.rs     Protocol type definitions
+├── tests/               Integration suites (agent, config, control, ext_cli, mcp, server, ...)
+├── docs/devlogs/        Design and contract records (agent profiles, meta-agent control)
 ├── runner.py            Server launcher (build + run)
 ├── terminal.py          Interactive chat CLI
 ├── run.sh               Gateway: build, test, launch
 ├── Dockerfile           Multi-stage: toolchain, release, test, runtime targets
 └── .github/workflows/
-    ├── ci.yml           Test workflow (test target)
+    ├── ci.yml           Test workflow: build tier plus the pull-based real-agent tier
     └── publish-actus-image.yml  Publish runtime image on version tags or manual dispatch
 ```
 
