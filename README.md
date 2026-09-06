@@ -86,16 +86,20 @@ map.
 Agents are declared in `~/.actus/config.toml` (or `ACTUS_CONFIG`). When
 the file is absent, a single default `telos` agent is derived from the CLI
 flags and environment (`LLM_API_KEY`, `LLM_PROVIDER`, `LLM_BASE_URL`,
-`LLM_MODEL`).
+`LLM_MODEL`). The LLM layer belongs to the agent processes: actus treats
+the endpoint as an OpenAI-compatible API and ships no LLM-specific
+provider, model name, or API host of its own. The provider label, model,
+and base URL always come from the local environment or the agent's config
+entry.
 
 ```toml
 [[agents]]
 name = "telos"             # default agent; routed when no agent is named
 kind = "telos"             # telos | langgraph | native (telos default; native is in-process)
-provider = "deepseek"
-model = "deepseek-chat"
-base_url = "https://api.deepseek.com/v1"
-api_key = "sk-..."
+provider = "openai-compatible"          # label of the OpenAI-compatible endpoint
+model = "example-model"                 # model served by that endpoint (LLM_MODEL)
+base_url = "https://api.example.com/v1" # base URL of that endpoint (LLM_BASE_URL)
+api_key = "sk-..."                      # key for that endpoint (LLM_API_KEY)
 bin = "../telos/target/telos-release/tel"
 ws_port = 8080
 tool_approval = "always"  # always | ask | never (drives the agent's approval policy)

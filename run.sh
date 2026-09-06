@@ -412,7 +412,6 @@ run_scenarios() {
         export TELOS_STUB_BACKEND=1
         export ACTUS_STUB=1
         LLM_API_KEY=""
-        DEEPSEEK_API_KEY=""
     else
         info "${BOLD}Real-scenario tests (tool turns, concurrency, reconnect, soak)${END}"
     fi
@@ -460,11 +459,11 @@ Modes:
   --help          Show this help
 
 Environment:
-  LLM_API_KEY      Provider API key
+  LLM_API_KEY      API key for the OpenAI-compatible endpoint
   LLM_CHAT         Set to 1 to run the live LLM chat round trip in --test
-  LLM_PROVIDER     Provider name (default: deepseek)
-  LLM_BASE_URL     API base URL
-  LLM_MODEL        Model name
+  LLM_PROVIDER     Provider label for the OpenAI-compatible endpoint (default: openai-compatible)
+  LLM_BASE_URL     Base URL of the OpenAI-compatible endpoint
+  LLM_MODEL        Model name served by the endpoint
   ACTUS_HTTP_PORT  HTTP port (default: 9090)
   ACTUS_WS_PORT    WS port (default: 8080)
 EOF

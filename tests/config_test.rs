@@ -6,10 +6,10 @@ use std::path::PathBuf;
 
 fn defaults() -> AgentDefaults {
     AgentDefaults {
-        provider: "deepseek".to_string(),
-        model: "deepseek-chat".to_string(),
-        model_display: "deepseek-chat".to_string(),
-        base_url: "https://api.deepseek.com/v1".to_string(),
+        provider: "openai-compatible".to_string(),
+        model: "example-model".to_string(),
+        model_display: "example-model".to_string(),
+        base_url: "https://api.example.com/v1".to_string(),
         api_key: Some("sk-test".to_string()),
         bin: PathBuf::from("/bin/telos"),
         ws_port: 8080,
@@ -28,8 +28,8 @@ fn no_file_yields_single_default_telos() {
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].name, "telos");
     assert_eq!(specs[0].kind, AgentKind::Telos);
-    assert_eq!(specs[0].provider, "deepseek");
-    assert_eq!(specs[0].model, "deepseek-chat");
+    assert_eq!(specs[0].provider, "openai-compatible");
+    assert_eq!(specs[0].model, "example-model");
     assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
     assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
     assert_eq!(specs[0].ws_port, 8080);

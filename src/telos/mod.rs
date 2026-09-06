@@ -648,22 +648,34 @@ pub fn ensure_telos_settings(
         serde_json::json!({})
     };
 
-    if settings
-        .get("language_models")
-        .and_then(|lm| lm.get("openai_compatible"))
-        .and_then(|oc| oc.get(provider))
-        .is_none()
-    {
-        settings["language_models"]["openai_compatible"][provider] = serde_json::json!({
-            "api_url": base_url,
-            "available_models": [{
-                "name": model_name,
-                "display_name": model_display,
-                "max_tokens": 65536,
-                "max_output_tokens": 8192,
-                "tool_use": true,
-            }],
-        });
+    // Inject the OpenAI-compatible endpoint only when the operator
+    // supplied a base URL and a model name (local environment or agent
+    // config). Without them actus writes no provider entry: an empty
+    // api_url or model would break the agent's settings parse, and actus
+    // does not invent endpoint values.
+    let endpoint_configured = !base_url.trim().is_empty() && !model_name.trim().is_empty();
+    if endpoint_configured {
+        if settings
+            .get("language_models")
+            .and_then(|lm| lm.get("openai_compatible"))
+            .and_then(|oc| oc.get(provider))
+            .is_none()
+        {
+            settings["language_models"]["openai_compatible"][provider] = serde_json::json!({
+                "api_url": base_url,
+                "available_models": [{
+                    "name": model_name,
+                    "display_name": model_display,
+                    "max_tokens": 65536,
+                    "max_output_tokens": 8192,
+                    "tool_use": true,
+                }],
+            });
+        }
+    } else {
+        tracing::warn!(
+            "LLM endpoint not configured (set LLM_BASE_URL and LLM_MODEL in the local environment or the agent's config.toml); skipping provider injection"
+        );
     }
 
     // MCP servers: map each declaration to Telos's `context_servers` entry.
