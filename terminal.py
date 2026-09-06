@@ -119,9 +119,10 @@ class NexClient:
         except httpx.HTTPStatusError:
             return None
 
-    async def cancel(self) -> dict | None:
+    async def cancel(self, agent: str | None = None) -> dict | None:
         try:
-            r = await self.client.post("/v1/cancel")
+            payload = {"agent": agent} if agent else None
+            r = await self.client.post("/v1/cancel", json=payload)
             r.raise_for_status()
             return r.json()
         except Exception:
@@ -880,10 +881,11 @@ async def chat_session(client: NexClient) -> str | None:
             print(f"Raw JSON display: {'ON' if show_raw else 'OFF'}")
 
         elif text == "/cancel":
-            result = await client.cancel()
+            result = await client.cancel(agent=current_agent)
             if result is not None:
                 msg = result.get("message", result.get("status", "Cancelled"))
-                print(f"{C.GREEN}✓{C.END} {msg}")
+                scope = f" ({current_agent})" if current_agent else ""
+                print(f"{C.GREEN}✓{C.END} {msg}{scope}")
             else:
                 print(f"{C.RED}✗{C.END} Cancel request failed")
 

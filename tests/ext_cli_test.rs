@@ -220,3 +220,100 @@ async fn ext_cli_missing_binary_fails_submit() {
     let err = agent.submit(None, "hello").await.unwrap_err();
     assert!(err.contains("cannot start"), "unexpected: {err}");
 }
+
+#[tokio::test]
+async fn ext_cli_cancel_request_kills_only_one_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = stub_bin(
+        dir.path(),
+        "slow-cli",
+        "#!/bin/sh\nsleep 2\necho \"done: $*\"\n",
+    );
+    let agent = agent_with(dir.path(), bin, Vec::new());
+
+    let r1 = agent.submit(None, "first").await.unwrap();
+    let r2 = agent.submit(None, "second").await.unwrap();
+    // Both children are running under distinct request ids. Cancelling
+    // the first turn must leave the second child untouched.
+    agent.cancel_request(&r1.request_id).await.unwrap();
+
+    let c1 = wait_for_assistant(&agent, &r1.thread_id).await;
+    assert_eq!(c1, "[ext-cli] cancelled", "unexpected: {c1}");
+    let c2 = wait_for_assistant(&agent, &r2.thread_id).await;
+    assert!(c2.contains("done: second"), "unexpected: {c2}");
+}
+
+#[tokio::test]
+async fn ext_cli_cancel_request_on_same_thread_keeps_second_turn() {
+    // Regression: the running map is keyed by request id, so a second
+    // submit on the same thread no longer overwrites the first child's
+    // handle and a request-scoped cancel cannot kill the wrong turn.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = stub_bin(
+        dir.path(),
+        "slow-cli",
+        "#!/bin/sh\nsleep 1\necho \"done: $*\"\n",
+    );
+    let agent = agent_with(dir.path(), bin, Vec::new());
+
+    let r1 = agent.submit(None, "first").await.unwrap();
+    let r2 = agent.submit(Some(&r1.thread_id), "second").await.unwrap();
+    assert_ne!(r1.request_id, r2.request_id);
+    agent.cancel_request(&r1.request_id).await.unwrap();
+
+    // The second turn still runs to completion on the same thread; its
+    // reply must appear after the cancellation marker of the first turn.
+    let mut done = String::new();
+    for _ in 0..200 {
+        if let Some(session) = agent.thread(&r1.thread_id).await {
+            if let Some(last) = session
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+            {
+                if last.content.contains("done: second") {
+                    done = last.content.clone();
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(done.contains("done: second"), "unexpected: {done}");
+
+    let session = agent.thread(&r1.thread_id).await.unwrap();
+    let assistants: Vec<&str> = session
+        .messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(assistants.len(), 2, "messages: {assistants:?}");
+    assert!(
+        assistants.iter().any(|c| *c == "[ext-cli] cancelled"),
+        "messages: {assistants:?}"
+    );
+}
+
+#[tokio::test]
+async fn ext_cli_timeout_kills_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = stub_bin(dir.path(), "long-cli", "#!/bin/sh\nsleep 5\necho late\n");
+    let agent = ExtCliAgent::new(
+        "aux",
+        bin,
+        Vec::new(),
+        HashMap::new(),
+        PromptMode::Arg,
+        1,
+        dir.path().to_path_buf(),
+    );
+
+    let receipt = agent.submit(None, "slow turn").await.unwrap();
+    let content = wait_for_assistant(&agent, &receipt.thread_id).await;
+    assert!(
+        content.contains("[ext-cli] timed out after 1s"),
+        "unexpected: {content}"
+    );
+}

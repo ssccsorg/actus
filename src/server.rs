@@ -911,16 +911,45 @@ async fn resolve_tool_call_handler(
 
 // ── Cancel endpoint ────────────────────────────────────────────────────
 
-async fn cancel_turn(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    match default_agent(&state).await {
-        Ok(agent) => match agent.cancel().await {
-            Ok(()) => Json(serde_json::json!({ "status": "cancelled" })),
-            Err(e) => Json(serde_json::json!({ "status": "error", "error": e })),
-        },
-        Err(_) => Json(serde_json::json!({
-            "status": "error",
-            "error": "no agent registered"
-        })),
+/// Body for POST /v1/cancel. All fields optional: an empty body cancels
+/// the default agent's whole turn, as before. `agent` selects another
+/// agent; `request_id` narrows the cancel to one turn of that agent when
+/// the backend tracks per-request state (parallel raw-CLI agents).
+#[derive(Deserialize, Default)]
+struct CancelRequest {
+    pub agent: Option<String>,
+    pub request_id: Option<String>,
+}
+
+async fn cancel_turn(
+    State(state): State<SharedState>,
+    body: axum::body::Bytes,
+) -> Json<serde_json::Value> {
+    let req: CancelRequest = if body.is_empty() {
+        CancelRequest::default()
+    } else {
+        serde_json::from_slice(&body).unwrap_or_default()
+    };
+    let agent = match &req.agent {
+        Some(name) => agent_for(&state, Some(name)).await,
+        None => default_agent(&state).await,
+    };
+    let agent = match agent {
+        Ok(agent) => agent,
+        Err(_) => {
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": "agent not found or not ready"
+            }))
+        }
+    };
+    let result = match &req.request_id {
+        Some(request_id) => agent.cancel_request(request_id).await,
+        None => agent.cancel().await,
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "status": "cancelled" })),
+        Err(e) => Json(serde_json::json!({ "status": "error", "error": e })),
     }
 }
 

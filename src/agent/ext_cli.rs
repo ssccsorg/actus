@@ -37,6 +37,31 @@ const MAX_REPLY_CHARS: usize = 200_000;
 /// Marker replaced by the prompt message inside `cli_args`.
 const PROMPT_MARKER: &str = "{prompt}";
 
+/// Poll interval for child exit and cancellation checks.
+const CHILD_POLL_MS: u64 = 100;
+
+/// How one spawned turn ended.
+enum ChildOutcome {
+    Cancelled,
+    TimedOut,
+    Exited(Result<std::process::ExitStatus, std::io::Error>),
+}
+
+/// Kill the direct child and its process group, then reap it. The direct
+/// child may be a shell or launcher that spawned its own children;
+/// orphaned grandchildren would keep the output pipes open until they
+/// exit on their own and delay the recorded reply.
+#[cfg(unix)]
+async fn kill_child_group(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let _ = child.kill().await;
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+        let _ = child.wait().await;
+    }
+}
+
 pub struct ExtCliAgent {
     name: String,
     bin: PathBuf,
@@ -176,6 +201,8 @@ impl AgentBackend for ExtCliAgent {
         }
 
         let mut cmd = tokio::process::Command::new(&self.bin);
+        #[cfg(unix)]
+        cmd.process_group(0);
         cmd.args(&cmd_args)
             .current_dir(&self.workdir)
             .envs(resolve_env(&self.env))
@@ -199,9 +226,14 @@ impl AgentBackend for ExtCliAgent {
             }
         }
 
+        // Detach the output pipes before the child handle moves into
+        // `running`; the worker drains them while the handle stays in the
+        // map so cancel paths can reach it.
+        let out_pipe = child.stdout.take();
+        let err_pipe = child.stderr.take();
         {
             let mut running = self.running.lock().await;
-            running.insert(tid.clone(), child);
+            running.insert(request_id.clone(), child);
         }
 
         let threads = self.threads.clone();
@@ -212,51 +244,85 @@ impl AgentBackend for ExtCliAgent {
         let task_request_id = request_id.clone();
 
         tokio::spawn(async move {
-            let child = running.lock().await.remove(&task_thread_id);
-            let content = match child {
-                None => "[ext-cli] cancelled".to_string(),
-                Some(mut child) => {
-                    let out_pipe = child.stdout.take();
-                    let err_pipe = child.stderr.take();
-                    let waited = {
-                        let mut wait = Box::pin(child.wait());
-                        let mut out = Box::pin(read_pipe(out_pipe));
-                        let mut err = Box::pin(read_pipe(err_pipe));
-                        let joined = async { tokio::join!(&mut wait, &mut out, &mut err) };
-                        tokio::time::timeout(timeout, joined).await
-                    };
-                    match waited {
-                        Ok((wait_result, stdout, stderr)) => match wait_result {
-                            Ok(status) if status.success() => {
-                                let text = String::from_utf8_lossy(&stdout);
-                                let text = text.trim();
-                                if text.is_empty() {
-                                    "[ext-cli] finished with no output".to_string()
-                                } else {
-                                    text.chars().take(MAX_REPLY_CHARS).collect()
-                                }
+            // Drain stdout and stderr concurrently while the child runs.
+            // The child handle stays in `running` under its request id for
+            // the whole turn, so cancel paths can kill and reap it; the
+            // poll loop below reaps the child when it exits on its own.
+            let out_task = tokio::spawn(read_pipe(out_pipe));
+            let err_task = tokio::spawn(read_pipe(err_pipe));
+            let deadline = tokio::time::Instant::now() + timeout;
+
+            let outcome = loop {
+                let mut guard = running.lock().await;
+                // A missing entry means a cancel path removed the child
+                // while this loop slept.
+                let Some(child_ref) = guard.get_mut(&task_request_id) else {
+                    break ChildOutcome::Cancelled;
+                };
+                match child_ref.try_wait() {
+                    Ok(Some(status)) => {
+                        guard.remove(&task_request_id);
+                        break ChildOutcome::Exited(Ok(status));
+                    }
+                    Ok(None) => {
+                        if tokio::time::Instant::now() >= deadline {
+                            if let Some(mut child) = guard.remove(&task_request_id) {
+                                kill_child_group(&mut child).await;
                             }
-                            Ok(status) => {
-                                let stderr = String::from_utf8_lossy(&stderr);
-                                let stderr = stderr.trim();
-                                if stderr.is_empty() {
-                                    format!("[ext-cli] exited with {}", status)
-                                } else {
-                                    format!(
-                                        "[ext-cli] exited with {}: {}",
-                                        status,
-                                        stderr.chars().take(MAX_REPLY_CHARS).collect::<String>()
-                                    )
-                                }
-                            }
-                            Err(e) => format!("[ext-cli] failed: {}", e),
-                        },
-                        Err(_) => {
-                            let _ = child.kill().await;
-                            format!("[ext-cli] timed out after {}s", timeout.as_secs())
+                            break ChildOutcome::TimedOut;
                         }
                     }
+                    Err(e) => {
+                        guard.remove(&task_request_id);
+                        break ChildOutcome::Exited(Err(e));
+                    }
                 }
+                drop(guard);
+                tokio::time::sleep(Duration::from_millis(CHILD_POLL_MS)).await;
+            };
+
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if matches!(outcome, ChildOutcome::Exited(_)) {
+                stdout = out_task.await.unwrap_or_default();
+                stderr = err_task.await.unwrap_or_default();
+            } else {
+                // The group kill above closed the pipes; abort the
+                // readers so a straggler holding a pipe cannot delay the
+                // recorded cancellation or timeout marker.
+                out_task.abort();
+                err_task.abort();
+            }
+            let content = match outcome {
+                ChildOutcome::Cancelled => "[ext-cli] cancelled".to_string(),
+                ChildOutcome::TimedOut => {
+                    format!("[ext-cli] timed out after {}s", timeout.as_secs())
+                }
+                ChildOutcome::Exited(result) => match result {
+                    Ok(status) if status.success() => {
+                        let text = String::from_utf8_lossy(&stdout);
+                        let text = text.trim();
+                        if text.is_empty() {
+                            "[ext-cli] finished with no output".to_string()
+                        } else {
+                            text.chars().take(MAX_REPLY_CHARS).collect()
+                        }
+                    }
+                    Ok(status) => {
+                        let stderr = String::from_utf8_lossy(&stderr);
+                        let stderr = stderr.trim();
+                        if stderr.is_empty() {
+                            format!("[ext-cli] exited with {}", status)
+                        } else {
+                            format!(
+                                "[ext-cli] exited with {}: {}",
+                                status,
+                                stderr.chars().take(MAX_REPLY_CHARS).collect::<String>()
+                            )
+                        }
+                    }
+                    Err(e) => format!("[ext-cli] failed: {}", e),
+                },
             };
 
             let now = chrono::Utc::now();
@@ -288,7 +354,19 @@ impl AgentBackend for ExtCliAgent {
     async fn cancel(&self) -> Result<(), String> {
         let mut running = self.running.lock().await;
         for (_, mut child) in running.drain() {
-            let _ = child.kill().await;
+            kill_child_group(&mut child).await;
+        }
+        Ok(())
+    }
+
+    async fn cancel_request(&self, request_id: &str) -> Result<(), String> {
+        // Kill and reap only the child of the named turn. A turn that
+        // already finished has no entry left and cancelling it is a
+        // no-op. The poll loop of that turn observes the missing entry
+        // and records a cancellation marker.
+        let mut running = self.running.lock().await;
+        if let Some(mut child) = running.remove(request_id) {
+            kill_child_group(&mut child).await;
         }
         Ok(())
     }

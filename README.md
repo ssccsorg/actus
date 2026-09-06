@@ -264,7 +264,7 @@ or as manual dev snapshots. Development commits publish nothing.
 | `/v1/git/status` | GET | Git working tree status |
 | `/v1/git/diff` | GET | Git diff (unstaged/staged) |
 | `/v1/git/log` | GET | Recent commit history |
-| `/v1/cancel` | POST | Cancel current agent turn |
+| `/v1/cancel` | POST | Cancel a turn; optional body `{ agent?, request_id? }` scopes the cancel (no body cancels the default agent's whole turn) |
 
 ### API Authentication
 

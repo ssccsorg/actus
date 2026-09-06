@@ -15,6 +15,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "ignore",
+ "libc",
  "mime_guess",
  "reqwest",
  "serde",

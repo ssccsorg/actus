@@ -208,6 +208,12 @@ pub trait AgentBackend: Send + Sync {
     /// Cancel the running turn, if any.
     async fn cancel(&self) -> Result<(), String>;
 
+    /// Cancel one turn by its submit receipt request id. Backends without
+    /// per-request tracking fall back to the agent-wide cancel.
+    async fn cancel_request(&self, _request_id: &str) -> Result<(), String> {
+        self.cancel().await
+    }
+
     /// Snapshot of one thread, if it exists.
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession>;
 
