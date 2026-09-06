@@ -1,11 +1,12 @@
 # Actus: the act runtime of the SSCCS stack
 
 Actus is a headless runtime that executes acts, directly and through
-agents. The name joins act and us: the runtime exists for acts. An act is
-any unit of execution, from reading workspace context, editing files,
-running commands, resolving symbols, and fetching resources, to driving
-an agent through a task. The agent is the first kind of act, not the
-only one.
+agents. The name joins act and us: the runtime exists for acts, the way
+nex-us exists for knowledge. An act is any unit of execution, from
+reading workspace context, editing files, running commands, resolving
+symbols, and fetching resources, to driving an agent through a task. An
+agentic process is one kind of act, the first implemented kind, and not
+the only one.
 
 Actus holds conversation state and workspace context, spawns and routes
 agents, persists threads, and exposes one uniform HTTP API. Planning
@@ -72,6 +73,26 @@ HTTP handlers talk only to the `AgentBackend` trait, so a new platform
 auxiliary agent binary) plugs in by implementing the trait and
 registering it. `/v1/health` reports per-agent status in the `agents`
 map.
+
+## Kinds of Acts
+
+An agentic process is one kind of act. The taxonomy below separates the
+kinds actus runs today from the kinds that arrive with the kineTics
+controller, which supervises every executor type under one contract.
+
+| Kind | Meaning | Status |
+|---|---|---|
+| Direct act | In-process primitives: file search and mention, git status/diff/log, rules, symbols, URL fetch behind an SSRF guard | Implemented |
+| Agentic act | Drive an agent process: a sessionful agent (Telos, ACP over WebSocket), a one-shot CLI profile (`ext_cli`: Ante, AURA, ...), or the in-process native reference | Implemented, the first family |
+| Control act | Meta dispatch: one agent submits, polls, waits for, and cancels another agent's turn through the policy-gated `actus-control` MCP surface | Implemented for agent controllers |
+| Transductive act | Signal receipt and emission through the coordinate substrate (Chton / Tagma Signal) | Under kineTics |
+| Materialization act | Physical actuation: FPGA, robot controllers, sensor networks | Under kineTics |
+| HMI act | Human input into coordinates and system state back to humans | Under kineTics |
+| Bridge act | Interoperability with external distributed systems | Under kineTics |
+
+Each kind stays an act behind the same runtime surface: actus routes it,
+holds its state, and reports its outcome, whether the executor is a
+process, a transducer, or a human interface.
 
 ## Configuration
 
