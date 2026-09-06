@@ -44,6 +44,7 @@ impl AgentBackend for TelosBackend {
             connected: mgr.telos_connected,
             ready: mgr.agent_ready,
             capabilities: self.kind().capabilities(),
+            last_error: None,
         }
     }
 

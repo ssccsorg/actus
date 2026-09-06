@@ -222,6 +222,37 @@ async fn ext_cli_missing_binary_fails_submit() {
 }
 
 #[tokio::test]
+async fn ext_cli_probe_reports_unlaunchable_binary() {
+    // A missing binary and a non-executable file must surface in the
+    // health status at registration, before any submit happens.
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist");
+    let agent = agent_with(dir.path(), missing, Vec::new());
+    let status = agent.status().await;
+    assert!(!status.ready);
+    let err = status.last_error.as_deref().unwrap();
+    assert!(err.contains("cannot start"), "unexpected: {err}");
+
+    let not_exec = dir.path().join("not-exec");
+    std::fs::write(&not_exec, "#!/bin/sh\necho hi\n").unwrap();
+    let agent = agent_with(dir.path(), not_exec, Vec::new());
+    let status = agent.status().await;
+    assert!(!status.ready);
+    let err = status.last_error.as_deref().unwrap();
+    assert!(err.contains("cannot start"), "unexpected: {err}");
+}
+
+#[tokio::test]
+async fn ext_cli_probe_accepts_launchable_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = stub_bin(dir.path(), "ok-cli", "#!/bin/sh\necho ok\n");
+    let agent = agent_with(dir.path(), bin, Vec::new());
+    let status = agent.status().await;
+    assert!(status.ready, "unexpected: {status:?}");
+    assert!(status.last_error.is_none(), "unexpected: {status:?}");
+}
+
+#[tokio::test]
 async fn ext_cli_cancel_request_kills_only_one_turn() {
     let dir = tempfile::tempdir().unwrap();
     let bin = stub_bin(

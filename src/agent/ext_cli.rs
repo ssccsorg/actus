@@ -16,7 +16,7 @@
 //     environment, so each CLI can carry its own credentials.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +39,13 @@ const PROMPT_MARKER: &str = "{prompt}";
 
 /// Poll interval for child exit and cancellation checks.
 const CHILD_POLL_MS: u64 = 100;
+
+/// Grace window for the launchability probe at registration.
+const PROBE_GRACE_MS: u64 = 300;
+
+/// How long the launch probe waits before killing a child that keeps
+/// running without input.
+const PROBE_STEP_MS: u64 = 20;
 
 /// How one spawned turn ended.
 enum ChildOutcome {
@@ -70,6 +77,9 @@ pub struct ExtCliAgent {
     prompt_mode: PromptMode,
     timeout: Duration,
     workdir: PathBuf,
+    /// Launch probe failure at construction; None when the binary could
+    /// be spawned. Readiness and the health status derive from it.
+    start_error: Option<String>,
     threads: Arc<RwLock<HashMap<String, ThreadSession>>>,
     running: Arc<Mutex<HashMap<String, Child>>>,
     notify: watch::Sender<u64>,
@@ -86,6 +96,7 @@ impl ExtCliAgent {
         workdir: PathBuf,
     ) -> Self {
         let (notify, _) = watch::channel(0u64);
+        let start_error = probe_binary(&bin);
         Self {
             name: name.into(),
             bin,
@@ -94,9 +105,26 @@ impl ExtCliAgent {
             prompt_mode,
             timeout: Duration::from_secs(timeout_secs.max(1)),
             workdir,
+            start_error,
             threads: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
             notify,
+        }
+    }
+
+    /// Launch probe failure, if any. Upper layers log it at registration.
+    pub fn probe_error(&self) -> Option<&str> {
+        self.start_error.as_deref()
+    }
+
+    /// Whether the configured binary resolves. A bare command name (no
+    /// path separator) resolves through PATH and cannot be checked with
+    /// `exists()`; the launch probe is authoritative for it.
+    fn bin_present(&self) -> bool {
+        if self.bin.components().count() == 1 && !self.bin.is_absolute() {
+            true
+        } else {
+            self.bin.exists()
         }
     }
 
@@ -146,13 +174,22 @@ impl AgentBackend for ExtCliAgent {
     }
 
     async fn status(&self) -> AgentStatus {
-        let present = self.bin.exists();
+        let present = self.bin_present();
+        // The launch probe ran once at construction. A binary that was
+        // launchable then but is removed later is reported as missing;
+        // a construction-time probe failure keeps its detail.
+        let last_error = match (&self.start_error, present) {
+            (Some(e), _) => Some(e.clone()),
+            (None, true) => None,
+            (None, false) => Some("binary not found".to_string()),
+        };
         AgentStatus {
             name: self.name.clone(),
             kind: AgentKind::ExtCli,
-            connected: present,
-            ready: present,
+            connected: last_error.is_none(),
+            ready: last_error.is_none(),
             capabilities: AgentKind::ExtCli.capabilities(),
+            last_error,
         }
     }
 
@@ -399,6 +436,39 @@ impl AgentBackend for ExtCliAgent {
     async fn create_thread(&self) -> Result<String, String> {
         let (tid, _) = self.get_or_create(None).await;
         Ok(tid)
+    }
+}
+
+/// Probe launchability synchronously at construction: spawn the binary
+/// with no arguments and closed stdio, then reap it within a short grace
+/// window. A binary that starts counts as ready even when it would exit
+/// on its own or wait for input; one that cannot be spawned (missing
+/// file, no execute permission) records the reason for the health status.
+fn probe_binary(bin: &Path) -> Option<String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let mut child = match Command::new(bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => return Some(format!("cannot start: {}", e)),
+    };
+    let deadline = Instant::now() + Duration::from_millis(PROBE_GRACE_MS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return None,
+            Ok(None) => {}
+            Err(e) => return Some(format!("cannot wait: {}", e)),
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(PROBE_STEP_MS));
     }
 }
 

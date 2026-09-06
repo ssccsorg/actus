@@ -88,6 +88,7 @@ impl AgentBackend for NativeAgent {
             connected: true,
             ready: true,
             capabilities: AgentKind::Native.capabilities(),
+            last_error: None,
         }
     }
 

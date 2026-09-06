@@ -127,6 +127,11 @@ pub struct AgentStatus {
     pub connected: bool,
     pub ready: bool,
     pub capabilities: AgentCapabilities,
+    /// Launch-time failure detail. None when the backend started or when
+    /// the backend has no launch probe (sessionful adapters report
+    /// readiness through their own connection state).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// A tool-call authorization awaiting a human decision (ask mode).

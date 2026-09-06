@@ -377,6 +377,13 @@ async fn main() -> anyhow::Result<()> {
                     spec.cli_timeout_secs,
                     agent_workdir.clone(),
                 ));
+                if let Some(err) = backend.probe_error() {
+                    tracing::warn!(
+                        "Agent '{}': launch probe failed ({}); health reports ready=false",
+                        spec.name,
+                        err
+                    );
+                }
                 registry.register(backend, spec.name == default_name);
                 tracing::info!(
                     "Agent '{}' running (ext_cli adapter, raw transport, bin {}, workdir {})",
