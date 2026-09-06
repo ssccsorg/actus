@@ -172,9 +172,14 @@ against the directory actus was started from, and an unresolvable entry
 fails the launch with the agent name.
 
 Raw-CLI agents are one-shot and parallel. Threads stay in memory for the
-server lifetime, there is no streaming or tool approval surface, and the
-model settings live inside the agent's own configuration, which actus
-does not read. The profile contract and integration notes are recorded in
+server lifetime and do not survive a restart. The asymmetry to sessionful
+telos agents is deliberate: a raw-CLI turn is a stateless one-shot
+process that cannot resume, while telos threads persist to disk under
+`~/.actus/threads/{name}/`. Thread management parity (issue #3) decides
+whether auxiliary threads persist later. There is no streaming or tool
+approval surface, and the model settings live inside the agent's own
+configuration, which actus does not read. The profile contract and
+integration notes are recorded in
 `docs/devlogs/2026-09-06-aux-agent-profiles.md`.
 
 ## `@` Mention Context
