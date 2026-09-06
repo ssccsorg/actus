@@ -1,7 +1,7 @@
 // Integration tests for agent config loading (issue #7).
 
 use actus::agent::config::{
-    load_config, load_control_policy, AgentDefaults, PromptMode, ToolApproval,
+    load_config, load_control_policy, resolve_llm_settings, AgentDefaults, PromptMode, ToolApproval,
 };
 use actus::agent::AgentKind;
 use std::path::PathBuf;
@@ -37,6 +37,56 @@ fn no_file_yields_single_default_telos() {
     assert_eq!(specs[0].ws_port, 8080);
     assert_eq!(specs[0].tool_approval, ToolApproval::Always);
     assert!(specs[0].workdir.is_none());
+}
+
+#[test]
+fn llm_settings_resolution_env_wins_and_unquotes() {
+    let env = |key: &str| -> Option<String> {
+        match key {
+            "LLM_PROVIDER" => Some("\"deepseek\"".to_string()),
+            "LLM_BASE_URL" => Some("'https://api.deepseek.com'".to_string()),
+            "LLM_MODEL" => Some("\"deepseek-v4-flash\"".to_string()),
+            _ => None,
+        }
+    };
+    let resolved = resolve_llm_settings(
+        env,
+        "openai-compatible".to_string(),
+        Some("https://flag.example/v1".to_string()),
+    );
+    // The env values win over the flag and the default, and surrounding
+    // quotes are stripped (issue #16 parity: local env drives the LLM).
+    assert_eq!(resolved.provider, "deepseek");
+    assert_eq!(resolved.base_url, "https://api.deepseek.com");
+    assert_eq!(resolved.model, "deepseek-v4-flash");
+    assert_eq!(resolved.model_display, "deepseek-v4-flash");
+}
+
+#[test]
+fn llm_settings_resolution_defaults_and_display_fallback() {
+    // No env: the neutral provider default stays, the flag base URL is
+    // used, and model values stay empty (no vendor model invented).
+    let resolved = resolve_llm_settings(
+        |_| None,
+        "openai-compatible".to_string(),
+        Some("https://flag.example/v1".to_string()),
+    );
+    assert_eq!(resolved.provider, "openai-compatible");
+    assert_eq!(resolved.base_url, "https://flag.example/v1");
+    assert_eq!(resolved.model, "");
+    assert_eq!(resolved.model_display, "");
+
+    // An explicit display name wins over the model fallback.
+    let env = |key: &str| -> Option<String> {
+        match key {
+            "LLM_MODEL" => Some("model-a".to_string()),
+            "LLM_MODEL_DISPLAY" => Some("Model A".to_string()),
+            _ => None,
+        }
+    };
+    let resolved = resolve_llm_settings(env, "openai-compatible".to_string(), None);
+    assert_eq!(resolved.model, "model-a");
+    assert_eq!(resolved.model_display, "Model A");
 }
 
 #[test]

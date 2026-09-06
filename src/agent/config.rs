@@ -164,6 +164,59 @@ pub fn load_control_policy(file: Option<&Path>) -> Result<ControlPolicy, String>
     }
 }
 
+/// Resolved LLM endpoint settings. Actus ships no vendor defaults: the
+/// provider label, model, and base URL come from the local environment
+/// or the CLI flags only (issue #16).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LlmSettings {
+    pub provider: String,
+    pub base_url: String,
+    pub model: String,
+    pub model_display: String,
+}
+
+/// Trim a value and strip one pair of surrounding quotes. `.env` files
+/// often carry `KEY="value"`; a quoted model name or key would fail the
+/// agent-side lookup.
+pub fn unquote_env_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Resolve the OpenAI-compatible endpoint from the local environment and
+/// CLI flags. Precedence matches the original main.rs behavior: env wins
+/// over flags for provider and base URL; model and display name come from
+/// the env only, with display falling back to the model. Missing values
+/// stay empty so a later launch step can warn instead of inventing an
+/// endpoint.
+pub fn resolve_llm_settings(
+    env_get: impl Fn(&str) -> Option<String>,
+    provider_default: String,
+    base_url_flag: Option<String>,
+) -> LlmSettings {
+    let provider = unquote_env_value(&env_get("LLM_PROVIDER").unwrap_or(provider_default));
+    let base_url = env_get("LLM_BASE_URL")
+        .map(|v| unquote_env_value(&v))
+        .or_else(|| base_url_flag.map(|v| unquote_env_value(&v)))
+        .unwrap_or_default();
+    let model = unquote_env_value(&env_get("LLM_MODEL").unwrap_or_default());
+    let model_display =
+        unquote_env_value(&env_get("LLM_MODEL_DISPLAY").unwrap_or_else(|| model.clone()));
+    LlmSettings {
+        provider,
+        base_url,
+        model,
+        model_display,
+    }
+}
+
 /// Values every agent inherits when the config file omits them.
 #[derive(Clone, Debug)]
 pub struct AgentDefaults {

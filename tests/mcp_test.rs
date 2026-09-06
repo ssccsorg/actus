@@ -158,6 +158,15 @@ fn six_server_settings_injection_schema() {
         gh.get("headers").unwrap().get("Authorization").unwrap(),
         "Bearer <PAT>"
     );
+
+    // The OpenAI-compatible endpoint entry carries the resolved label,
+    // base URL, and model (issue #16 fixtures: no vendor names).
+    let entry = &settings["language_models"]["openai_compatible"]["openai-compatible"];
+    assert_eq!(entry["api_url"], "https://api.example.com/v1");
+    let model = &entry["available_models"][0];
+    assert_eq!(model["name"], "example-model");
+    assert_eq!(model["display_name"], "example-model");
+    assert_eq!(model["tool_use"], true);
 }
 
 #[test]
