@@ -110,6 +110,60 @@ pub struct AgentSpec {
     pub cli_timeout_secs: u64,
 }
 
+/// One allow rule: `controller` may dispatch to every name in
+/// `targets`. Either side accepts `"*"` for any agent.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ControlRule {
+    pub controller: String,
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+/// Meta-agent control policy from the `[agent-control]` section of the
+/// config file. Empty `allow` means no agent may control another.
+/// Human API clients carry no controller identity and stay ungated.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ControlPolicy {
+    #[serde(default)]
+    pub allow: Vec<ControlRule>,
+}
+
+impl ControlPolicy {
+    /// Whether `controller` may dispatch to `target`. A controller can
+    /// never dispatch to itself, regardless of the list.
+    pub fn allows(&self, controller: &str, target: &str) -> bool {
+        if controller == target {
+            return false;
+        }
+        self.allow.iter().any(|rule| {
+            (rule.controller == "*" || rule.controller == controller)
+                && rule.targets.iter().any(|t| t == "*" || t == target)
+        })
+    }
+}
+
+/// Load the meta-agent control policy from the config file. A missing
+/// file or a missing `[agent-control]` section yields an empty policy
+/// (default deny for agent-originated dispatch).
+#[derive(Deserialize)]
+struct ControlFile {
+    #[serde(rename = "agent-control", default)]
+    policy: ControlPolicy,
+}
+
+pub fn load_control_policy(file: Option<&Path>) -> Result<ControlPolicy, String> {
+    match file {
+        Some(p) => {
+            let text = std::fs::read_to_string(p)
+                .map_err(|e| format!("cannot read {}: {}", p.display(), e))?;
+            let cfg: ControlFile = toml::from_str(&text)
+                .map_err(|e| format!("cannot parse {}: {}", p.display(), e))?;
+            Ok(cfg.policy)
+        }
+        None => Ok(ControlPolicy::default()),
+    }
+}
+
 /// Values every agent inherits when the config file omits them.
 #[derive(Clone, Debug)]
 pub struct AgentDefaults {

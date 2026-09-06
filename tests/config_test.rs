@@ -1,6 +1,8 @@
 // Integration tests for agent config loading (issue #7).
 
-use actus::agent::config::{load_config, AgentDefaults, PromptMode, ToolApproval};
+use actus::agent::config::{
+    load_config, load_control_policy, AgentDefaults, PromptMode, ToolApproval,
+};
 use actus::agent::AgentKind;
 use std::path::PathBuf;
 
@@ -35,6 +37,42 @@ fn no_file_yields_single_default_telos() {
     assert_eq!(specs[0].ws_port, 8080);
     assert_eq!(specs[0].tool_approval, ToolApproval::Always);
     assert!(specs[0].workdir.is_none());
+}
+
+#[test]
+fn control_policy_parsed_and_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        r#"
+[agent-control]
+allow = [
+  { controller = "telos", targets = ["ante", "aura"] },
+  { controller = "meta", targets = ["*"] },
+  { controller = "*", targets = ["audit"] },
+]
+"#,
+    );
+    let policy = load_control_policy(Some(&path)).unwrap();
+    assert!(policy.allows("telos", "ante"));
+    assert!(policy.allows("telos", "aura"));
+    assert!(!policy.allows("telos", "aux"));
+    assert!(policy.allows("meta", "anything"));
+    assert!(policy.allows("other", "audit"));
+    // A controller can never dispatch to itself, even when listed.
+    assert!(!policy.allows("telos", "telos"));
+}
+
+#[test]
+fn control_policy_defaults_to_deny() {
+    let dir = tempfile::tempdir().unwrap();
+    // A config file without an [agent-control] section denies everything.
+    let path = write_config(dir.path(), "");
+    let policy = load_control_policy(Some(&path)).unwrap();
+    assert!(!policy.allows("telos", "ante"));
+    // No config file at all denies everything too.
+    let policy = load_control_policy(None).unwrap();
+    assert!(!policy.allows("any", "any"));
 }
 
 #[test]

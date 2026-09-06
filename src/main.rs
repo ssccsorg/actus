@@ -12,19 +12,31 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use actus::agent::config::{load_config, AgentDefaults};
+use actus::agent::config::{load_config, load_control_policy, AgentDefaults};
 use actus::agent::ext_cli::ExtCliAgent;
 use actus::agent::native::NativeAgent;
 use actus::agent::AgentKind;
 use actus::agent::AgentRegistry;
+use actus::control;
 use actus::server::{run_http_server, AppState};
 use actus::telos::backend::TelosBackend;
 use actus::telos::control::run_ws_server;
 use actus::telos::{ensure_telos_settings, launch_telos, TelosManager, WsCommandTx};
 
+/// The `actus control` stdio MCP proxy is a subcommand so the same binary
+/// can serve as a context server of a sessionful agent such as telos.
+#[derive(clap::Subcommand, Debug, Clone)]
+enum Command {
+    /// Run the meta-agent control MCP proxy over stdio.
+    Control,
+}
+
 #[derive(clap::Parser, Debug, Clone)]
 #[command(name = "", version, about = "Actus agent runtime server")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Telos binary path
     #[arg(long)]
     bin: Option<PathBuf>,
@@ -139,6 +151,12 @@ fn resolve_api_token(arg: Option<String>) -> anyhow::Result<String> {
 async fn main() -> anyhow::Result<()> {
     let args: Args = clap::Parser::parse();
 
+    // The control MCP proxy runs as its own process under a sessionful
+    // agent; it never starts the server.
+    if let Some(Command::Control) = args.command {
+        return control::run_control_proxy().await;
+    }
+
     // Init logging — always to stderr. The filter falls back to
     // `actus=info` when RUST_LOG is unset or invalid.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -233,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
         ws_port: args.ws_port,
     };
     let specs = load_config(config_file.as_deref(), &defaults).map_err(anyhow::Error::msg)?;
+    let control_policy = load_control_policy(config_file.as_deref()).map_err(anyhow::Error::msg)?;
     tracing::info!(
         "Config: {} agent(s) from {}",
         specs.len(),
@@ -325,6 +344,9 @@ async fn main() -> anyhow::Result<()> {
                     &session_id,
                     &ws_host,
                     spec.tool_approval.as_str(),
+                    &spec.name,
+                    args.http_port,
+                    &api_token,
                     &threads_dir.join("telos.log"),
                 )
                 .await?;
@@ -411,10 +433,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("  Threads:    {}", threads_root.display());
 
     // Build app state and start HTTP server
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::new_with_policy(
         registry,
         workdir.clone(),
         Some(api_token.clone()),
+        control_policy,
     ));
 
     let http_server = tokio::spawn({

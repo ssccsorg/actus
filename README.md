@@ -185,6 +185,44 @@ configuration, which actus does not read. The profile contract and
 integration notes are recorded in
 `docs/devlogs/2026-09-06-aux-agent-profiles.md`.
 
+### Meta Agents and the Control Surface
+
+A sessionful agent such as telos can act as a meta agent: dispatch other
+agents (Ante, AURA, any `ext_cli` entry) and collect their results.
+Telos runs `actus control` as one of its MCP context servers; each MCP
+tool call becomes an authenticated actus API call carrying the identity
+of the calling agent.
+
+```toml
+[[agents]]
+name = "telos"
+kind = "telos"
+# ...existing fields...
+
+  [[agents.mcp]]
+  name = "actus-control"
+  command = "/absolute/path/to/actus"
+  args = ["control"]
+
+[agent-control]
+allow = [
+  { controller = "telos", targets = ["ante", "aura"] },
+]
+```
+
+Tools exposed to the meta agent: `agent_list`, `agent_submit`,
+`agent_poll`, `agent_wait` (bounded wait for completion), `agent_cancel`,
+and `agent_thread`. The launcher exports `ACTUS_AGENT_NAME`,
+`ACTUS_HTTP_PORT`, and `ACTUS_API_TOKEN` to agent processes so the proxy
+knows where to call and who it is.
+
+Dispatch is default deny: only pairs listed under `[agent-control]` may
+run, a controller can never dispatch to itself, and `*` matches any
+name. Human API clients carry no identity header and are not gated.
+Telos ask-mode approval also applies to the control tool calls themselves
+through the existing HITL bridge. See
+`docs/devlogs/2026-09-06-meta-agent-control.md` for the design record.
+
 ## `@` Mention Context
 
 Typing `@` in the CLI injects context into the message before it is sent,

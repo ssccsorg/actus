@@ -570,6 +570,9 @@ fn telos_command(
     session_id: &str,
     ws_host: &str,
     tool_approval: &str,
+    agent_name: &str,
+    http_port: u16,
+    api_token: &str,
     stderr_log: std::fs::File,
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(bin_path);
@@ -584,6 +587,12 @@ fn telos_command(
         .env("TELOS_STATELESS", "1")
         .env("TELOS_SESSION_ID", session_id)
         .env("TELOS_TOOL_APPROVAL", tool_approval)
+        // The control MCP proxy (`actus control`), spawned by the agent as
+        // a stdio MCP server, inherits these to reach the actus HTTP API
+        // and to identify itself as this agent.
+        .env("ACTUS_AGENT_NAME", agent_name)
+        .env("ACTUS_HTTP_PORT", http_port.to_string())
+        .env("ACTUS_API_TOKEN", api_token)
         .env("RUST_LOG", "info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(stderr_log));
@@ -597,6 +606,9 @@ pub async fn launch_telos(
     session_id: &str,
     ws_host: &str,
     tool_approval: &str,
+    agent_name: &str,
+    http_port: u16,
+    api_token: &str,
     stderr_log: &Path,
 ) -> anyhow::Result<std::process::Child> {
     tracing::info!("Launching telos...");
@@ -610,6 +622,9 @@ pub async fn launch_telos(
         session_id,
         ws_host,
         tool_approval,
+        agent_name,
+        http_port,
+        api_token,
         stderr_log,
     );
     let child = cmd
@@ -762,6 +777,9 @@ mod tests {
             "ses_actus-test",
             "127.0.0.1:8080",
             "always",
+            "telos",
+            9090,
+            "test-token",
             log,
         );
 
@@ -797,6 +815,9 @@ mod tests {
             ("TELOS_STATELESS", "1"),
             ("TELOS_SESSION_ID", "ses_actus-test"),
             ("TELOS_TOOL_APPROVAL", "always"),
+            ("ACTUS_AGENT_NAME", "telos"),
+            ("ACTUS_HTTP_PORT", "9090"),
+            ("ACTUS_API_TOKEN", "test-token"),
             ("RUST_LOG", "info"),
         ];
         for (key, value) in expect {

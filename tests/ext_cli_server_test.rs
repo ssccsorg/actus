@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use actus::agent::config::PromptMode;
+use actus::agent::config::{ControlPolicy, ControlRule, PromptMode};
 use actus::agent::ext_cli::ExtCliAgent;
 use actus::agent::AgentRegistry;
 use actus::server::{build_router, AppState, SharedState};
@@ -39,6 +39,15 @@ fn client() -> reqwest::Client {
 /// State with one default ext_cli agent running the python3 stub in the
 /// given workdir.
 fn test_state_with_agent(bin: std::path::PathBuf, workdir: &std::path::Path) -> SharedState {
+    test_state_with_agent_and_policy(bin, workdir, ControlPolicy::default())
+}
+
+/// State with one default ext_cli agent and a meta-agent control policy.
+fn test_state_with_agent_and_policy(
+    bin: std::path::PathBuf,
+    workdir: &std::path::Path,
+    policy: ControlPolicy,
+) -> SharedState {
     let agent = ExtCliAgent::new(
         "aux",
         bin,
@@ -50,10 +59,11 @@ fn test_state_with_agent(bin: std::path::PathBuf, workdir: &std::path::Path) -> 
     );
     let mut registry = AgentRegistry::new();
     registry.register(Arc::new(agent), true);
-    Arc::new(AppState::new(
+    Arc::new(AppState::new_with_policy(
         registry,
         workdir.to_path_buf(),
         Some("test-token".to_string()),
+        policy,
     ))
 }
 
@@ -107,8 +117,11 @@ async fn wait_completed(base: &str, thread_id: &str) -> String {
 #[tokio::test]
 async fn aux_chat_roundtrip_over_http() {
     let dir = tempfile::tempdir().unwrap();
-    let (base, server) =
-        spawn_server(test_state_with_agent(std::path::PathBuf::from("python3"), dir.path())).await;
+    let (base, server) = spawn_server(test_state_with_agent(
+        std::path::PathBuf::from("python3"),
+        dir.path(),
+    ))
+    .await;
 
     let r = client()
         .post(format!("{base}/v1/chat/async"))
@@ -149,8 +162,11 @@ async fn aux_chat_roundtrip_over_http() {
 #[tokio::test]
 async fn aux_cancel_one_parallel_turn_over_http() {
     let dir = tempfile::tempdir().unwrap();
-    let (base, server) =
-        spawn_server(test_state_with_agent(std::path::PathBuf::from("python3"), dir.path())).await;
+    let (base, server) = spawn_server(test_state_with_agent(
+        std::path::PathBuf::from("python3"),
+        dir.path(),
+    ))
+    .await;
 
     let slow = submit_chat(&base, "slow:one").await;
     let fast = submit_chat(&base, "fast two").await;
@@ -195,6 +211,70 @@ async fn aux_health_reports_launch_probe_failure() {
     assert_eq!(aux["ready"], false);
     let err = aux["last_error"].as_str().unwrap();
     assert!(err.contains("cannot start"), "unexpected: {err}");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn controller_dispatch_denied_without_policy_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, server) = spawn_server(test_state_with_agent(
+        std::path::PathBuf::from("python3"),
+        dir.path(),
+    ))
+    .await;
+
+    // An agent-originated dispatch (identity header) with an empty
+    // policy is denied before any process starts.
+    let r = client()
+        .post(format!("{base}/v1/chat/async"))
+        .header("x-actus-controller", "telos")
+        .json(&serde_json::json!({ "agent": "aux", "message": "hi" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    // A human client without the header keeps working.
+    let r = client()
+        .post(format!("{base}/v1/chat/async"))
+        .json(&serde_json::json!({ "agent": "aux", "message": "hi" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn controller_dispatch_allowed_by_policy_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy = ControlPolicy {
+        allow: vec![ControlRule {
+            controller: "telos".to_string(),
+            targets: vec!["aux".to_string()],
+        }],
+    };
+    let (base, server) = spawn_server(test_state_with_agent_and_policy(
+        std::path::PathBuf::from("python3"),
+        dir.path(),
+        policy,
+    ))
+    .await;
+
+    let r = client()
+        .post(format!("{base}/v1/chat/async"))
+        .header("x-actus-controller", "telos")
+        .json(&serde_json::json!({ "agent": "aux", "message": "hello meta" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let thread_id = body["thread_id"].as_str().unwrap();
+    let content = wait_completed(&base, thread_id).await;
+    assert_eq!(content, "echo:hello meta");
 
     server.abort();
 }

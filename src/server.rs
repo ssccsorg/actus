@@ -3,7 +3,7 @@
 use axum::response::sse::Event;
 use axum::{
     extract::{Path, Query, Request, State},
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{Json, Response, Sse},
     routing::{get, post},
@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use std::path::PathBuf;
 
+use crate::agent::config::ControlPolicy;
 use crate::agent::{AgentBackend, AgentRegistry, AgentStatus};
 use crate::context;
 use crate::files;
@@ -34,14 +35,27 @@ pub struct AppState {
     /// Bearer token required on every route except /health. None disables
     /// authentication.
     pub api_token: Option<String>,
+    /// Meta-agent control policy: which agent may dispatch which other
+    /// agent. Empty means agent-originated dispatch is denied.
+    pub control_policy: ControlPolicy,
 }
 
 impl AppState {
     pub fn new(agents: AgentRegistry, workdir: PathBuf, api_token: Option<String>) -> Self {
+        Self::new_with_policy(agents, workdir, api_token, ControlPolicy::default())
+    }
+
+    pub fn new_with_policy(
+        agents: AgentRegistry,
+        workdir: PathBuf,
+        api_token: Option<String>,
+        control_policy: ControlPolicy,
+    ) -> Self {
         Self {
             agents,
             workdir,
             api_token,
+            control_policy,
         }
     }
 }
@@ -97,6 +111,25 @@ async fn default_agent(state: &SharedState) -> Result<Arc<dyn AgentBackend>, Sta
         .agents
         .default_agent()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Meta-agent control gate. A request carrying an `X-Actus-Controller`
+/// identity header originates from an agent (the `actus control` MCP
+/// proxy) and may only dispatch to agents the policy allows. Requests
+/// without the header are human API clients and stay ungated.
+fn control_gate(state: &AppState, headers: &HeaderMap, target: &str) -> Result<(), StatusCode> {
+    let Some(controller) = headers
+        .get("x-actus-controller")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(());
+    };
+    if state.control_policy.allows(controller, target) {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
 }
 
 /// Resolve the requested agent, falling back to the default when no name
@@ -192,9 +225,11 @@ async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
 /// Non-streaming async chat: submit and get a task_id + thread_id back.
 async fn chat_async(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, StatusCode> {
     let agent = agent_for(&state, req.agent.as_deref()).await?;
+    control_gate(&state, &headers, agent.name())?;
     let receipt = agent
         .submit(req.thread_id.as_deref(), &req.message)
         .await
@@ -215,9 +250,11 @@ async fn chat_async(
 /// Streaming chat: POST /v1/chat returns SSE events until complete.
 async fn chat_stream(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
     let agent = agent_for(&state, req.agent.as_deref()).await?;
+    control_gate(&state, &headers, agent.name())?;
 
     // Submit through the fabric: thread creation, context injection,
     // command send, and the resume wait happen inside the adapter.
@@ -925,6 +962,7 @@ struct CancelRequest {
 
 async fn cancel_turn(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Json<serde_json::Value> {
     let req: CancelRequest = if body.is_empty() {
@@ -945,6 +983,15 @@ async fn cancel_turn(
             }))
         }
     };
+    // The meta-agent gate applies to cancels the same way it applies to
+    // dispatches: a controller may only cancel turns of agents it may
+    // dispatch to.
+    if let Err(e) = control_gate(&state, &headers, agent.name()) {
+        return Json(serde_json::json!({
+            "status": "error",
+            "error": format!("forbidden: {}", e.as_str())
+        }));
+    }
     let result = match &req.request_id {
         Some(request_id) => agent.cancel_request(request_id).await,
         None => agent.cancel().await,
