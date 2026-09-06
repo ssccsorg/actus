@@ -391,24 +391,27 @@ actus/
 
 ## Where Actus Sits in the Stack
 
-Actus is the execution plane of the stack. Orchestration decisions and
-the knowledge space live in the plane above (kineTic); agents and direct
-acts execute here and below. Actus owns no knowledge store: it executes
-acts, and the agents it drives exchange knowledge with the plane above.
+[kineTics](https://docs.ssccs.org/projects/kinetics/) is the universal
+execution and transduction controller of the stack: it supervises
+executor types under one coordinate-based contract, with a planned
+status and no implementation yet. Actus is the hub of the agent type
+under that supervision. It manages the lifecycle of any agent instance,
+vendor-agnostic, with Telos as the base system agent instance among them;
+third-party and auxiliary agents attach behind the same hub. Building
+actus as the agent supervisor is the first step toward kineTics, and
+actus is positioned to become its core implementation.
 
 ```mermaid
 flowchart TB
-    Upper["Orchestration and knowledge plane (kineTic)"]
-    Client["External clients (CLI / HTTP)"]
-    Actus["Actus: the execution plane\nsessions and threads · direct acts · agent bridge"]
+    Kine["kineTics: universal execution controller\nsupervises executor types under one contract (planned)"]
+    Actus["Actus: hub of the agent executor type\nlifecycle of N agent instances, vendor-agnostic\n+ direct in-process acts"]
 
-    Upper -.->|chooses acts and agents| Actus
-    Client -->|REST + SSE, bearer auth| Actus
+    Kine -->|supervises executor types| Actus
 
-    subgraph Processes["act and agent processes"]
-        Telos["Telos\nsessionful agent, ACP over WebSocket"]
-        Aux["ext_cli agents\none-shot profiles (Ante, AURA, ...)"]
-        Native["native\nin-process reference adapter"]
+    subgraph Instances["agent instances under the hub"]
+        Telos["Telos: base system agent instance\nsessionful, ACP over WebSocket"]
+        Aux["Third-party and auxiliary agents\next_cli profiles (Ante, AURA, ...)"]
+        Native["Native: in-process reference instance"]
     end
 
     Actus --> Telos
@@ -416,9 +419,11 @@ flowchart TB
     Actus --> Native
 ```
 
-Agents read knowledge from the plane above to decide and write execution
-results back as facts, forming a stigmergic loop between knowledge and
-action. Actus stays out of that loop's storage: its role is execution.
+Agent instances read knowledge from the knowledge plane above to decide
+and write execution results back as facts, forming a stigmergic loop
+between knowledge and action. Actus stays out of that loop's storage:
+its role is execution, as the agent hub of a controller that will also
+supervise signal, hardware, human-machine, and bridge executors.
 
 ## License
 
