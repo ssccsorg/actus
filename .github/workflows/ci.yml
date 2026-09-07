@@ -65,12 +65,15 @@ jobs:
           # Stub backend keeps the tier LLM-free while the real binary
           # connects, so health reflects telos_connected/agent_ready true
           # and the full endpoint suite runs against a real agent process.
+          # Mount actus outside the telos image's /workspace root: the
+          # image carries its own Cargo.toml there, and cargo would
+          # otherwise treat actus as a member of the telos workspace.
           docker run --rm \
             -e TELOS_BIN=/workspace/target/telos-release/tel \
             -e LLM_API_KEY=ci-skip \
             -e TELOS_STUB_BACKEND=1 \
-            -v "$GITHUB_WORKSPACE:/workspace/actus" \
-            -w /workspace/actus \
+            -v "$GITHUB_WORKSPACE:/home/actus" \
+            -w /home/actus \
             "$image" \
             bash run.sh --test
 
