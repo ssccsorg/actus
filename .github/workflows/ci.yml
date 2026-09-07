@@ -46,10 +46,10 @@ jobs:
             actus:ci --test
 
   # Real-agent tier: runs the suite against the actual headless agent
-  # binary from the prebuilt telos image (ssccsorg/telos). The image is
-  # never built here; the job skips with a notice until the telos publish
-  # workflow ships it (telos issue #7). A PAT with read:packages access
-  # to ghcr.io/ssccsorg/telos is required as the ACTUS_TELOS_PAT secret.
+  # binary from the public prebuilt telos image (ghcr.io/ssccsorg/telos).
+  # The image is never built here and is pulled anonymously; an optional
+  # ACTUS_TELOS_PAT (read:packages) is only used as a fallback while the
+  # package is still private.
   e2e-real-agent:
     runs-on: ubuntu-latest
     steps:
@@ -61,14 +61,14 @@ jobs:
         run: |
           set -e
           image="ghcr.io/ssccsorg/telos:latest"
-          if [ -z "$ACTUS_TELOS_PAT" ]; then
-            echo "::notice::e2e-real-agent skipped: ACTUS_TELOS_PAT is not set. Add a PAT with read:packages access to ghcr.io/ssccsorg/telos."
-            exit 0
-          fi
-          echo "$ACTUS_TELOS_PAT" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
           if ! docker pull "$image"; then
-            echo "::notice::e2e-real-agent skipped: prebuilt telos image not published yet (ssccsorg/telos issue #7)."
-            exit 0
+            if [ -n "$ACTUS_TELOS_PAT" ]; then
+              echo "$ACTUS_TELOS_PAT" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+              docker pull "$image" || { echo "::notice::e2e-real-agent skipped: prebuilt telos image not available."; exit 0; }
+            else
+              echo "::notice::e2e-real-agent skipped: prebuilt telos image not available."
+              exit 0
+            fi
           fi
           # Stub backend keeps the tier LLM-free while the real binary
           # connects, so health reflects telos_connected/agent_ready true
