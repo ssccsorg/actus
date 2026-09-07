@@ -320,11 +320,10 @@ The workflow in `.github/workflows/ci.yml` runs two tiers:
   and integration suites and the HTTP endpoints.
 - `e2e-real-agent`: runs the same suite against the real headless agent
   binary from the prebuilt telos image `ghcr.io/ssccsorg/telos`. The
-  image is pulled, never built here, and the agent runs with the stub
-  backend so the tier stays LLM-free while `telos_connected` and
-  `agent_ready` reflect a real process. The job needs the published
-  image and an `ACTUS_TELOS_PAT` secret (read:packages access); until
-  both exist it skips with a notice (telos publish tracking issue).
+  image is pulled anonymously (the package is public), never built here,
+  and the agent runs with the stub backend so the tier stays LLM-free
+  while `telos_connected` and `agent_ready` reflect a real process. If
+  the published image is unavailable the tier skips with a notice.
 
 ### API Endpoints
 

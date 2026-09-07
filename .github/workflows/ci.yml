@@ -47,28 +47,20 @@ jobs:
 
   # Real-agent tier: runs the suite against the actual headless agent
   # binary from the public prebuilt telos image (ghcr.io/ssccsorg/telos).
-  # The image is never built here and is pulled anonymously; an optional
-  # ACTUS_TELOS_PAT (read:packages) is only used as a fallback while the
-  # package is still private.
+  # The image is never built here and is pulled anonymously; no registry
+  # credentials are required because the package is public.
   e2e-real-agent:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
       - name: Real-agent suite against the prebuilt telos image
-        env:
-          ACTUS_TELOS_PAT: ${{ secrets.ACTUS_TELOS_PAT }}
         run: |
           set -e
           image="ghcr.io/ssccsorg/telos:latest"
           if ! docker pull "$image"; then
-            if [ -n "$ACTUS_TELOS_PAT" ]; then
-              echo "$ACTUS_TELOS_PAT" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
-              docker pull "$image" || { echo "::notice::e2e-real-agent skipped: prebuilt telos image not available."; exit 0; }
-            else
-              echo "::notice::e2e-real-agent skipped: prebuilt telos image not available."
-              exit 0
-            fi
+            echo "::notice::e2e-real-agent skipped: prebuilt telos image not available."
+            exit 0
           fi
           # Stub backend keeps the tier LLM-free while the real binary
           # connects, so health reflects telos_connected/agent_ready true
