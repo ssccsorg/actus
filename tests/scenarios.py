@@ -136,25 +136,44 @@ def check_stub_response(thread):
 
 # ── agent process management ───────────────────────────────────────────
 
+def _agent_pid_patterns():
+    # Match the agent binary actually pinned for this run (TELOS_BIN), not a
+    # hardcoded sibling layout, so reconnect scenarios stay deterministic
+    # whether TELOS_BIN points at a local copy, the sibling release build,
+    # or the CI image path.
+    # Require the headless flag: the actus server command line also carries
+    # the binary path (as --bin), so matching the path alone would kill the
+    # server along with the agent.
+    patterns = [re.escape(os.path.abspath(TELOS_BIN)) + r" +--headless"]
+    # Fallback: canonical telos-release layout (CI image path).
+    patterns.append(r"telos-release/(tel|telos) +--headless")
+    return patterns
+
+
 def find_agent_pid():
-    out = subprocess.run(
-        ["pgrep", "-f", "telos-release/(tel|telos) --headless"],
-        capture_output=True, text=True,
-    ).stdout.split()
-    return int(out[0]) if out else None
+    for pattern in _agent_pid_patterns():
+        out = subprocess.run(
+            ["pgrep", "-f", pattern], capture_output=True, text=True,
+        ).stdout.split()
+        if out:
+            return int(out[0])
+    return None
 
 
 def kill_all_agents():
     """Kill every telos agent. The reconnect scenarios own the
     agent lifecycle; leaving relaunched agents running lets a stale one
     reconnect instantly and mask the disconnect window."""
-    out = subprocess.run(
-        ["pgrep", "-f", "telos-release/(tel|telos) --headless"],
-        capture_output=True, text=True,
-    ).stdout.split()
-    for pid in out:
-        subprocess.run(["kill", "-9", pid], capture_output=True)
-    return len(out)
+    killed = set()
+    for pattern in _agent_pid_patterns():
+        out = subprocess.run(
+            ["pgrep", "-f", pattern], capture_output=True, text=True,
+        ).stdout.split()
+        for pid in out:
+            if pid not in killed:
+                killed.add(pid)
+                subprocess.run(["kill", "-9", pid], capture_output=True)
+    return len(killed)
 
 
 def agent_launch_contract(pid):
@@ -410,7 +429,13 @@ def scenario_fetch_and_subagent():
             m.get("content", "") for m in thread.get("messages", [])
             if m.get("role") == "assistant" and m.get("entry_type") != "tool_call"
         )
-        check("sub-agent result reported", bool(content), content[:80])
+        err_markers = ("[error]", "aborted", "exited mid-turn")
+        bad = any(marker in content for marker in err_markers)
+        check(
+            "sub-agent result reported without error",
+            bool(content) and not bad,
+            content[:120] if content else "no assistant content",
+        )
 
 
 def scenario_thread_mention():
@@ -467,6 +492,8 @@ def scenario_soak():
 
 def main():
     print(f"scenarios: http {BASE}, agent {os.path.abspath(TELOS_BIN)}")
+    deadline_s = float(os.environ.get("SCENARIOS_DEADLINE_S", "0") or 0)
+    start = time.time()
     h = wait_ready(timeout=40)
     check("server and agent ready", bool(h))
     if not h:
@@ -482,7 +509,11 @@ def main():
     scenario_fetch_and_subagent()
     scenario_thread_mention()
     if SOAK_MINUTES > 0:
-        scenario_soak()
+        remaining = deadline_s - (time.time() - start) if deadline_s else None
+        if remaining is not None and remaining <= 0:
+            print("    skipped soak: scenario deadline reached")
+        else:
+            scenario_soak()
 
     print(f"\nscenarios: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)

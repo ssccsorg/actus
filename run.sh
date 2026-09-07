@@ -418,12 +418,31 @@ run_scenarios() {
     start_server
     echo ""
     local soak="${SOAK_MINUTES:-2}"
+    # Hard upper bound so a wedged scenario cannot pin CI or a local run
+    # forever; override with SCENARIOS_DEADLINE_S.
+    local deadline="${SCENARIOS_DEADLINE_S:-1200}"
     # -u: stream scenario progress unbuffered; the launcher redirects the
     # output to a log, and buffered prints would hide a long-running
     # scenario until it exits.
-    if ACTUS_HTTP_PORT="$HTTP_PORT" ACTUS_WS_PORT="$WS_PORT" \
+    ACTUS_HTTP_PORT="$HTTP_PORT" ACTUS_WS_PORT="$WS_PORT" \
         TELOS_BIN="$TELOS_BIN" SOAK_MINUTES="$soak" \
-        python3 -u "$SCRIPT_DIR/tests/scenarios.py"; then
+        SCENARIOS_DEADLINE_S="$deadline" \
+        python3 -u "$SCRIPT_DIR/tests/scenarios.py" &
+    local scenario_pid=$!
+    local waited=0
+    while kill -0 "$scenario_pid" 2>/dev/null; do
+        sleep 5
+        waited=$((waited + 5))
+        if [ "$waited" -ge "$deadline" ]; then
+            warn "Scenarios exceeded ${deadline}s deadline; killing the run"
+            kill "$scenario_pid" 2>/dev/null || true
+            wait "$scenario_pid" 2>/dev/null || true
+            cleanup
+            fail "Scenarios timed out after ${deadline}s"
+            return
+        fi
+    done
+    if wait "$scenario_pid"; then
         pass "Scenarios passed"
     else
         fail "Scenarios failed"
