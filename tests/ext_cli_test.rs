@@ -6,7 +6,6 @@
 // mirrors the Ante profile (`cli_args = ["-p", "{prompt}"]`).
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -15,11 +14,29 @@ use actus::agent::ext_cli::ExtCliAgent;
 use actus::agent::AgentBackend;
 
 fn stub_bin(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
+    // Create the executable from a child process, not this one. Writing it
+    // here leaves a write handle in the test process, and any concurrent
+    // fork on another test thread inherits that handle until its own child
+    // execs. Execing this path then fails with ETXTBSY for as long as the
+    // forked child is delayed, which outlives the adapter's retry budget on
+    // a loaded runner. A child writer keeps the handle out of the process
+    // that forks, so the exec target is never open for writing.
+    let mut writer = Command::new("sh")
+        .arg("-c")
+        .arg("cat > \"$0\" && chmod 755 \"$0\"")
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn stub writer");
+    let mut stdin = writer.stdin.take().expect("stub writer stdin");
+    stdin.write_all(body.as_bytes()).expect("write stub body");
+    drop(stdin);
+    let status = writer.wait().expect("wait for stub writer");
+    assert!(status.success(), "stub writer failed: {status}");
     path
 }
 
