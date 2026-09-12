@@ -408,10 +408,15 @@ run_scenarios() {
     if [ "$stub" = "1" ]; then
         info "${BOLD}Deterministic contract scenarios (stub backend, no LLM)${END}"
         # The stub backend answers every prompt with a fixed string, so the
-        # scenario checks are reproducible without an API key.
+        # scenario checks are reproducible without a real API key. The actus
+        # server still requires a non-empty api_key to launch a telos agent,
+        # so export an empty value: the variables must stay exported even
+        # when the caller never set them, otherwise the server sees them
+        # unset and exits with "LLM API key required".
         export TELOS_STUB_BACKEND=1
         export ACTUS_STUB=1
-        LLM_API_KEY=""
+        export LLM_API_KEY=""
+        export DEEPSEEK_API_KEY=""
     else
         info "${BOLD}Real-scenario tests (tool turns, concurrency, reconnect, soak)${END}"
     fi
