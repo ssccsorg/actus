@@ -162,7 +162,7 @@ def main():
 
     # Build and start Rust server
     rust_cmd = build_rust_cmd(bin_path, args)
-    # Log the exact command line (token masked) so a launch failure is
+    # Log the exact command line (secrets masked) so a launch failure is
     # diagnosable from the runner output alone.
     masked_cmd = []
     mask_next = False
@@ -170,7 +170,7 @@ def main():
         if mask_next:
             masked_cmd.append("<redacted>")
             mask_next = False
-        elif piece == "--api-token":
+        elif piece in ("--api-token", "--api-key"):
             masked_cmd.append(piece)
             mask_next = True
         else:
