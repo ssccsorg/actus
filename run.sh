@@ -253,6 +253,11 @@ test_llm_chat() {
         warn "Skipped: set LLM_CHAT=1 to run the live LLM round trip"
         return 0
     fi
+    # Even with LLM_CHAT=1, never spend tokens from CI.
+    if [ "${CI:-}" = "true" ] && [ "${ALLOW_LLM_IN_CI:-0}" != "1" ]; then
+        warn "Skipped: refusing the live LLM round trip under CI"
+        return 0
+    fi
     local api_key="${LLM_API_KEY:-}"
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
         api_key=$(grep -E '^LLM_API_KEY=' "$SCRIPT_DIR/.env" | head -1 | cut -d= -f2-)
@@ -418,6 +423,12 @@ run_scenarios() {
         export LLM_API_KEY=""
         export DEEPSEEK_API_KEY=""
     else
+        # Hard stop: the real tier prompts a live provider. A CI job must
+        # never spend LLM tokens, so refuse unless an operator explicitly
+        # overrides with ALLOW_LLM_IN_CI=1.
+        if [ "${CI:-}" = "true" ] && [ "${ALLOW_LLM_IN_CI:-0}" != "1" ]; then
+            fail "refusing to run the live LLM tier under CI (set ALLOW_LLM_IN_CI=1 to override)"
+        fi
         info "${BOLD}Real-scenario tests (tool turns, concurrency, reconnect, soak)${END}"
     fi
     start_server
@@ -485,6 +496,7 @@ Modes:
 Environment:
   LLM_API_KEY      API key for the OpenAI-compatible endpoint
   LLM_CHAT         Set to 1 to run the live LLM chat round trip in --test
+  ALLOW_LLM_IN_CI  Set to 1 to allow the live LLM tiers when CI=true (default: refuse)
   LLM_PROVIDER     Provider label for the OpenAI-compatible endpoint (default: openai-compatible)
   LLM_BASE_URL     Base URL of the OpenAI-compatible endpoint
   LLM_MODEL        Model name served by the endpoint

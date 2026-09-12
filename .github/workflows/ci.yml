@@ -34,41 +34,47 @@ jobs:
         run: |
           # Mock-only policy: the agent is a stub (/bin/true) and the chat
           # round trip is skipped (ci-skip key plus the LLM_CHAT gate), so
-          # CI never spends LLM tokens. The suite compiles and runs the Rust
-          # unit and integration tests (tests/*.rs) and exercises the HTTP
+          # CI never spends LLM tokens. run.sh also refuses the live tiers
+          # whenever CI=true unless ALLOW_LLM_IN_CI=1 is set; no workflow
+          # sets it. The suite compiles and runs the Rust unit and
+          # integration tests (tests/*.rs) and exercises the HTTP
           # endpoints; live runs require LLM_CHAT=1 and a real key locally.
-          # Contract E2E against the fake backend runs in the telos CI
+          # Contract E2E against the stub backend runs in the telos CI
           # workflow.
           docker run --rm \
+            -e CI \
             -e TELOS_BIN=/bin/true \
             -e LLM_API_KEY=ci-skip \
             --entrypoint ./run.sh \
             actus:ci --test
 
-  # Real-agent tier: runs the suite against the actual headless agent
+  # Agent-binary tier: runs the suite against the actual headless agent
   # binary from the public prebuilt telos image (ghcr.io/ssccsorg/telos).
   # The image is never built here and is pulled anonymously; no registry
   # credentials are required because the package is public.
-  e2e-real-agent:
+  e2e-agent-binary:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Real-agent suite against the prebuilt telos image
+      - name: Suite against the prebuilt telos image
         run: |
           set -e
           image="ghcr.io/ssccsorg/telos:latest"
           if ! docker pull "$image"; then
-            echo "::notice::e2e-real-agent skipped: prebuilt telos image not available."
+            echo "::notice::e2e-agent-binary skipped: prebuilt telos image not available."
             exit 0
           fi
-          # Stub backend keeps the tier LLM-free while the real binary
-          # connects, so health reflects telos_connected/agent_ready true
-          # and the full endpoint suite runs against a real agent process.
+          # Stub backend keeps the tier LLM-free (TELOS_STUB_BACKEND=1,
+          # LLM_API_KEY=ci-skip, and --test's LLM_CHAT gate) while the real
+          # binary connects, so health reflects telos_connected/agent_ready
+          # true and the full endpoint suite runs against a real agent
+          # process.
           # Mount actus outside the telos image's /workspace root: the
           # image carries its own Cargo.toml there, and cargo would
           # otherwise treat actus as a member of the telos workspace.
           docker run --rm \
+            -e CI \
             -e TELOS_BIN=/workspace/target/telos-release/tel \
             -e LLM_API_KEY=ci-skip \
             -e TELOS_STUB_BACKEND=1 \
