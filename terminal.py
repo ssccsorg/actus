@@ -28,6 +28,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 try:
@@ -311,38 +312,52 @@ async def select_thread_prompt(client: NexClient, threads: list[dict]) -> str | 
 # the next line into the active prompt's queue.
 _prompt_q: "asyncio.Queue[str] | None" = None
 _chat_queue: "asyncio.Queue[str] | None" = None
-_stdin_reader: "asyncio.StreamReader | None" = None
+# Lines from stdin land here as they are typed; None marks EOF. A worker
+# thread reads stdin instead of an asyncio pipe reader. connect_read_pipe
+# puts stdin's file description in non-blocking mode, and the shell shares
+# that description across fds 0/1/2, so stdout would go non-blocking too and
+# a long listing (hundreds of threads) would raise BlockingIOError once the
+# pty buffer filled, ending the session.
+_stdin_queue: "asyncio.Queue[str | None] | None" = None
 
 
-async def _make_reader() -> "asyncio.StreamReader | None":
-    """Set up a single StreamReader over stdin for the whole session."""
-    global _stdin_reader
+async def _make_reader() -> "asyncio.Queue[str | None] | None":
+    """Start a daemon thread that reads stdin lines into a queue."""
+    global _stdin_queue
     if not sys.stdin.isatty() or not sys.__stdin__ or not sys.__stdin__.isatty():
         return None
     loop = asyncio.get_event_loop()
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    try:
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-    except (OSError, AttributeError):
-        return None
-    _stdin_reader = reader
-    return reader
+    queue: "asyncio.Queue[str | None]" = asyncio.Queue()
+    _stdin_queue = queue
+
+    def reader() -> None:
+        while True:
+            try:
+                line = sys.stdin.readline()
+            except (OSError, ValueError):
+                line = ""
+            if not line:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+                return
+            loop.call_soon_threadsafe(queue.put_nowait, line)
+
+    threading.Thread(target=reader, name="actus-stdin", daemon=True).start()
+    return queue
 
 
 async def _readline(prompt: str = "") -> str | None:
-    """Print the prompt and read one line from the shared stdin reader.
+    """Print the prompt and read one line from the shared stdin queue.
     Lines are routed to an active prompt queue (mention picker, tool
     approval). Returns None on EOF."""
-    if _stdin_reader is None:
+    if _stdin_queue is None:
         return None
     if prompt:
         print(prompt, end="", flush=True)
     while True:
-        line = await _stdin_reader.readline()
-        if not line:
+        line = await _stdin_queue.get()
+        if line is None:
             return None
-        text = line.decode().strip()
+        text = line.strip()
         if not text:
             continue
         if _prompt_q is not None:
