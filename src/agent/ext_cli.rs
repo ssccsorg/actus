@@ -265,9 +265,21 @@ impl AgentBackend for ExtCliAgent {
         } else {
             cmd.stdin(std::process::Stdio::null());
         }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("cannot start {}: {}", self.bin.display(), e))?;
+        let mut child = {
+            let mut attempt = 0;
+            loop {
+                match cmd.spawn() {
+                    Ok(child) => break child,
+                    Err(e) if is_etxtbsy(&e) && attempt < ETXTBSY_RETRIES => {
+                        attempt += 1;
+                        tokio::time::sleep(ETXTBSY_BACKOFF).await;
+                    }
+                    Err(e) => {
+                        return Err(format!("cannot start {}: {}", self.bin.display(), e));
+                    }
+                }
+            }
+        };
 
         if self.prompt_mode == PromptMode::Stdin {
             if let Some(mut stdin) = child.stdin.take() {
@@ -454,6 +466,18 @@ impl AgentBackend for ExtCliAgent {
     }
 }
 
+/// `ETXTBSY`: the target inode is open for writing somewhere, so exec fails.
+fn is_etxtbsy(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ETXTBSY)
+}
+
+/// A concurrent fork can inherit a write handle to the binary until that
+/// child execs, and an operator can replace the binary under a live server.
+/// Both surface as ETXTBSY for a brief window, so retry narrowly instead of
+/// failing the turn.
+const ETXTBSY_RETRIES: u32 = 40;
+const ETXTBSY_BACKOFF: Duration = Duration::from_millis(25);
+
 /// Probe launchability synchronously at construction: spawn the binary
 /// with no arguments and closed stdio, then reap it within a short grace
 /// window. A binary that starts counts as ready even when it would exit
@@ -462,14 +486,21 @@ impl AgentBackend for ExtCliAgent {
 fn probe_binary(bin: &Path) -> Option<String> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
-    let mut child = match Command::new(bin)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) => return Some(format!("cannot start: {}", e)),
+    let mut attempt = 0;
+    let mut child = loop {
+        match Command::new(bin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => break child,
+            Err(e) if is_etxtbsy(&e) && attempt < ETXTBSY_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(ETXTBSY_BACKOFF);
+            }
+            Err(e) => return Some(format!("cannot start: {}", e)),
+        }
     };
     let deadline = Instant::now() + Duration::from_millis(PROBE_GRACE_MS);
     loop {
