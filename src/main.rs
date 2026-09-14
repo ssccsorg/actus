@@ -97,8 +97,24 @@ fn api_token_file() -> PathBuf {
 
 /// Write the effective token to ~/.actus/api_token with mode 0600 so the
 /// CLI, run.sh, and curl can read the same value the server enforces.
+///
+/// The write is announced when it changes an existing value. Every consumer
+/// reads this one file, so a second actus started with an explicit token
+/// silently invalidates the clients and services already using the old one,
+/// and the mismatch then looks like a rejected credential everywhere else.
 fn persist_api_token(token: &str) -> anyhow::Result<()> {
     let file = api_token_file();
+    if let Ok(existing) = std::fs::read_to_string(&file) {
+        let existing = existing.trim();
+        if !existing.is_empty() && existing != token {
+            tracing::warn!(
+                "Replacing the API token at {}: {}... becomes {}...",
+                file.display(),
+                token_prefix(existing),
+                token_prefix(token)
+            );
+        }
+    }
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -108,6 +124,11 @@ fn persist_api_token(token: &str) -> anyhow::Result<()> {
     let mut f = opts.open(&file)?;
     std::io::Write::write_all(&mut f, token.as_bytes())?;
     Ok(())
+}
+
+/// Enough of a token to tell two apart, and never the whole value.
+fn token_prefix(token: &str) -> String {
+    token.chars().take(4).collect()
 }
 
 /// Resolve the HTTP API bearer token: CLI arg, then ACTUS_API_TOKEN env,
