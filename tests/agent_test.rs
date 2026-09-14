@@ -82,24 +82,24 @@ async fn registry_get_by_name() {
 /// landing on one project.
 #[tokio::test]
 async fn telos_backend_reports_its_configured_name() {
-    let backend = telos_backend_named("kosmos");
-    assert_eq!(backend.name(), "kosmos");
+    let backend = telos_backend_named("alpha");
+    assert_eq!(backend.name(), "alpha");
 
     let status = backend.status().await;
-    assert_eq!(status.name, "kosmos");
+    assert_eq!(status.name, "alpha");
 }
 
 #[tokio::test]
 async fn two_telos_agents_with_different_names_stay_distinct() {
     let mut registry = AgentRegistry::new();
-    registry.register(Arc::new(telos_backend_named("kosmos")), true);
-    registry.register(Arc::new(telos_backend_named("actus")), false);
+    registry.register(Arc::new(telos_backend_named("alpha")), true);
+    registry.register(Arc::new(telos_backend_named("beta")), false);
 
-    assert!(registry.get("kosmos").is_some(), "the first agent is reachable");
-    assert!(registry.get("actus").is_some(), "the second agent is reachable");
+    assert!(registry.get("alpha").is_some(), "the first agent is reachable");
+    assert!(registry.get("beta").is_some(), "the second agent is reachable");
     assert_eq!(
         registry.default_agent().map(|agent| agent.name().to_string()),
-        Some("kosmos".to_string()),
+        Some("alpha".to_string()),
         "the agent registered as default stays the default"
     );
 
@@ -110,7 +110,7 @@ async fn two_telos_agents_with_different_names_stay_distinct() {
         .map(|status| status.name)
         .collect();
     names.sort();
-    assert_eq!(names, ["actus", "kosmos"]);
+    assert_eq!(names, ["alpha", "beta"]);
 }
 
 #[tokio::test]
