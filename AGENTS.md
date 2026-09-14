@@ -85,6 +85,15 @@ digraph DOTGraph {
 - Do not generate unnecessary code. Produce only what is **essential** for the goal.
 - Do not use text characters to draw diagrams (e.g., trees or boxes using ╔═) in code comments.
 
+### Shared-module constraints
+
+Actus is a shared module: deployments it knows nothing about depend on it, so it must not carry values that belong to any one of them.
+
+- No hardcoded identities, ports, paths, tokens, or hosts. Take a value from the caller, the config, or the environment, and generate it at startup when it is a per-instance secret.
+- A constant where a parameter would do is the defect this rule exists for. A name, id, or address that identifies one instance belongs at the call site, including in the registry keys and routing tables built from it.
+- A default is acceptable when it is overridable and documented as a default.
+- Fail loudly when a required value is absent. A silent fallback to a plausible constant hides the misconfiguration that would otherwise be visible.
+
 ### Rust
 
 - Split codes as following their roles - do not code all in `lib.rs`.

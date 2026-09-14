@@ -36,11 +36,13 @@ pub async fn run_ws_server(
     telos_manager: Arc<RwLock<TelosManager>>,
     ws_tx: WsCommandTx,
 ) -> anyhow::Result<()> {
-    let port = ws_host.split(':').nth(1).unwrap_or("8080");
-    let listener = TcpListener::bind(&format!("127.0.0.1:{}", port)).await?;
+    // Bind the address the caller configured. Parsing the port back out and
+    // rebinding a loopback literal would discard the operator's choice, and a
+    // missing port would silently become some other port instead of an error.
+    let listener = TcpListener::bind(ws_host).await?;
     tracing::info!(
-        "WebSocket server listening on ws://127.0.0.1:{}",
-        listener.local_addr()?.port()
+        "WebSocket server listening on ws://{}",
+        listener.local_addr()?
     );
 
     // Connection loop: accept → read → disconnect → accept again

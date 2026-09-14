@@ -584,7 +584,11 @@ fn telos_command(
         .env("TELOS_EXTERNAL_SYNC_ENABLED", "true")
         .env("TELOS_WEBSOCKET_SYNC_ENABLED", "true")
         .env("TELOS_WS_URL", ws_host)
-        .env("TELOS_WS_TOKEN", "test-token")
+        // Telos presents this on the WebSocket handshake. Actus does not verify
+        // it yet, so it is the token generated for this process rather than a
+        // constant: a fixed value would be shared by every deployment, and
+        // adding verification later would then mean changing this contract.
+        .env("TELOS_WS_TOKEN", api_token)
         .env("TELOS_STATELESS", "1")
         .env("TELOS_SESSION_ID", session_id)
         .env("TELOS_TOOL_APPROVAL", tool_approval)
@@ -780,7 +784,7 @@ mod tests {
             "always",
             "telos",
             9090,
-            "test-token",
+            "process-token-7f3a",
             log,
         );
 
@@ -812,13 +816,13 @@ mod tests {
             ("TELOS_EXTERNAL_SYNC_ENABLED", "true"),
             ("TELOS_WEBSOCKET_SYNC_ENABLED", "true"),
             ("TELOS_WS_URL", "127.0.0.1:8080"),
-            ("TELOS_WS_TOKEN", "test-token"),
+            ("TELOS_WS_TOKEN", "process-token-7f3a"),
             ("TELOS_STATELESS", "1"),
             ("TELOS_SESSION_ID", "ses_actus-test"),
             ("TELOS_TOOL_APPROVAL", "always"),
             ("ACTUS_AGENT_NAME", "telos"),
             ("ACTUS_HTTP_PORT", "9090"),
-            ("ACTUS_API_TOKEN", "test-token"),
+            ("ACTUS_API_TOKEN", "process-token-7f3a"),
             ("RUST_LOG", "info"),
         ];
         for (key, value) in expect {
