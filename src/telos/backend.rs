@@ -18,6 +18,11 @@ use crate::telos::{TelosManager, WsCommandTx};
 
 /// One Telos agent instance behind the fabric interface.
 pub struct TelosBackend {
+    /// Name this instance answers to. The registry keys on it and routing
+    /// looks it up, so it has to be the configured agent name: a constant
+    /// would make every telos agent collide on one registry entry and leave
+    /// all but the last unreachable.
+    pub name: String,
     pub manager: Arc<RwLock<TelosManager>>,
     /// Shared command channel, kept in sync with `TelosManager::ws_tx` by
     /// `telos::control`. Sending through the shared channel means a stale
@@ -29,7 +34,7 @@ pub struct TelosBackend {
 #[async_trait::async_trait]
 impl AgentBackend for TelosBackend {
     fn name(&self) -> &str {
-        "telos"
+        &self.name
     }
 
     fn kind(&self) -> AgentKind {

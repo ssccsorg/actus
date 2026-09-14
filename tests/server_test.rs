@@ -28,7 +28,11 @@ fn test_state() -> (SharedState, tempfile::TempDir) {
         workdir.path(),
     )));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-    let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend { manager, ws_tx });
+    let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend {
+        name: "telos".to_string(),
+        manager,
+        ws_tx,
+    });
 
     let mut registry = AgentRegistry::new();
     registry.register(backend, true);

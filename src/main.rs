@@ -366,6 +366,7 @@ async fn main() -> anyhow::Result<()> {
                 children.push(child);
 
                 let backend = Arc::new(TelosBackend {
+                    name: spec.name.clone(),
                     manager: manager.clone(),
                     ws_tx: ws_tx.clone(),
                 });

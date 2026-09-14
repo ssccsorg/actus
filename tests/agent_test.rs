@@ -31,6 +31,10 @@ fn agent_kind_roundtrip() {
 }
 
 fn telos_backend() -> TelosBackend {
+    telos_backend_named("telos")
+}
+
+fn telos_backend_named(name: &str) -> TelosBackend {
     let dir = tempfile::tempdir().expect("tempdir");
     let manager = Arc::new(RwLock::new(TelosManager::new(
         "ses_test".to_string(),
@@ -38,7 +42,11 @@ fn telos_backend() -> TelosBackend {
         dir.path(),
     )));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-    TelosBackend { manager, ws_tx }
+    TelosBackend {
+        name: name.to_string(),
+        manager,
+        ws_tx,
+    }
 }
 
 #[tokio::test]
@@ -65,6 +73,44 @@ async fn registry_get_by_name() {
 
     assert!(registry.get("telos").is_some());
     assert!(registry.get("missing").is_none());
+}
+
+/// The registry keys on the backend name, so a backend that reports a constant
+/// name collapses every agent of its kind into one entry: the last one wins and
+/// the others become unreachable by name. Each project has its own telos agent,
+/// so this is the difference between routing working and every conversation
+/// landing on one project.
+#[tokio::test]
+async fn telos_backend_reports_its_configured_name() {
+    let backend = telos_backend_named("kosmos");
+    assert_eq!(backend.name(), "kosmos");
+
+    let status = backend.status().await;
+    assert_eq!(status.name, "kosmos");
+}
+
+#[tokio::test]
+async fn two_telos_agents_with_different_names_stay_distinct() {
+    let mut registry = AgentRegistry::new();
+    registry.register(Arc::new(telos_backend_named("kosmos")), true);
+    registry.register(Arc::new(telos_backend_named("actus")), false);
+
+    assert!(registry.get("kosmos").is_some(), "the first agent is reachable");
+    assert!(registry.get("actus").is_some(), "the second agent is reachable");
+    assert_eq!(
+        registry.default_agent().map(|agent| agent.name().to_string()),
+        Some("kosmos".to_string()),
+        "the agent registered as default stays the default"
+    );
+
+    let mut names: Vec<String> = registry
+        .statuses()
+        .await
+        .into_iter()
+        .map(|status| status.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["actus", "kosmos"]);
 }
 
 #[tokio::test]
