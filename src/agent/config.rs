@@ -92,8 +92,7 @@ pub struct AgentSpec {
     /// Tool call approval policy; drives the fork's TELOS_TOOL_APPROVAL env.
     pub tool_approval: ToolApproval,
     /// Working directory for spawned agent processes. None means the
-    /// server working directory; raw-CLI agents that resolve project
-    /// scope from the current directory use this field.
+    /// server working directory.
     pub workdir: Option<PathBuf>,
     /// MCP servers attached to this agent.
     pub mcp: Vec<McpServer>,

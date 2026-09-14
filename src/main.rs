@@ -282,6 +282,25 @@ async fn main() -> anyhow::Result<()> {
                         spec.bin.display()
                     ));
                 }
+                // A per-agent workdir scopes this agent to one project. Without
+                // one the agent opens the fabric-wide workdir, which is what
+                // every agent did before per-agent scoping existed. A missing
+                // directory is an error rather than a silent fallback: telos
+                // only opens a worktree for a path that exists, so a typo would
+                // otherwise yield an agent with no project at all.
+                let agent_workdir = match &spec.workdir {
+                    Some(dir) => {
+                        if !dir.is_dir() {
+                            return Err(anyhow::anyhow!(
+                                "agent '{}': workdir not found at {}",
+                                spec.name,
+                                dir.display()
+                            ));
+                        }
+                        dir.clone()
+                    }
+                    None => workdir.clone(),
+                };
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
                 ensure_telos_settings(
@@ -325,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let child = launch_telos(
                     &spec.bin,
-                    &workdir,
+                    &agent_workdir,
                     user_data_dir.path(),
                     &session_id,
                     &ws_host,
