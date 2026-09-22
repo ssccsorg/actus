@@ -1,13 +1,21 @@
 name: Publish actus Docker Image
 
-# Publishing is release-gated: actus is pre-1.0 and has shipped no release
-# yet, so ordinary main commits push nothing. Pushing a `v*` tag cuts a
-# versioned image (and refreshes `latest`); a manual dispatch publishes a
-# `:dev` snapshot for preflight without touching `latest`.
+# Publishing follows main: a consumer that wants the current server can name `latest`
+# instead of resolving a digest by hand after every tag, which is what left one consumer's
+# pin stale through the release that introduced `kind = "native"`. `latest` moving with main
+# is the cost of that, and a consumer that needs a fixed build pins `:<tag>` or a digest.
+#
+#   main push:        ghcr.io/ssccsorg/actus:latest and :main
+#   version tag:      ghcr.io/ssccsorg/actus:<tag> and :latest
+#   manual dispatch:  ghcr.io/ssccsorg/actus:dev, which never touches latest
+#
 on:
-  workflow_dispatch:
   push:
+    branches: ["main"]
+    # Documentation-only changes do not rebuild or publish the image.
+    paths-ignore: ["**/*.md", "**/*.qmd", "docs/**"]
     tags: ["v*"]
+  workflow_dispatch:
 
 concurrency:
   group: "actus-image"
@@ -40,13 +48,16 @@ jobs:
       - name: Derive image tags
         id: meta
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            # Version tag (for example v0.1.0): tag the image with the
-            # version and refresh latest.
-            echo "tags=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >>"$GITHUB_OUTPUT"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            # Version tag (for example v0.1.1): the version, and latest.
+            echo "tags=${IMAGE}:${{ github.ref_name }},${IMAGE}:latest" >>"$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            # A main push is what a consumer tracking the sources wants.
+            echo "tags=${IMAGE}:latest,${IMAGE}:main" >>"$GITHUB_OUTPUT"
           else
             # Manual dispatch: a dev snapshot that never touches latest.
-            echo "tags=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev" >>"$GITHUB_OUTPUT"
+            echo "tags=${IMAGE}:dev" >>"$GITHUB_OUTPUT"
           fi
 
       - name: Build and push Docker image
