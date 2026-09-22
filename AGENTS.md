@@ -71,14 +71,14 @@ digraph DOTGraph {
   each of them was a task's result and main is where a result lives.
 - Do commit only: do not push to remote.
 - Do not merge a pull request.
-- When starting a new task subject, create a GitHub Issue and add relevant labels. The
-  issue is the record of the subject, and the commits that carry it name it.
+- Every task subject has an issue, created before the work starts, and every commit names it
+  with `#{issue}`. The issue is what replaces the branch: it is where a reader finds what a
+  change intended and why.
 - Do not test by pushing to GitHub.
 
 ### Commit Message Format
 
-- `{category} #{issue}: {message}` when the subject has an issue, `{category}: {message}`
-  when it does not.
+- `{category} #{issue}: {message}`.
 
 ## Code
 
