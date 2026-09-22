@@ -332,6 +332,7 @@ async fn main() -> anyhow::Result<()> {
                     &spec.model,
                     &spec.model_display,
                     &spec.mcp,
+                    spec.tool_approval,
                 )?;
                 let threads_dir = threads_root.join(&spec.name);
                 std::fs::create_dir_all(&threads_dir)?;
@@ -369,7 +370,7 @@ async fn main() -> anyhow::Result<()> {
                     user_data_dir.path(),
                     &session_id,
                     &ws_host,
-                    spec.tool_approval.as_str(),
+                    spec.tool_approval,
                     &spec.name,
                     args.http_port,
                     &api_token,

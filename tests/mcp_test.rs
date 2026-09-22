@@ -127,6 +127,7 @@ fn six_server_settings_injection_schema() {
         "example-model",
         "example-model",
         &specs[0].mcp,
+        actus::agent::config::ToolApproval::Always,
     )
     .unwrap();
 
@@ -185,6 +186,7 @@ fn settings_injection_skipped_without_endpoint_config() {
         "",
         "",
         &[],
+        actus::agent::config::ToolApproval::Always,
     )
     .unwrap();
 
@@ -286,6 +288,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
         "example-model",
         "example-model",
         &mcp,
+        actus::agent::config::ToolApproval::Always,
     )
     .unwrap();
 
@@ -325,4 +328,44 @@ fn scenario_injected_stdio_server_is_spawnable() {
     assert_eq!(call["result"]["content"][0]["text"], "pong");
 
     server.kill().ok();
+}
+
+/// The terminal is the tool a headless agent runs commands with, and it is the one the
+/// agent's permission gate can refuse outright: a command carrying a shell substitution is
+/// denied unless the tool's effective decision is an unconditional allow, and that refusal
+/// lands before an approval could be asked for. A deployment that starts its agents with
+/// `always` has decided not to ask, so it writes that allow. Any other mode leaves the
+/// agent's own setting, and the prompt, alone.
+#[test]
+fn an_always_agent_is_allowed_the_terminal() {
+    fn settings_for(tool_approval: actus::agent::config::ToolApproval) -> serde_json::Value {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_telos_settings(
+            dir.path(),
+            Some("sk-test"),
+            "openai-compatible",
+            "https://api.example.com/v1",
+            "example-model",
+            "example-model",
+            &[],
+            tool_approval,
+        )
+        .unwrap();
+        serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    let opened = settings_for(actus::agent::config::ToolApproval::Always);
+    assert_eq!(
+        opened["agent"]["tool_permissions"]["tools"]["terminal"]["default"], "allow",
+        "an agent that never asks is allowed the terminal"
+    );
+
+    let asked = settings_for(actus::agent::config::ToolApproval::Ask);
+    assert!(
+        asked["agent"]["tool_permissions"]["tools"]["terminal"]["default"].is_null(),
+        "an agent that asks keeps its own setting"
+    );
 }

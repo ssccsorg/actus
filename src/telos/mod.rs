@@ -570,7 +570,7 @@ fn telos_command(
     user_data_dir: &Path,
     session_id: &str,
     ws_host: &str,
-    tool_approval: &str,
+    tool_approval: crate::agent::config::ToolApproval,
     agent_name: &str,
     http_port: u16,
     api_token: &str,
@@ -591,7 +591,7 @@ fn telos_command(
         .env("TELOS_WS_TOKEN", api_token)
         .env("TELOS_STATELESS", "1")
         .env("TELOS_SESSION_ID", session_id)
-        .env("TELOS_TOOL_APPROVAL", tool_approval)
+        .env("TELOS_TOOL_APPROVAL", tool_approval.as_str())
         // The control MCP proxy (`actus control`), spawned by the agent as
         // a stdio MCP server, inherits these to reach the actus HTTP API
         // and to identify itself as this agent.
@@ -610,7 +610,7 @@ pub async fn launch_telos(
     user_data_dir: &Path,
     session_id: &str,
     ws_host: &str,
-    tool_approval: &str,
+    tool_approval: crate::agent::config::ToolApproval,
     agent_name: &str,
     http_port: u16,
     api_token: &str,
@@ -642,6 +642,7 @@ pub async fn launch_telos(
 
 // ── Telos settings bootstrap ─────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn ensure_telos_settings(
     data_dir: &Path,
     api_key: Option<&str>,
@@ -650,6 +651,7 @@ pub fn ensure_telos_settings(
     model_name: &str,
     model_display: &str,
     mcp: &[crate::agent::config::McpServer],
+    tool_approval: crate::agent::config::ToolApproval,
 ) -> anyhow::Result<()> {
     use std::fs;
     use std::io::Write;
@@ -696,6 +698,23 @@ pub fn ensure_telos_settings(
         tracing::warn!(
             "LLM endpoint not configured (set LLM_BASE_URL and LLM_MODEL in the local environment or the agent's config.toml); skipping provider injection"
         );
+    }
+
+    // The terminal is the tool a headless agent runs commands with, and it is the one the
+    // agent's permission gate can refuse outright: a command containing a shell
+    // substitution is denied whenever the tool's effective decision is not an
+    // unconditional allow, and that happens before an approval could be asked for. The
+    // refusal protects a per-command approval prompt, so a deployment that starts its
+    // agents with `always` has nothing left for it to protect and gets the tool opened
+    // up here. Any other mode keeps the agent's own setting, prompt and all.
+    //
+    // Only the terminal's own default is written, and only when nothing set it, so a rule
+    // an operator wrote by hand stays theirs.
+    if tool_approval == crate::agent::config::ToolApproval::Always {
+        let permissions = &mut settings["agent"]["tool_permissions"];
+        if permissions["tools"]["terminal"]["default"].is_null() {
+            permissions["tools"]["terminal"]["default"] = serde_json::json!("allow");
+        }
     }
 
     // MCP servers: map each declaration to Telos's `context_servers` entry.
@@ -781,7 +800,7 @@ mod tests {
             &user_data_dir,
             "ses_actus-test",
             "127.0.0.1:8080",
-            "always",
+            crate::agent::config::ToolApproval::Always,
             "telos",
             9090,
             "process-token-7f3a",
