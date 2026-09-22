@@ -65,17 +65,20 @@ digraph DOTGraph {
 
 ## Git
 
+- Work on `main`. There is no branch flow and no pull request: a task is one or more
+  commits on main, and a branched result belongs on main rather than in a merge. The
+  branches this repository carried were folded into main when the policy changed, because
+  each of them was a task's result and main is where a result lives.
 - Do commit only: do not push to remote.
-- Do not merge a pull request or any branch.
-- When starting a new task subject:
-    1. Create a GitHub Issue, add relevant labels, then link the branch that will contain the work.
-    2. Create a branch with the format `{issue-number}-{subject-alphabets-with-one-or-two-dashes}`.
-- The pull request title format must be: `PR: {category}: {message}`. (Include `#{issue}` after the category only in PR branches; omit it in the main branch.)
+- Do not merge a pull request.
+- When starting a new task subject, create a GitHub Issue and add relevant labels. The
+  issue is the record of the subject, and the commits that carry it name it.
 - Do not test by pushing to GitHub.
 
 ### Commit Message Format
 
-- `{category}: {message}`. Include `#{issue}` after the category only in PR branches (omit in main branch).
+- `{category} #{issue}: {message}` when the subject has an issue, `{category}: {message}`
+  when it does not.
 
 ## Code
 
