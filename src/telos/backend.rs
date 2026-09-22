@@ -31,6 +31,26 @@ pub struct TelosBackend {
     pub ws_tx: WsCommandTx,
 }
 
+/// The wire command that cancels a turn.
+///
+/// Telos resolves the turn from `request_id`: the command names no thread, so a body
+/// without one names no turn, which is why a cancel that sent an empty body could not
+/// stop anything and was answered as a noop. The empty form is kept for the case where
+/// no turn is in flight.
+fn cancel_command(request_id: Option<&str>) -> String {
+    match request_id {
+        Some(request_id) => serde_json::json!({
+            "type": "cancel_current_turn",
+            "data": { "request_id": request_id }
+        }),
+        None => serde_json::json!({
+            "type": "cancel_current_turn",
+            "data": {}
+        }),
+    }
+    .to_string()
+}
+
 #[async_trait::async_trait]
 impl AgentBackend for TelosBackend {
     fn name(&self) -> &str {
@@ -170,18 +190,24 @@ impl AgentBackend for TelosBackend {
     }
 
     async fn cancel(&self) -> Result<(), String> {
-        let cmd = serde_json::json!({
-            "type": "cancel_current_turn",
-            "data": {}
-        })
-        .to_string();
-        // Send through the shared channel: it is cleared on disconnect,
-        // so a stale manager-side sender cannot silently drop the cancel.
-        let guard = self.ws_tx.lock().await;
-        match &*guard {
-            Some(tx) => tx.send(cmd).map_err(|e| e.to_string()),
-            None => Err("WebSocket not connected".to_string()),
+        // Telos resolves the turn to cancel by request id, so an agent-wide cancel has
+        // to name the turns this agent is running. One agent runs one turn at a time, so
+        // that is normally one id.
+        let live = self.live_requests().await;
+        if live.is_empty() {
+            // Nothing is in flight, so there is no turn to name and Telos answers the
+            // empty command as a noop. Sending it keeps the one thing a cancel always
+            // does, submitting a command.
+            return self.send_command(cancel_command(None)).await;
         }
+        for request_id in live {
+            self.send_command(cancel_command(Some(&request_id))).await?;
+        }
+        Ok(())
+    }
+
+    async fn cancel_request(&self, request_id: &str) -> Result<(), String> {
+        self.send_command(cancel_command(Some(request_id))).await
     }
 
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession> {
@@ -238,6 +264,32 @@ impl AgentBackend for TelosBackend {
             }
         })
         .to_string();
+        self.send_command(cmd).await
+    }
+}
+
+impl TelosBackend {
+    /// The turns this agent is running, by request id.
+    ///
+    /// `pending_requests` holds a live mapping while a turn is in flight and a blank
+    /// sentinel once it has been consumed, so a non-empty value is what "in flight"
+    /// means. A stale entry that was never consumed costs nothing: Telos answers a
+    /// request id it does not know with a noop.
+    async fn live_requests(&self) -> Vec<String> {
+        let mgr = self.manager.read().await;
+        let mut live: Vec<String> = mgr
+            .pending_requests
+            .iter()
+            .filter(|(_, thread_id)| !thread_id.is_empty())
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        live.sort();
+        live
+    }
+
+    /// Send one command over the shared channel, which is cleared on disconnect, so a
+    /// stale manager-side sender cannot silently drop it.
+    async fn send_command(&self, cmd: String) -> Result<(), String> {
         let guard = self.ws_tx.lock().await;
         match &*guard {
             Some(tx) => tx.send(cmd).map_err(|e| e.to_string()),

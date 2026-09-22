@@ -899,6 +899,60 @@ async fn cancel_submits_when_connected() {
     assert!(cmd.contains("cancel_current_turn"), "unexpected: {}", cmd);
 }
 
+/// Telos resolves the turn to cancel from `request_id`, so an agent-wide cancel has to
+/// name the turn: the command carries no thread id, and the empty body this used to send
+/// was answered as a noop while the turn kept running.
+#[tokio::test]
+async fn cancel_names_the_turn_in_flight() {
+    let backend = telos_backend();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    {
+        let mut guard = backend.ws_tx.lock().await;
+        *guard = Some(tx);
+    }
+    {
+        let mut mgr = backend.manager.write().await;
+        mgr.pending_requests
+            .insert("req-in-flight".to_string(), "thread-1".to_string());
+    }
+
+    backend.cancel().await.expect("cancel must send");
+    let cmd = rx.recv().await.expect("command queued");
+    assert!(cmd.contains("req-in-flight"), "the turn has to be named: {cmd}");
+
+    // The request-scoped form carries the id it was given.
+    backend
+        .cancel_request("req-named")
+        .await
+        .expect("cancel must send");
+    let cmd = rx.recv().await.expect("command queued");
+    assert!(cmd.contains("req-named"), "unexpected: {cmd}");
+}
+
+/// A turn that has been consumed is not in flight, so an agent-wide cancel leaves it
+/// alone and falls back to the empty command.
+#[tokio::test]
+async fn cancel_ignores_a_consumed_turn() {
+    let backend = telos_backend();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    {
+        let mut guard = backend.ws_tx.lock().await;
+        *guard = Some(tx);
+    }
+    {
+        let mut mgr = backend.manager.write().await;
+        mgr.pending_requests
+            .insert("req-done".to_string(), String::new());
+    }
+
+    backend.cancel().await.expect("cancel must send");
+    let cmd = rx.recv().await.expect("command queued");
+    assert!(
+        !cmd.contains("req-done"),
+        "a consumed turn is not the one in flight: {cmd}"
+    );
+}
+
 /// create_thread creates a fresh thread and returns its id.
 #[tokio::test]
 async fn create_thread_creates_fresh_thread() {
