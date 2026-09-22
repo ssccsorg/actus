@@ -207,6 +207,26 @@ pub struct ThreadMessage {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+impl ThreadSession {
+    /// The messages of the turn in flight: what the agent has written since the
+    /// person's last message, which is the turn's boundary.
+    ///
+    /// A turn writes several messages in sequence (thinking, tool calls, then the
+    /// answer), so neither "the last message" nor "the last assistant message"
+    /// names it: before the turn's first message arrives, the last assistant message
+    /// of the thread is the previous turn's. Empty before a turn's first message and
+    /// on a thread nobody has written in.
+    pub fn turn_messages(&self) -> &[ThreadMessage] {
+        let start = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == "user")
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        &self.messages[start..]
+    }
+}
+
 /// Uniform execution interface implemented by every platform adapter.
 #[async_trait::async_trait]
 pub trait AgentBackend: Send + Sync {

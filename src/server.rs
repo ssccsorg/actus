@@ -536,7 +536,7 @@ pub struct PollQuery {
 
 #[derive(Serialize)]
 pub struct PollResponse {
-    /// Full content of the most recent assistant message. Clients diff
+    /// Full content of the most recent assistant message of the turn. Clients diff
     /// against what they have already displayed.
     pub new_content: Option<String>,
     /// Whether the thread's current turn is complete.
@@ -551,6 +551,23 @@ pub struct PollResponse {
     pub entry_type: Option<String>,
     pub tool_name: Option<String>,
     pub tool_status: Option<String>,
+    /// Every message of the turn in flight, oldest first, each with its current
+    /// content. A turn writes several messages and one poll served one of them, so a
+    /// client could only ever hold the middle of the stream of the message the agent
+    /// had moved past. Serving the turn is what lets a client draw it whole and in
+    /// order.
+    pub messages: Vec<PollMessage>,
+}
+
+/// One message of the turn in flight, as the poll reports it.
+#[derive(Serialize)]
+pub struct PollMessage {
+    pub message_id: Option<String>,
+    pub role: String,
+    pub entry_type: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_status: Option<String>,
+    pub content: String,
 }
 
 /// Poll for new thread state.
@@ -559,14 +576,19 @@ pub struct PollResponse {
 /// or when WebSocket events from Telos are unreliable. The client calls this
 /// endpoint at regular intervals (e.g., every 500ms).
 ///
-/// The response serves the full content of the most recent assistant
-/// message. A single turn emits several assistant messages in order
-/// (thinking, tool calls, then the answer), so indexing by turn number is
-/// not possible; instead the client diffs each served message against what
-/// it has already displayed and uses message_id to detect a brand-new
-/// message. Persisted threads whose turn counter drifted past the message
-/// count are repaired on load. The `since` parameter is accepted for
-/// backward compatibility and ignored.
+/// The response serves the turn in flight: every message the agent has written
+/// since the person's last message, in order, with its current content. A turn
+/// writes several messages, so indexing by turn number is not possible; a client
+/// replaces each message it holds by id, and a message it has already drawn is
+/// corrected rather than left at the snapshot a single-message poll caught. The
+/// top level fields describe the last of those messages, which is what a client
+/// that renders one message at a time reads.
+///
+/// The response is therefore as large as the turn, which is the trade this
+/// endpoint already made at message scale: whole content rather than a delta, so a
+/// dropped poll loses nothing. A turn carrying a large tool output is re-sent per
+/// poll as a result. A revision counter per message is what would bound it, and it is
+/// deliberately not part of this change.
 async fn poll_thread(
     State(state): State<SharedState>,
     axum::extract::Path(thread_id): axum::extract::Path<String>,
@@ -579,35 +601,37 @@ async fn poll_thread(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let known_turn = query.turn.unwrap_or(0);
-
-    // The most recent assistant message. Pre-fix code addressed messages by
-    // turn index (`assistants[known_turn]`), which broke as soon as one
-    // turn produced several assistant messages (thinking, tool calls,
-    // answer): the index landed on an arbitrary message from an earlier
-    // turn, so the client saw stale content and never the actual answer.
-    let current = thread.messages.iter().rev().find(|m| m.role == "assistant");
-
     let completed = thread.turn_completed > known_turn;
-    match current {
-        Some(msg) => Ok(Json(PollResponse {
-            new_content: Some(msg.content.clone()),
-            completed,
-            content_len: msg.content.len(),
-            message_id: msg.message_id.clone(),
-            entry_type: msg.entry_type.clone(),
-            tool_name: msg.tool_name.clone(),
-            tool_status: msg.tool_status.clone(),
-        })),
-        None => Ok(Json(PollResponse {
-            new_content: None,
-            completed,
-            content_len: 0,
-            message_id: None,
-            entry_type: None,
-            tool_name: None,
-            tool_status: None,
-        })),
-    }
+
+    let turn = thread.turn_messages();
+    let messages: Vec<PollMessage> = turn
+        .iter()
+        .map(|message| PollMessage {
+            message_id: message.message_id.clone(),
+            role: message.role.clone(),
+            entry_type: message.entry_type.clone(),
+            tool_name: message.tool_name.clone(),
+            tool_status: message.tool_status.clone(),
+            content: message.content.clone(),
+        })
+        .collect();
+
+    // The last message of the turn is the one the agent is writing, and the one a
+    // client that draws a single message watches. A turn that has not produced one
+    // yet has nothing to report: the earlier expression searched the whole thread
+    // here, so a client saw the previous turn's answer under its new message.
+    let current = turn.last();
+
+    Ok(Json(PollResponse {
+        new_content: current.map(|message| message.content.clone()),
+        completed,
+        content_len: current.map(|message| message.content.len()).unwrap_or(0),
+        message_id: current.and_then(|message| message.message_id.clone()),
+        entry_type: current.and_then(|message| message.entry_type.clone()),
+        tool_name: current.and_then(|message| message.tool_name.clone()),
+        tool_status: current.and_then(|message| message.tool_status.clone()),
+        messages,
+    }))
 }
 
 // ── File search endpoints ──────────────────────────────────────────────

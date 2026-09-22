@@ -336,7 +336,7 @@ The workflow in `.github/workflows/ci.yml` runs two tiers:
 | `/v1/threads` | GET | List conversation threads of one agent |
 | `/v1/threads` | POST | Create a fresh thread without a message |
 | `/v1/threads/{id}` | GET | Thread messages and metadata (includes the dispatch `parent` when a meta agent created it) |
-| `/v1/threads/{id}/poll` | GET | Poll the latest turn until completion |
+| `/v1/threads/{id}/poll` | GET | Poll the turn in flight, whole, until completion |
 | `/v1/agents/tool-calls/pending` | GET | Tool-call authorizations awaiting a human decision (ask mode) |
 | `/v1/agents/tool-calls/resolve` | POST | Approve or reject a pending tool call |
 | `/v1/files` | GET | Search workspace files (direct act) |

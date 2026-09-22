@@ -20,9 +20,19 @@ use tokio::sync::RwLock;
 /// State with one disconnected Telos backend and an empty temp workdir.
 /// The TempDir is returned so it outlives the tests. Auth is enabled with
 /// a fixed token; `client()` sends it on every request.
+type Manager = Arc<RwLock<TelosManager>>;
+
 fn test_state() -> (SharedState, tempfile::TempDir) {
+    let (state, workdir, _manager) = test_state_with_manager();
+    (state, workdir)
+}
+
+/// The manager is handed back as well, so a test can seed a thread the way the
+/// WebSocket handler would. What a thread holds is the subject of some endpoints, and
+/// a disconnected backend cannot produce one.
+fn test_state_with_manager() -> (SharedState, tempfile::TempDir, Manager) {
     let workdir = tempfile::tempdir().expect("tempdir");
-    let manager = Arc::new(RwLock::new(TelosManager::new(
+    let manager: Manager = Arc::new(RwLock::new(TelosManager::new(
         "ses_test".to_string(),
         "127.0.0.1:9999".to_string(),
         workdir.path(),
@@ -30,7 +40,7 @@ fn test_state() -> (SharedState, tempfile::TempDir) {
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
     let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend {
         name: "telos".to_string(),
-        manager,
+        manager: manager.clone(),
         ws_tx,
     });
 
@@ -41,7 +51,7 @@ fn test_state() -> (SharedState, tempfile::TempDir) {
         workdir.path().to_path_buf(),
         Some("test-token".to_string()),
     );
-    (Arc::new(state), workdir)
+    (Arc::new(state), workdir, manager)
 }
 
 /// Bind an ephemeral port, serve the production router, return its URL.
@@ -655,6 +665,101 @@ async fn cors_whitelist_controls_browser_origins() {
         headers.contains("authorization") && headers.contains("content-type"),
         "headers: {headers}"
     );
+
+    server.abort();
+}
+
+/// A turn is several messages (thinking, tool calls, then the answer) and the poll served
+/// only the most recent one, so a client could never hold the end of a message the agent
+/// had moved past: what it had was the middle of that message's stream, and no later poll
+/// corrected it. The turn is served whole now, and a turn that has not produced a message
+/// yet reports nothing rather than the previous turn's answer.
+#[tokio::test]
+async fn poll_serves_the_turn_whole() {
+    let (state, _keep, manager) = test_state_with_manager();
+    let (base, server) = spawn_server(state).await;
+
+    let tid = {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        // A finished turn first, whose answer must not be reported under the next one.
+        mgr.add_message(&tid, "user", "first question", None);
+        mgr.add_message_full(
+            &tid,
+            "assistant",
+            "the earlier answer",
+            Some("acp:1".to_string()),
+            Some("text".to_string()),
+            None,
+            None,
+        );
+        // The turn in flight: a thought the agent has finished, and one it is writing.
+        mgr.add_message(&tid, "user", "second question", None);
+        mgr.add_message_full(
+            &tid,
+            "assistant",
+            "<thinking>first, whole</thinking>",
+            Some("acp:2".to_string()),
+            Some("text".to_string()),
+            None,
+            None,
+        );
+        mgr.add_message_full(
+            &tid,
+            "assistant",
+            "<thinking>second, half",
+            Some("acp:3".to_string()),
+            Some("text".to_string()),
+            None,
+            None,
+        );
+        tid
+    };
+
+    let body: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{tid}/poll"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let messages = body["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 2, "only the turn in flight");
+    assert_eq!(messages[0]["message_id"], "acp:2");
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[0]["content"], "<thinking>first, whole</thinking>");
+    assert_eq!(messages[1]["message_id"], "acp:3");
+    assert_eq!(messages[1]["content"], "<thinking>second, half");
+
+    // The top level fields still describe the last message of the turn, which is what a
+    // client that draws one message at a time reads.
+    assert_eq!(body["message_id"], "acp:3");
+    assert_eq!(body["new_content"], "<thinking>second, half");
+    assert_eq!(body["content_len"], "<thinking>second, half".len());
+    assert_eq!(body["entry_type"], "text");
+    assert_eq!(body["completed"], false);
+
+    // A turn whose first message has not arrived has nothing to report. The earlier
+    // expression searched the whole thread, so it answered with the previous turn's
+    // answer under the user's new message.
+    {
+        let mut mgr = manager.write().await;
+        mgr.add_message(&tid, "user", "third question", None);
+    }
+    let body: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{tid}/poll"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+    assert!(body["new_content"].is_null(), "{} ", body["new_content"]);
+    assert!(body["message_id"].is_null());
+    assert_eq!(body["content_len"], 0);
 
     server.abort();
 }
