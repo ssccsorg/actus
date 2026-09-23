@@ -12,7 +12,8 @@ use tokio::sync::watch;
 use tokio::sync::{Notify, RwLock};
 
 use crate::agent::{
-    AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadSession,
+    AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadParent,
+    ThreadSession,
 };
 use crate::telos::{TelosManager, WsCommandTx};
 
@@ -78,6 +79,16 @@ impl AgentBackend for TelosBackend {
         thread_id: Option<&str>,
         message: &str,
     ) -> Result<SubmitReceipt, String> {
+        self.submit_with_options(thread_id, message, None, None).await
+    }
+
+    async fn submit_with_options(
+        &self,
+        thread_id: Option<&str>,
+        message: &str,
+        _parent: Option<ThreadParent>,
+        thinking_effort: Option<&str>,
+    ) -> Result<SubmitReceipt, String> {
         // Prepare thread state under the write lock, then release before
         // sending so the command channel is not blocked by thread work.
         let (thread_id, request_id, is_new, cmd) = {
@@ -101,6 +112,9 @@ impl AgentBackend for TelosBackend {
                     "message": enriched,
                     "request_id": rid.clone(),
                     "acp_thread_id": acp_id,
+                    // The reasoning effort for this turn. Telos maps it onto the
+                    // provider's own scale, and a null leaves the thread alone.
+                    "thinking_effort": thinking_effort,
                 }
             })
             .to_string();

@@ -175,6 +175,10 @@ pub struct ChatRequest {
     /// of the target thread together with the controller identity.
     #[serde(default)]
     pub parent_thread_id: Option<String>,
+    /// Reasoning effort for this turn: `low`, `high` or `max`, which is the scale
+    /// the provider's API takes. Absent leaves the thread's own setting alone.
+    #[serde(default)]
+    pub thinking_effort: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -254,7 +258,12 @@ async fn chat_async(
         _ => None,
     };
     let receipt = agent
-        .submit_with_options(req.thread_id.as_deref(), &req.message, parent)
+        .submit_with_options(
+            req.thread_id.as_deref(),
+            &req.message,
+            parent,
+            req.thinking_effort.as_deref(),
+        )
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
@@ -280,9 +289,16 @@ async fn chat_stream(
     control_gate(&state, &headers, agent.name())?;
 
     // Submit through the fabric: thread creation, context injection,
-    // command send, and the resume wait happen inside the adapter.
+    // command send, and the resume wait happen inside the adapter. A
+    // streaming submit names no dispatch origin, and carries the effort
+    // the caller asked for the same way the async one does.
     let receipt = agent
-        .submit(req.thread_id.as_deref(), &req.message)
+        .submit_with_options(
+            req.thread_id.as_deref(),
+            &req.message,
+            None,
+            req.thinking_effort.as_deref(),
+        )
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 

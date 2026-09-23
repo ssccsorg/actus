@@ -243,13 +243,15 @@ pub trait AgentBackend: Send + Sync {
         -> Result<SubmitReceipt, String>;
 
     /// Submit with dispatch origin metadata (which meta agent and which
-    /// of its threads started this turn). Backends that cannot record it
-    /// fall back to the plain submit.
+    /// of its threads started this turn) and the reasoning effort the turn
+    /// runs at. Backends that cannot record or carry either fall back to
+    /// the plain submit.
     async fn submit_with_options(
         &self,
         thread_id: Option<&str>,
         message: &str,
         _parent: Option<ThreadParent>,
+        _thinking_effort: Option<&str>,
     ) -> Result<SubmitReceipt, String> {
         self.submit(thread_id, message).await
     }
