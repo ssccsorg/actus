@@ -1,7 +1,8 @@
 // Integration tests for agent config loading (issue #7).
 
 use actus::agent::config::{
-    load_config, load_control_policy, resolve_llm_settings, AgentDefaults, PromptMode, ToolApproval,
+    load_config, load_control_policy, normalize_reasoning_effort, resolve_llm_settings,
+    AgentDefaults, PromptMode, ToolApproval, DEFAULT_REASONING_EFFORT, REASONING_EFFORT_LEVELS,
 };
 use actus::agent::AgentKind;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ fn defaults() -> AgentDefaults {
         api_key: Some("sk-test".to_string()),
         bin: PathBuf::from("/bin/telos"),
         ws_port: 8080,
+        reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
     }
 }
 
@@ -53,6 +55,7 @@ fn llm_settings_resolution_env_wins_and_unquotes() {
         env,
         "openai-compatible".to_string(),
         Some("https://flag.example/v1".to_string()),
+        None,
     );
     // The env values win over the flag and the default, and surrounding
     // quotes are stripped (issue #16 parity: local env drives the LLM).
@@ -70,11 +73,13 @@ fn llm_settings_resolution_defaults_and_display_fallback() {
         |_| None,
         "openai-compatible".to_string(),
         Some("https://flag.example/v1".to_string()),
+        None,
     );
     assert_eq!(resolved.provider, "openai-compatible");
     assert_eq!(resolved.base_url, "https://flag.example/v1");
     assert_eq!(resolved.model, "");
     assert_eq!(resolved.model_display, "");
+    assert_eq!(resolved.reasoning_effort, DEFAULT_REASONING_EFFORT);
 
     // An explicit display name wins over the model fallback.
     let env = |key: &str| -> Option<String> {
@@ -84,9 +89,68 @@ fn llm_settings_resolution_defaults_and_display_fallback() {
             _ => None,
         }
     };
-    let resolved = resolve_llm_settings(env, "openai-compatible".to_string(), None);
+    let resolved = resolve_llm_settings(env, "openai-compatible".to_string(), None, None);
     assert_eq!(resolved.model, "model-a");
     assert_eq!(resolved.model_display, "Model A");
+}
+
+/// Every level an operator may declare is accepted, normalized, and survives
+/// the round trip the agent parses.
+#[test]
+fn reasoning_effort_levels_are_accepted_and_normalized() {
+    for level in REASONING_EFFORT_LEVELS {
+        assert_eq!(normalize_reasoning_effort(level).unwrap(), level);
+        assert_eq!(
+            normalize_reasoning_effort(&level.to_uppercase()).unwrap(),
+            level,
+            "a level typed in upper case is the same level"
+        );
+        assert_eq!(
+            normalize_reasoning_effort(&format!("\"{level}\"")).unwrap(),
+            level,
+            "a quoted value from a .env file is the same level"
+        );
+    }
+}
+
+/// A typo fails the launch rather than leaving the agent thinking at the
+/// provider's default without a word.
+#[test]
+fn an_unknown_reasoning_effort_is_refused() {
+    let error = normalize_reasoning_effort("highest").unwrap_err();
+    assert!(error.contains("highest"), "{error}");
+    assert!(
+        error.contains("high"),
+        "the accepted levels are named: {error}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg,
+        "[[agents]]\nname = \"telos\"\nreasoning_effort = \"fast\"\n",
+    )
+    .unwrap();
+    let error = load_config(Some(&cfg), &defaults()).unwrap_err();
+    assert!(error.contains("agent 'telos'"), "{error}");
+    assert!(error.contains("fast"), "{error}");
+}
+
+/// A per-agent level wins over the default, and the default reaches every
+/// agent that does not declare one.
+#[test]
+fn reasoning_effort_falls_back_to_the_default_and_is_overridable() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg,
+        "[[agents]]\nname = \"plain\"\n\n\
+         [[agents]]\nname = \"raising\"\nws_port = 8081\nreasoning_effort = \"max\"\n",
+    )
+    .unwrap();
+    let specs = load_config(Some(&cfg), &defaults()).unwrap();
+    assert_eq!(specs[0].reasoning_effort, DEFAULT_REASONING_EFFORT);
+    assert_eq!(specs[1].reasoning_effort, "max");
 }
 
 #[test]

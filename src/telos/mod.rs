@@ -4,6 +4,7 @@ pub mod backend;
 pub mod control;
 pub mod types;
 
+use crate::agent::config::AgentSpec;
 use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -642,23 +643,23 @@ pub async fn launch_telos(
 
 // ── Telos settings bootstrap ─────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-pub fn ensure_telos_settings(
-    data_dir: &Path,
-    api_key: Option<&str>,
-    provider: &str,
-    base_url: &str,
-    model_name: &str,
-    model_display: &str,
-    mcp: &[crate::agent::config::McpServer],
-    tool_approval: crate::agent::config::ToolApproval,
-) -> anyhow::Result<()> {
+pub fn ensure_telos_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
     use std::fs;
     use std::io::Write;
 
-    let api_key = api_key.ok_or_else(|| {
-        anyhow::anyhow!("telos agent requires an LLM API key (LLM_API_KEY or --api-key)")
+    let api_key = spec.api_key.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "agent '{}': LLM API key required (LLM_API_KEY or --api-key)",
+            spec.name
+        )
     })?;
+    let provider = spec.provider.as_str();
+    let base_url = spec.base_url.as_str();
+    let model_name = spec.model.as_str();
+    let model_display = spec.model_display.as_str();
+    let reasoning_effort = spec.reasoning_effort.as_str();
+    let mcp = &spec.mcp;
+    let tool_approval = spec.tool_approval;
 
     let settings_dir = data_dir.join("config");
     fs::create_dir_all(&settings_dir)?;
@@ -683,21 +684,48 @@ pub fn ensure_telos_settings(
             .and_then(|oc| oc.get(provider))
             .is_none()
         {
+            let mut model = serde_json::json!({
+                "name": model_name,
+                "display_name": model_display,
+                "max_tokens": 65536,
+                "max_output_tokens": 8192,
+                "tool_use": true,
+            });
+            // The agent's OpenAI-compatible provider decides whether a model can
+            // think from this field, and sends the level with every request. A
+            // level of `none` is written as no field at all: that is the one
+            // shape that asks for no reasoning parameter, which is what a model
+            // that rejects the parameter needs.
+            if reasoning_effort != "none" {
+                model["reasoning_effort"] = serde_json::json!(reasoning_effort);
+            }
             settings["language_models"]["openai_compatible"][provider] = serde_json::json!({
                 "api_url": base_url,
-                "available_models": [{
-                    "name": model_name,
-                    "display_name": model_display,
-                    "max_tokens": 65536,
-                    "max_output_tokens": 8192,
-                    "tool_use": true,
-                }],
+                "available_models": [model],
             });
         }
     } else {
         tracing::warn!(
             "LLM endpoint not configured (set LLM_BASE_URL and LLM_MODEL in the local environment or the agent's config.toml); skipping provider injection"
         );
+    }
+
+    // A thread reads its thinking state from `agent.default_model` and nowhere
+    // else, so without this a launched agent thinks at the provider's default
+    // while its editor sibling thinks at the level the operator chose. Written
+    // only when nothing set it, so a hand-edited file stays the operator's.
+    if endpoint_configured && settings["agent"]["default_model"].is_null() {
+        let enable_thinking = reasoning_effort != "none";
+        settings["agent"]["default_model"] = serde_json::json!({
+            "provider": provider,
+            "model": model_name,
+            "enable_thinking": enable_thinking,
+            "effort": if enable_thinking {
+                serde_json::Value::String(reasoning_effort.to_string())
+            } else {
+                serde_json::Value::Null
+            },
+        });
     }
 
     // The terminal is the tool a headless agent runs commands with, and it is the one the

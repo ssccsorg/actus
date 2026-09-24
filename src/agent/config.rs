@@ -91,6 +91,9 @@ pub struct AgentSpec {
     pub ws_port: u16,
     /// Tool call approval policy; drives the fork's TELOS_TOOL_APPROVAL env.
     pub tool_approval: ToolApproval,
+    /// Reasoning effort this agent's model is asked for. Normalized to one of
+    /// `REASONING_EFFORT_LEVELS`.
+    pub reasoning_effort: String,
     /// Working directory for spawned agent processes. None means the
     /// server working directory.
     pub workdir: Option<PathBuf>,
@@ -172,6 +175,8 @@ pub struct LlmSettings {
     pub base_url: String,
     pub model: String,
     pub model_display: String,
+    /// Reasoning effort the model is asked for, already normalized.
+    pub reasoning_effort: String,
 }
 
 /// Trim a value and strip one pair of surrounding quotes. `.env` files
@@ -191,14 +196,16 @@ pub fn unquote_env_value(value: &str) -> String {
 
 /// Resolve the OpenAI-compatible endpoint from the local environment and
 /// CLI flags. Precedence matches the original main.rs behavior: env wins
-/// over flags for provider and base URL; model and display name come from
-/// the env only, with display falling back to the model. Missing values
-/// stay empty so a later launch step can warn instead of inventing an
-/// endpoint.
+/// over flags for provider, base URL and reasoning effort; model and display
+/// name come from the env only, with display falling back to the model.
+/// Missing values stay empty so a later launch step can warn instead of
+/// inventing an endpoint. The reasoning effort falls back to
+/// `DEFAULT_REASONING_EFFORT`, and is validated when the specs are resolved.
 pub fn resolve_llm_settings(
     env_get: impl Fn(&str) -> Option<String>,
     provider_default: String,
     base_url_flag: Option<String>,
+    reasoning_effort_flag: Option<String>,
 ) -> LlmSettings {
     let provider = unquote_env_value(&env_get("LLM_PROVIDER").unwrap_or(provider_default));
     let base_url = env_get("LLM_BASE_URL")
@@ -208,11 +215,47 @@ pub fn resolve_llm_settings(
     let model = unquote_env_value(&env_get("LLM_MODEL").unwrap_or_default());
     let model_display =
         unquote_env_value(&env_get("LLM_MODEL_DISPLAY").unwrap_or_else(|| model.clone()));
+    let reasoning_effort = env_get("LLM_REASONING_EFFORT")
+        .map(|v| unquote_env_value(&v))
+        .or_else(|| reasoning_effort_flag.map(|v| unquote_env_value(&v)))
+        .unwrap_or_else(|| DEFAULT_REASONING_EFFORT.to_string());
     LlmSettings {
         provider,
         base_url,
         model,
         model_display,
+        reasoning_effort,
+    }
+}
+
+/// The reasoning effort an agent's model is asked for when nothing sets one.
+///
+/// An agent is more useful thinking, and the value is a default rather than a
+/// claim about any model: `LLM_REASONING_EFFORT=none` (or the equivalent agent
+/// config field) turns thinking off explicitly, and any other level moves it.
+/// A deployment whose model rejects the parameter has to say `none`, which is
+/// why the level is validated loudly rather than dropped.
+pub const DEFAULT_REASONING_EFFORT: &str = "high";
+
+/// The reasoning-effort levels a model entry may declare, lowercased as the
+/// agent parses them.
+pub const REASONING_EFFORT_LEVELS: [&str; 7] =
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Normalize a declared reasoning effort, or explain what is accepted.
+///
+/// The agent parses the value case-sensitively into its own enum and drops one
+/// it cannot parse without a word, which would leave an agent silently thinking
+/// at the provider's default. A typo here fails the launch instead.
+pub fn normalize_reasoning_effort(value: &str) -> Result<String, String> {
+    let normalized = unquote_env_value(value).to_lowercase();
+    if REASONING_EFFORT_LEVELS.contains(&normalized.as_str()) {
+        Ok(normalized)
+    } else {
+        Err(format!(
+            "reasoning effort '{value}' is not one of: {}",
+            REASONING_EFFORT_LEVELS.join(", ")
+        ))
     }
 }
 
@@ -226,6 +269,7 @@ pub struct AgentDefaults {
     pub api_key: Option<String>,
     pub bin: PathBuf,
     pub ws_port: u16,
+    pub reasoning_effort: String,
 }
 
 /// File-format variant of `AgentSpec`: every field optional so a minimal
@@ -251,6 +295,8 @@ struct AgentSpecFile {
     ws_port: Option<u16>,
     #[serde(default)]
     tool_approval: Option<ToolApproval>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
     #[serde(default)]
     workdir: Option<PathBuf>,
     #[serde(default)]
@@ -299,6 +345,7 @@ pub fn load_config(
             bin: None,
             ws_port: None,
             tool_approval: None,
+            reasoning_effort: None,
             workdir: None,
             mcp: Vec::new(),
             cli_args: Vec::new(),
@@ -334,6 +381,12 @@ pub fn load_config(
                 .clone()
                 .unwrap_or_else(|| defaults.model_display.clone())
         });
+        let tool_approval = f.tool_approval.unwrap_or(ToolApproval::Always);
+        let declared_effort = f
+            .reasoning_effort
+            .unwrap_or_else(|| defaults.reasoning_effort.clone());
+        let reasoning_effort = normalize_reasoning_effort(&declared_effort)
+            .map_err(|e| format!("agent '{}': {e}", f.name))?;
         specs.push(AgentSpec {
             name: f.name,
             kind,
@@ -344,7 +397,8 @@ pub fn load_config(
             api_key: f.api_key.or_else(|| defaults.api_key.clone()),
             bin: f.bin.unwrap_or_else(|| defaults.bin.clone()),
             ws_port,
-            tool_approval: f.tool_approval.unwrap_or(ToolApproval::Always),
+            tool_approval,
+            reasoning_effort,
             workdir: f.workdir,
             mcp: f.mcp,
             cli_args: f.cli_args,

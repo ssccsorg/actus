@@ -6,20 +6,47 @@
 // Unit tests cover config parsing and settings injection; the scenario
 // test proves an injected stdio entry spawns a working MCP server.
 
-use actus::agent::config::{load_config, AgentDefaults, McpServer};
+use actus::agent::config::{
+    load_config, AgentDefaults, AgentSpec, McpServer, ToolApproval, DEFAULT_REASONING_EFFORT,
+};
 use actus::telos::ensure_telos_settings;
 use std::path::PathBuf;
 
 fn defaults() -> AgentDefaults {
+    defaults_with_endpoint("https://api.example.com/v1", "example-model")
+}
+
+/// The defaults a test inherits from, with the endpoint the settings writer
+/// records. An empty base URL or model means no endpoint, which is the case
+/// that must write no provider entry at all.
+fn defaults_with_endpoint(base_url: &str, model: &str) -> AgentDefaults {
     AgentDefaults {
         provider: "openai-compatible".to_string(),
-        model: "example-model".to_string(),
-        model_display: "example-model".to_string(),
-        base_url: "https://api.example.com/v1".to_string(),
+        model: model.to_string(),
+        model_display: model.to_string(),
+        base_url: base_url.to_string(),
         api_key: Some("sk-test".to_string()),
         bin: PathBuf::from("/bin/telos"),
         ws_port: 8080,
+        reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
     }
+}
+
+/// A resolved spec for the settings writer: everything a launched agent would
+/// carry, with the MCP servers and approval stance a test is about.
+fn spec_with(mcp: Vec<McpServer>, tool_approval: ToolApproval) -> AgentSpec {
+    let mut spec = load_config(None, &defaults()).unwrap().remove(0);
+    spec.mcp = mcp;
+    spec.tool_approval = tool_approval;
+    spec
+}
+
+/// A spec with no endpoint configured, which is what an operator who set no
+/// base URL and no model has.
+fn spec_without_endpoint() -> AgentSpec {
+    load_config(None, &defaults_with_endpoint("", ""))
+        .unwrap()
+        .remove(0)
 }
 
 /// The production six-server TOML, token redacted.
@@ -119,17 +146,7 @@ fn six_server_settings_injection_schema() {
         std::fs::write(&cfg, SIX_SERVER_TOML).unwrap();
         load_config(Some(&cfg), &defaults()).unwrap()
     };
-    ensure_telos_settings(
-        data_dir,
-        Some("sk-test"),
-        "openai-compatible",
-        "https://api.example.com/v1",
-        "example-model",
-        "example-model",
-        &specs[0].mcp,
-        actus::agent::config::ToolApproval::Always,
-    )
-    .unwrap();
+    ensure_telos_settings(data_dir, &specs[0]).unwrap();
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(data_dir.join("config/settings.json")).unwrap(),
@@ -178,17 +195,7 @@ fn settings_injection_skipped_without_endpoint_config() {
     // whose own built-in provider matches the label can still resolve the
     // key.
     let dir = tempfile::tempdir().unwrap();
-    ensure_telos_settings(
-        dir.path(),
-        Some("sk-test"),
-        "openai-compatible",
-        "",
-        "",
-        "",
-        &[],
-        actus::agent::config::ToolApproval::Always,
-    )
-    .unwrap();
+    ensure_telos_settings(dir.path(), &spec_without_endpoint()).unwrap();
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
@@ -282,13 +289,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
     }];
     ensure_telos_settings(
         dir.path(),
-        Some("sk-test"),
-        "openai-compatible",
-        "https://api.example.com/v1",
-        "example-model",
-        "example-model",
-        &mcp,
-        actus::agent::config::ToolApproval::Always,
+        &spec_with(mcp, actus::agent::config::ToolApproval::Always),
     )
     .unwrap();
 
@@ -340,17 +341,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
 fn an_always_agent_is_allowed_the_terminal() {
     fn settings_for(tool_approval: actus::agent::config::ToolApproval) -> serde_json::Value {
         let dir = tempfile::tempdir().unwrap();
-        ensure_telos_settings(
-            dir.path(),
-            Some("sk-test"),
-            "openai-compatible",
-            "https://api.example.com/v1",
-            "example-model",
-            "example-model",
-            &[],
-            tool_approval,
-        )
-        .unwrap();
+        ensure_telos_settings(dir.path(), &spec_with(Vec::new(), tool_approval)).unwrap();
         serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
         )

@@ -67,6 +67,11 @@ struct Args {
     #[arg(long)]
     base_url: Option<String>,
 
+    /// Reasoning effort asked of the model: none, minimal, low, medium, high,
+    /// xhigh or max (default: LLM_REASONING_EFFORT env or "high")
+    #[arg(long)]
+    reasoning_effort: Option<String>,
+
     /// Path to terminal.py (auto-detected if not set)
     #[arg(long)]
     cli: Option<PathBuf>,
@@ -231,11 +236,13 @@ async fn main() -> anyhow::Result<()> {
         |key| std::env::var(key).ok(),
         args.provider.clone(),
         args.base_url.clone(),
+        args.reasoning_effort.clone(),
     );
     let provider = llm.provider;
     let base_url = llm.base_url;
     let model_name = llm.model;
     let model_display = llm.model_display;
+    let reasoning_effort = llm.reasoning_effort;
 
     // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
     // Missing file (or no override) means a single default telos agent.
@@ -256,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
         api_key: api_key.clone(),
         bin: bin_path.clone(),
         ws_port: args.ws_port,
+        reasoning_effort: reasoning_effort.clone(),
     };
     let specs = load_config(config_file.as_deref(), &defaults).map_err(anyhow::Error::msg)?;
     let control_policy = load_control_policy(config_file.as_deref()).map_err(anyhow::Error::msg)?;
@@ -290,12 +298,6 @@ async fn main() -> anyhow::Result<()> {
     for spec in &specs {
         match spec.kind {
             AgentKind::Telos => {
-                let api_key = spec.api_key.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "agent '{}': LLM API key required (LLM_API_KEY or --api-key)",
-                        spec.name
-                    )
-                })?;
                 if !spec.bin.exists() {
                     return Err(anyhow::anyhow!(
                         "agent '{}': telos binary not found at {}",
@@ -324,16 +326,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
-                ensure_telos_settings(
-                    user_data_dir.path(),
-                    Some(api_key),
-                    &spec.provider,
-                    &spec.base_url,
-                    &spec.model,
-                    &spec.model_display,
-                    &spec.mcp,
-                    spec.tool_approval,
-                )?;
+                ensure_telos_settings(user_data_dir.path(), spec)?;
                 let threads_dir = threads_root.join(&spec.name);
                 std::fs::create_dir_all(&threads_dir)?;
                 let session_id = format!(
