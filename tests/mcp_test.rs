@@ -468,9 +468,9 @@ headers = { "Authorization" = "Bearer $KLETOS_MCP_ENV_TEST" }
     );
 }
 
-/// An unset `$NAME` fails the launch and names the variable. An empty token would leave
-/// the server starting and failing on every call, which reads as a broken tool rather
-/// than as a missing setting.
+/// An unset `$NAME` fails the launch of a server that starts, and names the variable. An
+/// empty token would leave the server starting and failing on every call, which reads as
+/// a broken tool rather than as a missing setting.
 #[test]
 fn an_unset_declared_value_fails_the_launch() {
     const TOML: &str = r#"
@@ -491,10 +491,48 @@ env = { "GITHUB_PERSONAL_ACCESS_TOKEN" = "$KLETOS_MCP_UNSET_TEST" }
     let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
 
     let error = ensure_telos_settings(dir.path(), &spec)
-        .expect_err("an unset declared variable must fail the launch")
+        .expect_err("an unset declared variable must fail the launch of a server that starts")
         .to_string();
     assert!(error.contains("mcp-server-github"), "{error}");
     assert!(error.contains("KLETOS_MCP_UNSET_TEST"), "{error}");
+}
+
+/// A server that is off is in the catalog and not running, and its credential is not
+/// needed until it is turned on. Requiring one here would make every launch depend on a
+/// credential for a server nobody runs, so the value is left as written and the missing
+/// name is reported instead.
+#[test]
+fn an_unset_declared_value_does_not_fail_the_launch_of_a_server_that_is_off() {
+    const TOML: &str = r#"
+[[agents]]
+name = "telos"
+ws_port = 8080
+
+[[agents.mcp]]
+name = "mcp-server-github"
+enabled = false
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { "GITHUB_PERSONAL_ACCESS_TOKEN" = "$KLETOS_MCP_OFF_UNSET_TEST" }
+"#;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(&cfg, TOML).unwrap();
+    let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
+    ensure_telos_settings(dir.path(), &spec)
+        .expect("a server that is off must not hold up the launch");
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
+    )
+    .unwrap();
+    let entry = &settings["context_servers"]["mcp-server-github"];
+    assert_eq!(entry["enabled"], false);
+    assert_eq!(
+        entry["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "$KLETOS_MCP_OFF_UNSET_TEST",
+        "the reference is left as written rather than resolved to nothing"
+    );
 }
 
 /// The agent's settings file is its own in one direction: actus writes the catalog it was

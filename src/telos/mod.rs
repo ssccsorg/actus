@@ -647,26 +647,38 @@ pub async fn launch_telos(
 ///
 /// Every `$NAME` in the value is read from the actus environment, so a token
 /// reaches an MCP server without being written to the config file, and a header
-/// that decorates one (`Bearer $NAME`) keeps its own text. A name that is not set
-/// is an error: an empty token would leave the server running and failing on every
-/// call, which is harder to see than a launch that names the variable once.
+/// that decorates one (`Bearer $NAME`) keeps its own text.
+///
+/// `required` is whether the server starts with the agent. For a server that
+/// starts, a name that is not set fails the launch and names the variable: an
+/// empty token would leave the server running and failing on every call, which is
+/// harder to see than a launch that names the variable once. A server that does
+/// not start has its value left as written and the missing name reported, because
+/// requiring it would make every launch depend on a credential for a server nobody
+/// runs; the agent can still turn that server on, and the report is what says the
+/// credential is missing when it does.
 pub fn resolve_declared(
     declared: &std::collections::HashMap<String, String>,
     server: &str,
     kind: &str,
+    required: bool,
 ) -> anyhow::Result<std::collections::HashMap<String, String>> {
     let mut resolved = std::collections::HashMap::with_capacity(declared.len());
     for (key, value) in declared {
-        resolved.insert(
-            key.clone(),
-            resolve_variables(value, |name| {
-                std::env::var(name).map_err(|_| {
-                    anyhow::anyhow!(
-                        "MCP server '{server}': {kind} '{key}' refers to ${name}, which is not set"
-                    )
-                })
-            })?,
-        );
+        let resolved_value = resolve_variables(value, |name| match std::env::var(name) {
+            Ok(value) => Ok(value),
+            Err(_) if required => Err(anyhow::anyhow!(
+                "MCP server '{server}': {kind} '{key}' refers to ${name}, which is not set"
+            )),
+            Err(_) => {
+                tracing::warn!(
+                    "MCP server '{server}': {kind} '{key}' refers to ${name}, which is not set; \
+                     the server does not start, and turning it on will need it"
+                );
+                Ok(format!("${name}"))
+            }
+        })?;
+        resolved.insert(key.clone(), resolved_value);
     }
     Ok(resolved)
 }
@@ -823,7 +835,7 @@ pub fn ensure_telos_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Resul
         let mut obj = serde_json::Map::new();
         if let Some(url) = &s.url {
             obj.insert("url".to_string(), serde_json::json!(url));
-            let headers = resolve_declared(&s.headers, &s.name, "header")?;
+            let headers = resolve_declared(&s.headers, &s.name, "header", s.enabled)?;
             if !headers.is_empty() {
                 obj.insert("headers".to_string(), serde_json::json!(headers));
             }
@@ -834,7 +846,7 @@ pub fn ensure_telos_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Resul
             if !s.args.is_empty() {
                 obj.insert("args".to_string(), serde_json::json!(s.args));
             }
-            let env = resolve_declared(&s.env, &s.name, "env value")?;
+            let env = resolve_declared(&s.env, &s.name, "env value", s.enabled)?;
             if !env.is_empty() {
                 obj.insert("env".to_string(), serde_json::json!(env));
             }
