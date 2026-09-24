@@ -133,7 +133,42 @@ fn persist_api_token(token: &str) -> anyhow::Result<()> {
 
 /// Enough of a token to tell two apart, and never the whole value.
 fn token_prefix(token: &str) -> String {
-    token.chars().take(4).collect()
+    token.chars().take(8).collect()
+}
+
+/// The agent processes this run started, taken down when it leaves however it leaves.
+///
+/// The launch loop spawns an agent per project, and the HTTP API binds after it, so every
+/// step past the first spawn can fail. A `?` there used to return from `main` and leave the
+/// agents running with no actus serving them: nothing holds a port, so nothing else
+/// notices, and they reconnect to the next actus's WebSocket ports in place of the agents
+/// it started, which is one actus's leftovers answering another actus's roster. A guard
+/// covers every exit, including the ones no code here writes.
+struct AgentChildren(Vec<std::process::Child>);
+
+impl AgentChildren {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn push(&mut self, child: std::process::Child) {
+        self.0.push(child);
+    }
+
+    /// Signal and reap nothing: the agents are killed, and actus is on its way out, so a
+    /// zombie holds the pid until this process exits. Running twice is harmless for the
+    /// same reason, which is what lets the graceful paths call it and the guard repeat it.
+    fn take_down(&mut self) {
+        for child in &mut self.0 {
+            child.kill().ok();
+        }
+    }
+}
+
+impl Drop for AgentChildren {
+    fn drop(&mut self) {
+        self.take_down();
+    }
 }
 
 /// Resolve the HTTP API bearer token: CLI arg, then ACTUS_API_TOKEN env,
@@ -285,7 +320,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Launch every configured agent and register it in the fabric.
     let mut registry = AgentRegistry::new();
-    let mut children: Vec<std::process::Child> = Vec::new();
+    let mut children = AgentChildren::new();
     // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
     let mut monitors: Vec<(Arc<RwLock<TelosManager>>, WsCommandTx)> = Vec::new();
     // Per-agent user data dirs stay alive for the process lifetime; Telos
@@ -607,7 +642,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             r = http_server => {
                 cli.kill().await.ok();
-                for c in children.iter_mut() { c.kill().ok(); }
+                children.take_down();
                 r.unwrap()?
             },
             result = cli.wait() => {
@@ -618,7 +653,7 @@ async fn main() -> anyhow::Result<()> {
             },
             _ = shutdown_rx => {
                 cli.kill().await.ok();
-                for c in children.iter_mut() { c.kill().ok(); }
+                children.take_down();
                 tracing::info!("Shutdown complete");
             },
         }
@@ -627,11 +662,11 @@ async fn main() -> anyhow::Result<()> {
         // Wait for servers or shutdown signal
         tokio::select! {
             r = http_server => {
-                for c in children.iter_mut() { c.kill().ok(); }
+                children.take_down();
                 r.unwrap()?
             },
             _ = shutdown_rx => {
-                for c in children.iter_mut() { c.kill().ok(); }
+                children.take_down();
                 tracing::info!("Shutdown complete");
             },
         }
