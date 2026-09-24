@@ -643,6 +643,68 @@ pub async fn launch_telos(
 
 // ── Telos settings bootstrap ─────────────────────────────────────────────
 
+/// Resolve a declared value to the string the agent's settings carry.
+///
+/// Every `$NAME` in the value is read from the actus environment, so a token
+/// reaches an MCP server without being written to the config file, and a header
+/// that decorates one (`Bearer $NAME`) keeps its own text. A name that is not set
+/// is an error: an empty token would leave the server running and failing on every
+/// call, which is harder to see than a launch that names the variable once.
+pub fn resolve_declared(
+    declared: &std::collections::HashMap<String, String>,
+    server: &str,
+    kind: &str,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut resolved = std::collections::HashMap::with_capacity(declared.len());
+    for (key, value) in declared {
+        resolved.insert(
+            key.clone(),
+            resolve_variables(value, |name| {
+                std::env::var(name).map_err(|_| {
+                    anyhow::anyhow!(
+                        "MCP server '{server}': {kind} '{key}' refers to ${name}, which is not set"
+                    )
+                })
+            })?,
+        );
+    }
+    Ok(resolved)
+}
+
+/// Replace every `$NAME` in `value` with `lookup(NAME)`, where a name starts with a
+/// letter or an underscore. A `$` that no name follows stays literal, so an amount
+/// like `$5` or a bare dollar sign is unchanged rather than being read as a variable.
+fn resolve_variables(
+    value: &str,
+    lookup: impl Fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let starts_name = bytes[index] == b'$'
+            && bytes
+                .get(index + 1)
+                .is_some_and(|next| next.is_ascii_alphabetic() || *next == b'_');
+        if !starts_name {
+            out.push(bytes[index] as char);
+            index += 1;
+            continue;
+        }
+
+        let name_start = index + 1;
+        let mut name_end = name_start;
+        while name_end < bytes.len()
+            && (bytes[name_end].is_ascii_alphanumeric() || bytes[name_end] == b'_')
+        {
+            name_end += 1;
+        }
+        out.push_str(&lookup(&value[name_start..name_end])?);
+        index = name_end;
+    }
+    Ok(out)
+}
+
 pub fn ensure_telos_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
     use std::fs;
     use std::io::Write;
@@ -748,37 +810,48 @@ pub fn ensure_telos_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Resul
     // MCP servers: map each declaration to Telos's `context_servers` entry.
     // Stdio servers become `{ command, args, env }`; HTTP servers become
     // `{ url, headers }`. The headless agent's context server registry
-    // starts these and exposes their tools to the model.
-    if !mcp.is_empty() {
-        let mut servers = serde_json::Map::new();
-        for s in mcp {
-            let content = if let Some(url) = &s.url {
-                let mut obj = serde_json::Map::new();
-                obj.insert("url".to_string(), serde_json::json!(url));
-                if !s.headers.is_empty() {
-                    obj.insert("headers".to_string(), serde_json::json!(s.headers));
-                }
-                serde_json::Value::Object(obj)
-            } else {
-                let mut obj = serde_json::Map::new();
-                if let Some(cmd) = &s.command {
-                    obj.insert("command".to_string(), serde_json::json!(cmd));
-                }
-                if !s.args.is_empty() {
-                    obj.insert("args".to_string(), serde_json::json!(s.args));
-                }
-                if !s.env.is_empty() {
-                    obj.insert("env".to_string(), serde_json::json!(s.env));
-                }
-                if let Some(t) = s.timeout {
-                    obj.insert("timeout".to_string(), serde_json::json!(t));
-                }
-                serde_json::Value::Object(obj)
-            };
-            servers.insert(s.name.clone(), content);
+    // starts the enabled ones and exposes their tools to the model, and the
+    // disabled ones stay in the agent's catalog, which is what the agent's
+    // own `enable_context_server` tool reads.
+    //
+    // Declared entries are merged over whatever the file holds, so a server
+    // the operator added by hand survives. A value of the form `$NAME` is
+    // resolved from the actus environment here, and an unset name is an
+    // error: the server process would otherwise start with an empty token and
+    // fail on every call instead of once, at launch, with the name to fix.
+    for s in mcp {
+        let mut obj = serde_json::Map::new();
+        if let Some(url) = &s.url {
+            obj.insert("url".to_string(), serde_json::json!(url));
+            let headers = resolve_declared(&s.headers, &s.name, "header")?;
+            if !headers.is_empty() {
+                obj.insert("headers".to_string(), serde_json::json!(headers));
+            }
+        } else {
+            if let Some(cmd) = &s.command {
+                obj.insert("command".to_string(), serde_json::json!(cmd));
+            }
+            if !s.args.is_empty() {
+                obj.insert("args".to_string(), serde_json::json!(s.args));
+            }
+            let env = resolve_declared(&s.env, &s.name, "env value")?;
+            if !env.is_empty() {
+                obj.insert("env".to_string(), serde_json::json!(env));
+            }
+            if let Some(t) = s.timeout {
+                obj.insert("timeout".to_string(), serde_json::json!(t));
+            }
         }
-        settings["context_servers"] = serde_json::Value::Object(servers);
-        tracing::info!("Wrote {} MCP server(s) to settings", mcp.len());
+        obj.insert("enabled".to_string(), serde_json::json!(s.enabled));
+        settings["context_servers"][s.name.as_str()] = serde_json::Value::Object(obj);
+    }
+    if !mcp.is_empty() {
+        let enabled = mcp.iter().filter(|s| s.enabled).count();
+        tracing::info!(
+            "Wrote {} MCP server(s) to settings, {} of them enabled",
+            mcp.len(),
+            enabled
+        );
     }
 
     let mut f = fs::File::create(&settings_file)?;
@@ -809,7 +882,7 @@ pub fn ensure_telos_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
-    use super::telos_command;
+    use super::{resolve_variables, telos_command};
     use std::collections::HashMap;
 
     #[test]
@@ -875,5 +948,39 @@ mod tests {
         for (key, value) in expect {
             assert_eq!(envs.get(key).map(String::as_str), Some(value), "env {key}");
         }
+    }
+
+    #[test]
+    fn a_variable_is_replaced_where_it_appears() {
+        let resolved = resolve_variables("Bearer $TOKEN", |name| {
+            assert_eq!(name, "TOKEN");
+            Ok("abc".to_string())
+        })
+        .unwrap();
+        assert_eq!(resolved, "Bearer abc");
+
+        let resolved = resolve_variables("$A-$B", |name| Ok(name.to_lowercase())).unwrap();
+        assert_eq!(resolved, "a-b");
+    }
+
+    /// A dollar sign that no name follows is ordinary text, so a value that
+    /// carries one is not mangled and does not have to be escaped.
+    #[test]
+    fn a_lone_dollar_sign_is_left_alone() {
+        let resolved = resolve_variables("costs $5 and a bare $", |name| {
+            panic!("no variable is named in this value, got {name}")
+        })
+        .unwrap();
+        assert_eq!(resolved, "costs $5 and a bare $");
+    }
+
+    #[test]
+    fn an_unset_variable_names_itself_in_the_error() {
+        let error = resolve_variables("$KLETOS_ABSENT_TEST", |name| {
+            Err(anyhow::anyhow!("refers to ${name}, which is not set"))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("$KLETOS_ABSENT_TEST"), "{error}");
     }
 }

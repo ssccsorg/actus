@@ -280,6 +280,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
     // Inject a stdio MCP entry pointing at the stub server.
     let mcp = vec![McpServer {
         name: "stub".to_string(),
+        enabled: true,
         command: Some("python3".to_string()),
         args: vec![server_script.to_string_lossy().to_string()],
         env: Default::default(),
@@ -358,5 +359,181 @@ fn an_always_agent_is_allowed_the_terminal() {
     assert!(
         asked["agent"]["tool_permissions"]["tools"]["terminal"]["default"].is_null(),
         "an agent that asks keeps its own setting"
+    );
+}
+
+/// The catalog an agent can turn on is what the operator declared, and a server the
+/// declaration marks off is still written: the agent's own `enable_context_server` tool
+/// flips an entry that is already there, so an entry that is absent is a capability the
+/// agent cannot reach.
+#[test]
+fn a_declared_server_is_on_unless_the_declaration_says_otherwise() {
+    const TOML: &str = r#"
+[[agents]]
+name = "telos"
+ws_port = 8080
+
+[[agents.mcp]]
+name = "memory"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+
+[[agents.mcp]]
+name = "mcp-server-github"
+enabled = false
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+"#;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(&cfg, TOML).unwrap();
+    let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
+    assert!(spec.mcp.iter().all(|server| !server.enabled) == false);
+    assert!(
+        spec.mcp.iter().find(|s| s.name == "memory").unwrap().enabled,
+        "a server the declaration does not mention is on"
+    );
+    assert!(
+        !spec
+            .mcp
+            .iter()
+            .find(|s| s.name == "mcp-server-github")
+            .unwrap()
+            .enabled,
+        "a declaration may put a server in the catalog without starting it"
+    );
+
+    ensure_telos_settings(dir.path(), &spec).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
+    )
+    .unwrap();
+    let servers = settings["context_servers"].as_object().unwrap();
+    assert_eq!(servers.len(), 2, "both declarations reach the catalog");
+    assert_eq!(servers["memory"]["enabled"], true);
+    assert_eq!(servers["mcp-server-github"]["enabled"], false);
+}
+
+/// A token declared as `$NAME` is read from the actus environment, so it reaches the
+/// server process without being written to the config file that names the server.
+#[test]
+fn a_declared_value_is_resolved_from_the_environment() {
+    const TOML: &str = r#"
+[[agents]]
+name = "telos"
+ws_port = 8080
+
+[[agents.mcp]]
+name = "mcp-server-github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { "GITHUB_PERSONAL_ACCESS_TOKEN" = "$KLETOS_MCP_ENV_TEST" }
+
+[[agents.mcp]]
+name = "cloudflare-api"
+url = "https://mcp.cloudflare.com/mcp"
+headers = { "Authorization" = "Bearer $KLETOS_MCP_ENV_TEST" }
+"#;
+
+    let previous = std::env::var_os("KLETOS_MCP_ENV_TEST");
+    // SAFETY: the name belongs to this test alone.
+    unsafe { std::env::set_var("KLETOS_MCP_ENV_TEST", "tok-123") };
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(&cfg, TOML).unwrap();
+    let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
+    let result = ensure_telos_settings(dir.path(), &spec);
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("KLETOS_MCP_ENV_TEST", value) },
+        None => unsafe { std::env::remove_var("KLETOS_MCP_ENV_TEST") },
+    }
+    result.unwrap();
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        settings["context_servers"]["mcp-server-github"]["env"]
+            ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+        "tok-123"
+    );
+    assert_eq!(
+        settings["context_servers"]["cloudflare-api"]["headers"]["Authorization"],
+        "Bearer tok-123",
+        "a header may mix its own text with a resolved value"
+    );
+}
+
+/// An unset `$NAME` fails the launch and names the variable. An empty token would leave
+/// the server starting and failing on every call, which reads as a broken tool rather
+/// than as a missing setting.
+#[test]
+fn an_unset_declared_value_fails_the_launch() {
+    const TOML: &str = r#"
+[[agents]]
+name = "telos"
+ws_port = 8080
+
+[[agents.mcp]]
+name = "mcp-server-github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { "GITHUB_PERSONAL_ACCESS_TOKEN" = "$KLETOS_MCP_UNSET_TEST" }
+"#;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(&cfg, TOML).unwrap();
+    let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
+
+    let error = ensure_telos_settings(dir.path(), &spec)
+        .expect_err("an unset declared variable must fail the launch")
+        .to_string();
+    assert!(error.contains("mcp-server-github"), "{error}");
+    assert!(error.contains("KLETOS_MCP_UNSET_TEST"), "{error}");
+}
+
+/// The agent's settings file is its own in one direction: actus writes the catalog it was
+/// given, and every entry it did not declare survives, so a server added by hand is not
+/// erased by the next launch.
+#[test]
+fn declared_servers_merge_into_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("settings.json"),
+        r#"{"context_servers":{"by-hand":{"command":"/bin/true","enabled":true}}}"#,
+    )
+    .unwrap();
+
+    let spec = spec_with(
+        vec![McpServer {
+            name: "memory".to_string(),
+            enabled: true,
+            command: Some("npx".to_string()),
+            args: vec!["-y".to_string(), "@modelcontextprotocol/server-memory".to_string()],
+            env: Default::default(),
+            url: None,
+            headers: Default::default(),
+            timeout: None,
+        }],
+        actus::agent::config::ToolApproval::Always,
+    );
+    ensure_telos_settings(dir.path(), &spec).unwrap();
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(config_dir.join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    let servers = settings["context_servers"].as_object().unwrap();
+    assert!(servers.contains_key("memory"), "{settings}");
+    assert!(
+        servers.contains_key("by-hand"),
+        "a server actus did not declare survives: {settings}"
     );
 }

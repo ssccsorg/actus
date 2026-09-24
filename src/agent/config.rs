@@ -54,21 +54,35 @@ impl ToolApproval {
 #[derive(Clone, Debug, Deserialize)]
 pub struct McpServer {
     pub name: String,
+    /// Whether the server starts with the agent. A declared server is on
+    /// unless the declaration says otherwise, and a server that is off is
+    /// still written to the agent's settings: it is in the agent's catalog,
+    /// where the agent can turn it on itself.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Stdio transport: executable path.
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Stdio transport: environment for the server process. A value of the
+    /// form `$NAME` is resolved from the actus environment when the agent
+    /// starts, so a token stays out of the config file.
     #[serde(default)]
     pub env: HashMap<String, String>,
     /// HTTP transport: remote MCP endpoint.
     #[serde(default)]
     pub url: Option<String>,
+    /// HTTP transport: request headers. Values resolve like `env` above.
     #[serde(default)]
     pub headers: HashMap<String, String>,
     /// Tool call timeout in seconds (stdio only).
     #[serde(default)]
     pub timeout: Option<u64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Resolved declaration of one agent platform instance. All fields are
