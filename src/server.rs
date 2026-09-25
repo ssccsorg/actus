@@ -9,6 +9,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, Utc};
 use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -199,6 +200,15 @@ pub struct ThreadSummary {
     pub title: Option<String>,
     pub message_count: usize,
     pub created_at: String,
+    /// When the thread last did anything: the backend's own activity time when it
+    /// keeps one, else its last message.
+    pub updated_at: Option<String>,
+    /// The agent this thread belongs to. A listing that folds over every agent
+    /// has no other way to say where a row came from.
+    pub agent: String,
+    /// What the agent works in, in its own backend's terms. Absent when the
+    /// backend has no such notion, which leaves a client to group by agent.
+    pub scope: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -218,6 +228,17 @@ pub struct ThreadDetailResponse {
 #[derive(Deserialize)]
 pub struct AgentQuery {
     pub agent: Option<String>,
+}
+
+/// The thread listing's own query, because it takes one parameter the other agent
+/// routes do not: a request that means every agent rather than one.
+#[derive(Deserialize)]
+pub struct ThreadListQuery {
+    pub agent: Option<String>,
+    /// Fold over every agent this host runs. Without it the request names one
+    /// agent, and naming none means the default, which is what a client talking
+    /// to a single-agent host sends.
+    pub all: Option<bool>,
 }
 
 async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
@@ -482,23 +503,48 @@ async fn create_thread_handler(
 
 async fn list_threads(
     State(state): State<SharedState>,
-    Query(q): Query<AgentQuery>,
+    Query(q): Query<ThreadListQuery>,
 ) -> Json<ThreadListResponse> {
-    let mut threads: Vec<ThreadSummary> = Vec::new();
-    if let Ok(agent) = agent_for(&state, q.agent.as_deref()).await {
-        let sessions = agent.threads().await;
-        threads = sessions
-            .iter()
-            .map(|t| ThreadSummary {
-                id: t.id.clone(),
-                title: t.title.clone(),
-                message_count: t.messages.len(),
-                created_at: t.created_at.to_rfc3339(),
-            })
-            .collect();
-        threads.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let targets: Vec<(String, Arc<dyn AgentBackend>)> = if q.all.unwrap_or(false) {
+        state.agents.agents()
+    } else {
+        match agent_for(&state, q.agent.as_deref()).await {
+            Ok(agent) => vec![(agent.name().to_string(), agent)],
+            Err(_) => Vec::new(),
+        }
+    };
+
+    // Ordered on the timestamp rather than on its rendering, so a listing is
+    // newest first whatever an offset happens to look like as a string.
+    let mut rows: Vec<(DateTime<Utc>, ThreadSummary)> = Vec::new();
+    for (agent, backend) in targets {
+        // What an agent works in is its backend's own notion, so the backend is
+        // asked rather than the configuration being read here.
+        let scope = backend.scope();
+        for thread in backend.threads().await {
+            // A backend that keeps its own activity time is believed. The last
+            // message is the default for one that does not, which is every chat
+            // adapter, and `created_at` covers a thread nobody has written in.
+            let updated_at = thread.updated_at.or_else(|| thread.last_message_at());
+            rows.push((
+                updated_at.unwrap_or(thread.created_at),
+                ThreadSummary {
+                    id: thread.id,
+                    title: thread.title,
+                    message_count: thread.messages.len(),
+                    created_at: thread.created_at.to_rfc3339(),
+                    updated_at: updated_at.map(|at| at.to_rfc3339()),
+                    agent: agent.clone(),
+                    scope: scope.clone(),
+                },
+            ));
+        }
     }
-    Json(ThreadListResponse { threads })
+    rows.sort_by_key(|row| std::cmp::Reverse(row.0));
+
+    Json(ThreadListResponse {
+        threads: rows.into_iter().map(|(_, summary)| summary).collect(),
+    })
 }
 
 async fn get_thread(

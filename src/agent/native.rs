@@ -42,6 +42,7 @@ impl NativeAgent {
             title: None,
             messages: Vec::new(),
             created_at: chrono::Utc::now(),
+            updated_at: None,
             completed: true,
             acp_thread_id: None,
             turn_completed: 0,

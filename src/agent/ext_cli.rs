@@ -134,6 +134,7 @@ impl ExtCliAgent {
             title: None,
             messages: Vec::new(),
             created_at: chrono::Utc::now(),
+            updated_at: None,
             completed: true,
             acp_thread_id: None,
             turn_completed: 0,
@@ -172,6 +173,12 @@ impl AgentBackend for ExtCliAgent {
 
     fn kind(&self) -> AgentKind {
         AgentKind::ExtCli
+    }
+
+    /// The directory this CLI runs in. A command-line agent is scoped to one
+    /// project the same way a telos agent is.
+    fn scope(&self) -> Option<String> {
+        Some(self.workdir.display().to_string())
     }
 
     async fn status(&self) -> AgentStatus {

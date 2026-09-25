@@ -10,7 +10,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use actus::agent::{AgentBackend, AgentRegistry};
+use actus::agent::{AgentBackend, AgentRegistry, ThreadMessage};
 use actus::server::{build_router, AppState, SharedState};
 use actus::telos::backend::TelosBackend;
 use actus::telos::{WsCommandTx, TelosManager};
@@ -42,6 +42,7 @@ fn test_state_with_manager() -> (SharedState, tempfile::TempDir, Manager) {
         name: "telos".to_string(),
         manager: manager.clone(),
         ws_tx,
+        scope: Some(workdir.path().display().to_string()),
     });
 
     let mut registry = AgentRegistry::new();
@@ -79,6 +80,66 @@ fn client() -> reqwest::Client {
         .default_headers(headers)
         .build()
         .expect("client")
+}
+
+/// State with two telos agents, each launched for its own project, so a listing that
+/// folds over the host can be told from one that answers for a single agent. Each
+/// agent gets its own threads file, because two managers sharing one would overwrite
+/// each other's record.
+fn two_agent_state() -> (SharedState, tempfile::TempDir, Manager, Manager) {
+    let workdir = tempfile::tempdir().expect("tempdir");
+    let mut registry = AgentRegistry::new();
+    let mut managers: Vec<Manager> = Vec::new();
+
+    for (name, project) in [("one", "/srv/one"), ("two", "/srv/two")] {
+        let threads_dir = workdir.path().join(name);
+        std::fs::create_dir_all(&threads_dir).expect("threads dir");
+        let manager: Manager = Arc::new(RwLock::new(TelosManager::new(
+            format!("ses_{name}"),
+            "127.0.0.1:9999".to_string(),
+            &threads_dir,
+        )));
+        let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
+        let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend {
+            name: name.to_string(),
+            manager: manager.clone(),
+            ws_tx,
+            scope: Some(project.to_string()),
+        });
+        registry.register(backend, name == "one");
+        managers.push(manager);
+    }
+
+    let state = AppState::new(
+        registry,
+        workdir.path().to_path_buf(),
+        Some("test-token".to_string()),
+    );
+    let mut managers = managers.into_iter();
+    let one = managers.next().expect("one");
+    let two = managers.next().expect("two");
+    (Arc::new(state), workdir, one, two)
+}
+
+/// One thread in `manager` whose only message carries the time given: the listing
+/// orders on activity, and a thread with no message has only its creation.
+async fn seed_thread(manager: &Manager, title: &str, at: &str) -> String {
+    let mut mgr = manager.write().await;
+    let tid = mgr.get_or_create_thread(None);
+    let thread = mgr.threads.get_mut(&tid).expect("the thread just made");
+    thread.title = Some(title.to_string());
+    thread.messages.push(ThreadMessage {
+        role: "assistant".to_string(),
+        content: "said".to_string(),
+        message_id: None,
+        entry_type: Some("text".to_string()),
+        tool_name: None,
+        tool_status: None,
+        timestamp: chrono::DateTime::parse_from_rfc3339(at)
+            .expect("a timestamp")
+            .with_timezone(&chrono::Utc),
+    });
+    tid
 }
 
 /// Run a git command in a directory, panicking on failure.
@@ -760,6 +821,55 @@ async fn poll_serves_the_turn_whole() {
     assert!(body["new_content"].is_null(), "{} ", body["new_content"]);
     assert!(body["message_id"].is_null());
     assert_eq!(body["content_len"], 0);
+
+    server.abort();
+}
+
+/// A listing that folds over the host: every agent's threads in one answer, newest
+/// first, each row naming the agent it came from and what that agent works in. A
+/// request that names one agent is what was already served, and it is unchanged.
+#[tokio::test]
+async fn all_threads_fold_over_every_agent() {
+    let (state, _keep, one, two) = two_agent_state();
+    let (base, server) = spawn_server(state).await;
+
+    let older = seed_thread(&one, "older", "2026-01-01T00:00:00Z").await;
+    let newest = seed_thread(&two, "newest", "2026-03-01T00:00:00Z").await;
+    let middle = seed_thread(&one, "middle", "2026-02-01T00:00:00Z").await;
+
+    let body: serde_json::Value = client()
+        .get(format!("{base}/v1/threads?all=true"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rows = body["threads"].as_array().expect("a list");
+    assert_eq!(rows.len(), 3, "{body}");
+    // Newest first, and across the agents rather than within one.
+    assert_eq!(rows[0]["id"], newest.as_str());
+    assert_eq!(rows[1]["id"], middle.as_str());
+    assert_eq!(rows[2]["id"], older.as_str());
+    // A row says which agent it came from and what that agent works in, which is
+    // what a client showing every project has to group them by.
+    assert_eq!(rows[0]["agent"], "two");
+    assert_eq!(rows[0]["scope"], "/srv/two");
+    assert_eq!(rows[1]["agent"], "one");
+    assert_eq!(rows[1]["scope"], "/srv/one");
+    assert_eq!(rows[1]["updated_at"], "2026-02-01T00:00:00+00:00");
+
+    let body: serde_json::Value = client()
+        .get(format!("{base}/v1/threads?agent=one"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rows = body["threads"].as_array().expect("a list");
+    assert_eq!(rows.len(), 2, "{body}");
+    assert!(rows.iter().all(|row| row["agent"] == "one"), "{body}");
 
     server.abort();
 }

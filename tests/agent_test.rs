@@ -46,6 +46,7 @@ fn telos_backend_named(name: &str) -> TelosBackend {
         name: name.to_string(),
         manager,
         ws_tx,
+        scope: Some(dir.path().display().to_string()),
     }
 }
 
@@ -298,6 +299,7 @@ fn load_threads_repairs_turn_counter_drift() {
             },
         ],
         created_at: chrono::Utc::now(),
+        updated_at: None,
         completed: true,
         acp_thread_id: None,
         turn_completed: 4, // drifted: only 2 assistant messages exist

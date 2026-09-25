@@ -30,6 +30,11 @@ pub struct TelosBackend {
     /// manager-side sender after a reconnect cannot silently drop a
     /// message.
     pub ws_tx: WsCommandTx,
+    /// The project this agent was launched for. Telos is told one workdir at
+    /// launch and opens a worktree for it, so this is what its threads belong
+    /// to; the backend answers with it rather than the listing deriving it
+    /// from the configuration, which is what keeps the notion a backend's.
+    pub scope: Option<String>,
 }
 
 /// The wire command that cancels a turn.
@@ -60,6 +65,10 @@ impl AgentBackend for TelosBackend {
 
     fn kind(&self) -> AgentKind {
         AgentKind::Telos
+    }
+
+    fn scope(&self) -> Option<String> {
+        self.scope.clone()
     }
 
     async fn status(&self) -> AgentStatus {

@@ -165,6 +165,7 @@ impl TelosManager {
                     title: None,
                     messages: vec![],
                     created_at: chrono::Utc::now(),
+                    updated_at: None,
                     completed: false,
                     acp_thread_id: None,
                     turn_completed: 0,

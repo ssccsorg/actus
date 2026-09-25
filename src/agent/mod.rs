@@ -182,6 +182,11 @@ pub struct ThreadSession {
     pub title: Option<String>,
     pub messages: Vec<ThreadMessage>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When this thread last did anything, as its backend reckons it. Absent
+    /// when the backend keeps no such time, which leaves a caller to fall
+    /// back to the last message or to `created_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
     /// True when the last assistant response is complete.
     pub completed: bool,
     /// Platform-side thread id (ACP thread id for Telos). Kept on the
@@ -208,6 +213,13 @@ pub struct ThreadMessage {
 }
 
 impl ThreadSession {
+    /// The time of the last thing written in the thread, which is what a listing
+    /// sorts on when the backend reports no activity time of its own. `None` for
+    /// a thread nobody has written in.
+    pub fn last_message_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.messages.iter().map(|message| message.timestamp).max()
+    }
+
     /// The messages of the turn in flight: what the agent has written since the
     /// person's last message, which is the turn's boundary.
     ///
@@ -233,6 +245,15 @@ pub trait AgentBackend: Send + Sync {
     fn name(&self) -> &str;
 
     fn kind(&self) -> AgentKind;
+
+    /// What this agent works in, in the backend's own terms: a workspace
+    /// directory for an agent that edits files, a queue or a job for an
+    /// execution controller. Opaque to actus, which carries it to clients
+    /// without reading it. `None` for a backend with no such notion, which
+    /// leaves a client to group by agent name instead.
+    fn scope(&self) -> Option<String> {
+        None
+    }
 
     /// Current connection and readiness state.
     async fn status(&self) -> AgentStatus;
@@ -319,6 +340,17 @@ impl AgentRegistry {
             .as_ref()
             .and_then(|name| self.agents.get(name))
             .cloned()
+    }
+
+    /// Every agent this host runs, by name in sorted order, so the same listing
+    /// comes back from one call to the next.
+    pub fn agents(&self) -> Vec<(String, Arc<dyn AgentBackend>)> {
+        let mut names: Vec<&String> = self.agents.keys().collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| (name.clone(), self.agents[name].clone()))
+            .collect()
     }
 
     pub async fn statuses(&self) -> Vec<AgentStatus> {

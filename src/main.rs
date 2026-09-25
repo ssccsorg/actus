@@ -419,6 +419,7 @@ async fn main() -> anyhow::Result<()> {
                     name: spec.name.clone(),
                     manager: manager.clone(),
                     ws_tx: ws_tx.clone(),
+                    scope: Some(agent_workdir.display().to_string()),
                 });
                 registry.register(backend, spec.name == default_name);
             }
