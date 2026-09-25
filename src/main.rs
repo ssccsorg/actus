@@ -340,25 +340,14 @@ async fn main() -> anyhow::Result<()> {
                         spec.bin.display()
                     ));
                 }
-                // A per-agent workdir scopes this agent to one project. Without
-                // one the agent opens the fabric-wide workdir, which is what
-                // every agent did before per-agent scoping existed. A missing
-                // directory is an error rather than a silent fallback: telos
-                // only opens a worktree for a path that exists, so a typo would
-                // otherwise yield an agent with no project at all.
-                let agent_workdir = match &spec.workdir {
-                    Some(dir) => {
-                        if !dir.is_dir() {
-                            return Err(anyhow::anyhow!(
-                                "agent '{}': workdir not found at {}",
-                                spec.name,
-                                dir.display()
-                            ));
-                        }
-                        dir.clone()
-                    }
-                    None => workdir.clone(),
-                };
+                // A per-agent workdir scopes this agent to one project. Without one
+                // the agent opens the fabric-wide workdir, which is what every agent
+                // did before per-agent scoping existed. The resolution is the one the
+                // other adapters use, so one project is one scope string whichever of
+                // them serves it.
+                let agent_workdir = spec
+                    .resolved_workdir(&workdir)
+                    .map_err(anyhow::Error::msg)?;
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
                 ensure_telos_settings(user_data_dir.path(), spec)?;
@@ -432,21 +421,12 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             AgentKind::ExtCli => {
-                // Per-agent working directory overrides the server
-                // workdir for cwd-sensitive CLIs; None falls back to the
-                // server workdir. The path is canonicalized at launch so
-                // a bad entry fails fast with the agent name.
-                let agent_workdir = match &spec.workdir {
-                    Some(p) => std::fs::canonicalize(p).map_err(|e| {
-                        anyhow::anyhow!(
-                            "agent '{}': cannot resolve workdir {}: {}",
-                            spec.name,
-                            p.display(),
-                            e
-                        )
-                    })?,
-                    None => workdir.clone(),
-                };
+                // Per-agent working directory overrides the server workdir for
+                // cwd-sensitive CLIs, resolved the same way as for the other
+                // adapters.
+                let agent_workdir = spec
+                    .resolved_workdir(&workdir)
+                    .map_err(anyhow::Error::msg)?;
                 let backend = Arc::new(ExtCliAgent::new(
                     spec.name.clone(),
                     spec.bin.clone(),

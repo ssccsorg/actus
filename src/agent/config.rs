@@ -126,6 +126,35 @@ pub struct AgentSpec {
     pub cli_timeout_secs: u64,
 }
 
+impl AgentSpec {
+    /// The directory this agent works in: its own when it names one, else the fabric's.
+    ///
+    /// Canonicalized, so one project is one string whichever adapter serves it. A scope
+    /// is what a client groups threads by, and two spellings of one directory would be
+    /// two groups. A directory that cannot be resolved is an error rather than a
+    /// fallback: an agent pointed at a missing project has no project at all, and telos
+    /// only opens a worktree for a path that exists.
+    pub fn resolved_workdir(&self, fabric_root: &Path) -> Result<PathBuf, String> {
+        let named = self.workdir.as_deref().unwrap_or(fabric_root);
+        let canonical = std::fs::canonicalize(named).map_err(|error| {
+            format!(
+                "agent '{}': workdir {} cannot be resolved: {}",
+                self.name,
+                named.display(),
+                error
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(format!(
+                "agent '{}': workdir {} is not a directory",
+                self.name,
+                canonical.display()
+            ));
+        }
+        Ok(canonical)
+    }
+}
+
 /// One allow rule: `controller` may dispatch to every name in
 /// `targets`. Either side accepts `"*"` for any agent.
 #[derive(Clone, Debug, Deserialize)]

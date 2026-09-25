@@ -873,3 +873,62 @@ async fn all_threads_fold_over_every_agent() {
 
     server.abort();
 }
+
+/// A message's stamp is when it was last written to, not when its stream began. A
+/// listing orders threads by that time, so a thread whose answer is still streaming
+/// comes out above one that finished while it was writing.
+#[tokio::test]
+async fn a_streamed_message_advances_the_threads_activity() {
+    let (state, _keep, manager) = test_state_with_manager();
+    let (base, server) = spawn_server(state).await;
+
+    // The writing thread began its answer first, and the quiet one's stamp is the later
+    // of the two until the writing thread is written to again.
+    let writing = seed_thread(&manager, "writing", "2026-01-01T00:00:00Z").await;
+    let quiet = seed_thread(&manager, "quiet", "2026-06-01T00:00:00Z").await;
+    {
+        let mut mgr = manager.write().await;
+        let thread = mgr.threads.get_mut(&writing).expect("the writing thread");
+        thread.messages[0].message_id = Some("acp:1".to_string());
+    }
+
+    let before = manager.read().await.threads[&writing]
+        .last_message_at()
+        .expect("a stamped message");
+
+    // The same entry again, longer, which is what a streaming update is.
+    for content in ["half", "half and the rest"] {
+        let mut mgr = manager.write().await;
+        mgr.add_message_full(
+            &writing,
+            "assistant",
+            content,
+            Some("acp:1".to_string()),
+            Some("text".to_string()),
+            None,
+            None,
+        );
+        drop(mgr);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let after = manager.read().await.threads[&writing]
+        .last_message_at()
+        .expect("a stamped message");
+    assert!(after > before, "{before} -> {after}");
+
+    let body: serde_json::Value = client()
+        .get(format!("{base}/v1/threads"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rows = body["threads"].as_array().expect("a list");
+    assert_eq!(rows[0]["id"], writing.as_str(), "{body}");
+    assert_ne!(rows[0]["updated_at"], "2026-01-01T00:00:00+00:00");
+    assert_eq!(rows[1]["id"], quiet.as_str(), "{body}");
+
+    server.abort();
+}

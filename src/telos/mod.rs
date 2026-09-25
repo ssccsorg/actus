@@ -320,6 +320,11 @@ impl TelosManager {
                         .iter_mut()
                         .find(|m| m.message_id.as_deref() == Some(mid))
                     {
+                        // The stamp is when the entry was last written to, not when its
+                        // stream began. A listing orders threads by this time, so a
+                        // message that streamed for minutes would otherwise report an
+                        // activity that stopped when the answer started.
+                        existing.timestamp = chrono::Utc::now();
                         existing.content = content.to_string();
                         existing.entry_type = entry_type;
                         existing.tool_name = tool_name;

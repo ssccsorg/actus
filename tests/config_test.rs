@@ -42,6 +42,50 @@ fn no_file_yields_single_default_telos() {
 }
 
 #[test]
+fn resolved_workdir_is_canonical_and_refuses_a_missing_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).expect("project");
+
+    let mut spec = load_config(None, &defaults()).expect("config").remove(0);
+
+    // No workdir of its own means the fabric's, resolved the same way as any other:
+    // the assertion is against the canonical form, so it holds whichever way this
+    // platform reaches the directory.
+    assert_eq!(
+        spec.resolved_workdir(dir.path()).expect("fabric root"),
+        std::fs::canonicalize(dir.path()).expect("canonical root")
+    );
+
+    // A spelling with a redundant component resolves to the one directory, so one
+    // project cannot become two scopes a client groups separately.
+    spec.workdir = Some(project.join("."));
+    assert_eq!(
+        spec.resolved_workdir(dir.path()).expect("named project"),
+        std::fs::canonicalize(&project).expect("canonical project")
+    );
+
+    // A directory nobody has is an error naming the agent rather than a fallback: an
+    // agent pointed at a missing project has no project at all.
+    spec.workdir = Some(project.join("missing"));
+    let error = spec
+        .resolved_workdir(dir.path())
+        .expect_err("a missing project");
+    assert!(error.contains(&spec.name), "{error}");
+    assert!(error.contains("missing"), "{error}");
+
+    // A path that exists but is not a directory is refused too, which is what the
+    // telos adapter used to check on its own.
+    let file = dir.path().join("a-file");
+    std::fs::write(&file, "not a project").expect("file");
+    spec.workdir = Some(file);
+    let error = spec
+        .resolved_workdir(dir.path())
+        .expect_err("a file is not a project");
+    assert!(error.contains("is not a directory"), "{error}");
+}
+
+#[test]
 fn llm_settings_resolution_env_wins_and_unquotes() {
     let env = |key: &str| -> Option<String> {
         match key {
