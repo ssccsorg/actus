@@ -113,13 +113,6 @@ impl AgentBackend for TelosBackend {
             mgr.set_title(&tid, message);
             let enriched = mgr.prepare_message(&tid, message);
             mgr.add_message(&tid, "user", message, None);
-            // A turn in flight is not a completed thread. The sibling backends set this
-            // on submit; without it the flag stays true from the first turn and says
-            // nothing about the turn now running, so a reader cannot use it to tell a
-            // turn that ended from one that never did.
-            if let Some(thread) = mgr.threads.get_mut(&tid) {
-                thread.completed = false;
-            }
             let rid = uuid::Uuid::new_v4().to_string();
             let acp_id = mgr.get_acp_thread_id(&tid);
             let cmd = serde_json::json!({
@@ -209,6 +202,12 @@ impl AgentBackend for TelosBackend {
 
         {
             let mut mgr = self.manager.write().await;
+            // From here the turn is in flight, so the thread is not a completed one.
+            // Set after every path that can still fail the submit, so a submit that
+            // never reached the agent does not leave a thread reading as running.
+            if let Some(thread) = mgr.threads.get_mut(&thread_id) {
+                thread.completed = false;
+            }
             mgr.threads_activated.insert(thread_id.clone());
         }
 
