@@ -246,7 +246,15 @@ async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
     let (telos_connected, agent_ready, active_threads) = match state.agents.default_agent() {
         Some(agent) => {
             let status = agent.status().await;
-            let threads = agent.threads().await.len();
+            // Threads whose last turn has not completed, which is what the field name
+            // says. The count of the default agent's threads is not that, and it read
+            // as work in flight in the client's own listing of it.
+            let threads = agent
+                .threads()
+                .await
+                .iter()
+                .filter(|thread| !thread.completed)
+                .count();
             (status.connected, status.ready, threads)
         }
         None => (false, false, 0),

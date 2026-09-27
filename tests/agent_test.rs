@@ -528,6 +528,39 @@ async fn duplicate_completion_consumed_by_sentinel() {
     assert_eq!(mgr.pending_requests.get("req-1").map(String::as_str), Some(""));
 }
 
+/// A completion whose platform-thread mapping is missing still lands on the thread
+/// its request id names. Without this the turn ends on the agent and every poll
+/// waits out its own ceiling, which is the state the phone was stuck in.
+#[tokio::test]
+async fn a_completion_with_no_platform_mapping_lands_by_request_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+
+    // The request mapping is the only one, as a dropped `thread_created` leaves it.
+    let tid = {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "hello", None);
+        mgr.add_message(&tid, "assistant", "hi there", None);
+        mgr.pending_requests.insert("req-9".to_string(), tid.clone());
+        tid
+    };
+
+    handle_telos_event(
+        &manager,
+        r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-9","request_id":"req-9"}}"#,
+    )
+    .await;
+
+    let mgr = manager.read().await;
+    let thread = mgr.threads.get(&tid).unwrap();
+    assert_eq!(
+        thread.turn_completed, 1,
+        "a completion with no platform mapping must still complete the turn"
+    );
+    assert!(thread.completed);
+}
+
 /// A completion with no assistant output must record an error message so
 /// consumers do not see a silent success with zero content.
 #[tokio::test]

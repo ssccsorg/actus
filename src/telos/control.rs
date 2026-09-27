@@ -392,12 +392,28 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 mgr.notify_thread_change();
                 return;
             }
+            // The request id is the correlation actus minted, so it is the key that
+            // survives a platform-thread mapping that is missing, stale or was
+            // overwritten by a later resume. Read before the mapping is consumed: a
+            // completion resolved this way is a turn that ended rather than one every
+            // poll waits on to its own ceiling.
+            let by_request = if request_id.is_empty() {
+                None
+            } else {
+                mgr.pending_requests.get(&request_id).cloned()
+            };
             // Clean up pending queue so reconnection does not resend this.
             if !request_id.is_empty() {
                 mgr.pending_chat_queue.retain(|(rid, _, _)| rid != &request_id);
                 mgr.consume_request(&request_id);
             }
-            if let Some(local_id) = mgr.thread_id_map.get(&acp_id).cloned() {
+            let local_id = mgr
+                .thread_id_map
+                .get(&acp_id)
+                .cloned()
+                .or(by_request)
+                .filter(|id| !id.is_empty());
+            if let Some(local_id) = local_id {
                 // Empty completion: the turn ended with no assistant
                 // message at all (no text, no tool call, no error). The
                 // last message is still the user's, so record an error
@@ -431,6 +447,16 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 // Snapshot this turn's entries so a follow-up turn's replay
                 // of them is recognized and dropped.
                 mgr.record_prior_entries(&local_id);
+            } else {
+                // A completion with no thread to land on is a turn the caller can never
+                // see end, so every poll waits out its whole ceiling. It is said loudly
+                // rather than dropped: that is the difference between a bug here and a
+                // turn that is genuinely long.
+                tracing::warn!(
+                    "message_completed for unknown acp_thread_id {} (request {}) — no thread to complete",
+                    &acp_id[..acp_id.len().min(12)],
+                    &request_id[..request_id.len().min(12)]
+                );
             }
             mgr.notify_thread_change();
             mgr.save_threads();
