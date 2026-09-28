@@ -260,6 +260,82 @@ async fn thread_lifecycle_over_http() {
     server.abort();
 }
 
+/// A thread is read as a range of its log rather than as all of it, so a conversation that
+/// grew to hundreds of messages is not one response of megabytes. The window is what a phone
+/// can parse and draw; the coordinates are what let it ask for the part before it.
+#[tokio::test]
+async fn a_thread_is_read_as_a_window_of_its_log() {
+    let (state, _workdir, manager) = test_state_with_manager();
+    let (base, server) = spawn_server(state).await;
+
+    let tid = {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        for index in 0..12 {
+            mgr.add_message(&tid, "assistant", &format!("message {index}"), None);
+        }
+        tid
+    };
+
+    // No `from` is the end of the thread, which is where a conversation is read from.
+    let detail: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{tid}?limit=5"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["total"], 12);
+    assert_eq!(detail["from"], 7);
+    let messages = detail["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 5);
+    assert_eq!(messages[0]["content"], "message 7");
+    assert_eq!(messages[4]["content"], "message 11");
+
+    // A range reads the part it names, which is how the window before this one is asked for.
+    let earlier: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{tid}?from=2&limit=5"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(earlier["from"], 2);
+    assert_eq!(earlier["total"], 12);
+    let messages = earlier["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 5);
+    assert_eq!(messages[0]["content"], "message 2");
+
+    // A range past the end is empty rather than an error, and still says where it stands.
+    let past: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{tid}?from=99"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(past["from"], 12);
+    assert_eq!(past["total"], 12);
+    assert_eq!(past["messages"].as_array().unwrap().len(), 0);
+
+    // However large a range is asked for, one response is bounded by the cap.
+    let capped: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{tid}?from=0&limit=100000"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(capped["from"], 0);
+    assert_eq!(capped["messages"].as_array().unwrap().len(), 12);
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn missing_thread_returns_404() {
     let (state, _keep) = test_state();

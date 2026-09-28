@@ -215,7 +215,13 @@ pub struct ThreadSummary {
 pub struct ThreadDetailResponse {
     pub id: String,
     pub title: Option<String>,
+    /// The window of the thread's log this answer carries, oldest first.
     pub messages: Vec<serde_json::Value>,
+    /// The coordinate of the first message in `messages`: where the window sits in the
+    /// thread's log, so a caller can ask for the window before it.
+    pub from: usize,
+    /// Messages in the whole thread, of which `messages` is a range.
+    pub total: usize,
     pub created_at: String,
     pub completed: bool,
     pub turn_completed: u64,
@@ -229,6 +235,30 @@ pub struct ThreadDetailResponse {
 pub struct AgentQuery {
     pub agent: Option<String>,
 }
+
+/// The read of one thread, which is a range of its log rather than all of it.
+///
+/// A thread is a sequence, so a message's place in it is its coordinate, and a read that
+/// names a range is bounded however long the conversation grew. Without one, a thread of
+/// eight hundred messages is a single response of megabytes, which is what a phone cannot
+/// parse and draw.
+#[derive(Deserialize)]
+pub struct ThreadQuery {
+    pub agent: Option<String>,
+    /// The coordinate of the first message wanted. Absent means the end of the thread,
+    /// which is where a conversation is read from.
+    pub from: Option<usize>,
+    /// How many messages after that one. Clamped to [`THREAD_WINDOW_MAX`].
+    pub limit: Option<usize>,
+}
+
+/// Messages one read carries when it is not told how many. A turn is a few dozen messages,
+/// so this is a couple of turns: enough that a view opens on a conversation rather than on
+/// a fragment, and far short of a thread.
+const THREAD_WINDOW_DEFAULT: usize = 100;
+/// The most one read carries, however it asks. Both this and the default are what keeps a
+/// response the size of the reading rather than the size of the thread.
+const THREAD_WINDOW_MAX: usize = 500;
 
 /// The thread listing's own query, because it takes one parameter the other agent
 /// routes do not: a request that means every agent rather than one.
@@ -558,13 +588,21 @@ async fn list_threads(
 async fn get_thread(
     State(state): State<SharedState>,
     Path(thread_id): Path<String>,
-    Query(q): Query<AgentQuery>,
+    Query(q): Query<ThreadQuery>,
 ) -> Result<Json<ThreadDetailResponse>, StatusCode> {
     let agent = agent_for(&state, q.agent.as_deref()).await?;
     match agent.thread(&thread_id).await {
         Some(thread) => {
-            let messages: Vec<serde_json::Value> = thread
-                .messages
+            let total = thread.messages.len();
+            let limit = q
+                .limit
+                .unwrap_or(THREAD_WINDOW_DEFAULT)
+                .clamp(1, THREAD_WINDOW_MAX);
+            // No `from` is the end of the thread rather than its start: a conversation is
+            // read from where it is, and the tail is where a view opens.
+            let from = q.from.unwrap_or(total.saturating_sub(limit)).min(total);
+            let end = (from + limit).min(total);
+            let messages: Vec<serde_json::Value> = thread.messages[from..end]
                 .iter()
                 .map(|m| {
                     serde_json::json!({
@@ -582,6 +620,8 @@ async fn get_thread(
                 id: thread.id.clone(),
                 title: thread.title.clone(),
                 messages,
+                from,
+                total,
                 created_at: thread.created_at.to_rfc3339(),
                 completed: thread.completed,
                 turn_completed: thread.turn_completed,
