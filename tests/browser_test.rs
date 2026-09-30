@@ -336,6 +336,47 @@ async fn every_implemented_operation_reaches_the_cli_with_its_own_argv() {
     }
 }
 
+/// The optional globals take their documented forms and a fixed order, so a
+/// declaration cannot reorder the argv underneath a step.
+#[tokio::test]
+async fn the_optional_globals_appear_in_a_fixed_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("invocations.jsonl");
+    let mut opts = options(stub_bin(dir.path()), &log);
+    opts.cdp = None;
+    opts.namespace = None;
+    opts.session = Some("preview".to_string());
+    opts.headed = Some(false);
+    opts.init_script = Some(dir.path().join("guard.js"));
+    opts.domains = Some(vec![
+        "example.com".to_string(),
+        "docs.example.com".to_string(),
+    ]);
+    let agent = BrowserAgent::new("browser1".to_string(), &opts, dir.path().to_path_buf());
+
+    let receipt = agent
+        .submit(None, r#"{"steps":[{"op":"get_title"}]}"#)
+        .await
+        .unwrap();
+    let _ = wait_for_reply(&agent, &receipt.thread_id).await;
+
+    let calls = invocations(&log);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let want = vec![
+        "--session".to_string(),
+        "preview".to_string(),
+        "--headed".to_string(),
+        "false".to_string(),
+        "--init-script".to_string(),
+        dir.path().join("guard.js").display().to_string(),
+        "--allowed-domains".to_string(),
+        "example.com,docs.example.com".to_string(),
+        "get".to_string(),
+        "title".to_string(),
+    ];
+    assert_eq!(calls[0], want);
+}
+
 #[tokio::test]
 async fn a_thread_keeps_the_plan_and_the_record() {
     let dir = tempfile::tempdir().unwrap();
