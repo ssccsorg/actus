@@ -870,6 +870,30 @@ async fn poll_serves_the_turn_whole() {
     assert_eq!(messages[1]["message_id"], "acp:3");
     assert_eq!(messages[1]["content"], "<thinking>second, half");
 
+    // The same messages read from the thread carry the same time, because one struct answers
+    // both paths. A client that draws a time per message reads the poll for the turn on
+    // screen, so a poll without one leaves the time missing for exactly that turn.
+    let thread: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{tid}?limit=50"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for message in messages {
+        let from_thread = thread["messages"]
+            .as_array()
+            .expect("thread messages")
+            .iter()
+            .find(|served| served["message_id"] == message["message_id"])
+            .expect("the polled message is in the thread too");
+        assert_eq!(
+            message["timestamp"], from_thread["timestamp"],
+            "the poll reports the message's own time, as the thread read does"
+        );
+    }
+
     // The top level fields still describe the last message of the turn, which is what a
     // client that draws one message at a time reads.
     assert_eq!(body["message_id"], "acp:3");

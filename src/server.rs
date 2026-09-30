@@ -678,6 +678,11 @@ pub struct PollMessage {
     pub tool_name: Option<String>,
     pub tool_status: Option<String>,
     pub content: String,
+    /// When the message was written, in the form the thread read reports it. A view that
+    /// draws a time per message reads both paths, and a poll serves the turn a client has
+    /// not read from the thread yet, so the field answers there or the time is missing for
+    /// exactly the turn on screen.
+    pub timestamp: String,
 }
 
 /// Poll for new thread state.
@@ -723,6 +728,7 @@ async fn poll_thread(
             tool_name: message.tool_name.clone(),
             tool_status: message.tool_status.clone(),
             content: message.content.clone(),
+            timestamp: message.timestamp.to_rfc3339(),
         })
         .collect();
 
