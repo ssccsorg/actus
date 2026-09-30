@@ -124,6 +124,14 @@ impl AgentFactory for ExtCliFactory {
         "ext_cli"
     }
 
+    /// A declaration that cannot be read as a CLI profile (a missing `bin`,
+    /// a field of the wrong type) fails the config load rather than the
+    /// first turn, and the error names the agent.
+    fn validate(&self, spec: &AgentSpec, _all: &[AgentSpec]) -> Result<(), String> {
+        let _: ExtCliOptions = spec.options()?;
+        Ok(())
+    }
+
     async fn launch(&self, spec: &AgentSpec, ctx: &LaunchContext) -> anyhow::Result<LaunchedAgent> {
         let options: ExtCliOptions = spec.options().map_err(anyhow::Error::msg)?;
         // Per-agent working directory overrides the server workdir for

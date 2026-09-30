@@ -293,6 +293,11 @@ async fn main() -> anyhow::Result<()> {
     factories.register_default(Arc::new(TelosFactory::new(telos_defaults)));
     factories.register(Arc::new(ExtCliFactory));
     factories.register(Arc::new(NativeFactory));
+    // `langgraph` was declared as a platform before the factory seam and has
+    // no adapter. A config that names it starts and skips that agent with a
+    // warning, which is what actus did when the kind was an enum variant; a
+    // name that was never declared is refused instead.
+    factories.reserve("langgraph");
 
     // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
     // A missing file (or no override) means one agent of the registry's
@@ -339,6 +344,14 @@ async fn main() -> anyhow::Result<()> {
     let default_name = specs[0].name.clone();
 
     for spec in &specs {
+        if factories.is_reserved(&spec.kind) {
+            tracing::warn!(
+                "Agent '{}': kind {} has no adapter yet, skipping",
+                spec.name,
+                spec.kind
+            );
+            continue;
+        }
         let factory = factories.get(&spec.kind).ok_or_else(|| {
             anyhow::anyhow!("agent '{}': unknown kind '{}'", spec.name, spec.kind)
         })?;

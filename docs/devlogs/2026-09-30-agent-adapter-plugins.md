@@ -41,9 +41,13 @@ the reference for attaching a new agent platform to actus.
 | `AgentKind`-based port check in the config loader | `TelosFactory::validate`, which reads telos specs and only telos specs. |
 | `server.rs` re-export of `telos::WsCommandTx` | Deleted; `telos::control` imports the type from `telos`. |
 
-The `langgraph` kind disappears with the enum: it never had an adapter and
-warned at launch. A config that names it is now refused as an unknown kind.
-A langgraph factory can be registered later without touching the fabric.
+The `langgraph` kind disappears with the enum. It is kept as a reserved kind
+(`FactoryRegistry::reserve` in `main.rs`): a config that declares it still
+loads, and the launch loop skips that agent with the warning actus emitted
+when the kind was an enum variant, so an existing config keeps the outcome it
+had. A kind that was never declared is refused at config load instead, which
+is what a typo needs. Registering a `langgraph` factory later takes
+precedence over the reservation.
 
 ## Configuration
 

@@ -176,7 +176,10 @@ The LLM fields belong to the `telos` kind: a deployment whose model rejects
 the reasoning parameter declares `reasoning_effort = "none"`, and a typo
 fails the launch rather than leaving the agent at the provider's default.
 A kind that is not registered is refused at config load; adding one is an
-`AgentFactory` plus a registration in `main.rs` (issue #36).
+`AgentFactory` plus a registration in `main.rs` (issue #36). `langgraph` is
+declared as a reserved kind: a config that names it loads and that agent is
+skipped at launch with a warning, which is the outcome actus gave the name
+before the factory seam.
 
 ### Auxiliary Raw-CLI Agents
 

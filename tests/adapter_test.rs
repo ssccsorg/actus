@@ -295,3 +295,42 @@ fn an_unregistered_kind_is_refused_and_the_registered_ones_are_named() {
         "the registered kinds are named: {error}"
     );
 }
+
+#[test]
+fn a_reserved_kind_loads_and_is_for_the_launch_loop_to_skip() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = write_config(
+        dir.path(),
+        "[[agents]]\nname = \"legacy\"\nkind = \"legacy\"\n",
+    );
+
+    let mut factories = registry();
+    factories.reserve("legacy");
+
+    // A reserved kind is a platform actus knows and has no factory for: the
+    // config loads, and the launch loop skips the spec with a warning.
+    let specs = load_config(Some(&cfg), &factories).unwrap();
+    assert_eq!(specs.len(), 1);
+    assert!(factories.is_reserved("legacy"));
+    assert!(factories.get("legacy").is_none());
+}
+
+/// Registering a factory for a reserved name takes precedence, so a platform
+/// that arrives later needs no change to the reservation.
+#[test]
+fn a_registered_factory_wins_over_a_reserved_name() {
+    let mut factories = registry();
+    factories.reserve("stub");
+    assert!(!factories.is_reserved("stub"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = write_config(
+        dir.path(),
+        "[[agents]]\nname = \"empty\"\nkind = \"stub\"\nlabel = \"\"\n",
+    );
+    let error = load_config(Some(&cfg), &factories).unwrap_err();
+    assert!(
+        error.contains("label must not be empty"),
+        "the factory's own validation ran: {error}"
+    );
+}

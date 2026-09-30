@@ -5,7 +5,7 @@
 // platform's fields, its launch path, and its lifecycle live inside its own
 // factory module. Adding a platform is one factory and one registration.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -63,6 +63,7 @@ pub trait AgentFactory: Send + Sync {
 pub struct FactoryRegistry {
     factories: BTreeMap<String, Arc<dyn AgentFactory>>,
     default_kind: Option<&'static str>,
+    reserved: BTreeSet<String>,
 }
 
 impl FactoryRegistry {
@@ -79,6 +80,19 @@ impl FactoryRegistry {
     pub fn register_default(&mut self, factory: Arc<dyn AgentFactory>) {
         self.default_kind = Some(factory.kind());
         self.register(factory);
+    }
+
+    /// Name a platform actus knows and has no factory for. A spec of such a
+    /// kind loads and is skipped at launch with a warning, which is what
+    /// actus did when the platform was an enum variant without an adapter.
+    /// Registering a factory for the same name takes precedence.
+    pub fn reserve(&mut self, kind: &str) {
+        self.reserved.insert(kind.to_string());
+    }
+
+    /// Whether `kind` is reserved and still has no factory.
+    pub fn is_reserved(&self, kind: &str) -> bool {
+        self.reserved.contains(kind) && !self.factories.contains_key(kind)
     }
 
     pub fn get(&self, kind: &str) -> Option<Arc<dyn AgentFactory>> {
@@ -98,16 +112,21 @@ impl FactoryRegistry {
     }
 
     /// Validate one spec against its factory. An unregistered kind is
-    /// refused here, naming the kinds that are registered.
+    /// refused here, naming the kinds that are registered, unless it is a
+    /// reserved kind: a platform actus knows and has no adapter for is
+    /// skipped at launch rather than failing the whole config.
     pub fn validate(&self, spec: &AgentSpec, all: &[AgentSpec]) -> Result<(), String> {
-        let factory = self.get(&spec.kind).ok_or_else(|| {
-            format!(
+        let Some(factory) = self.get(&spec.kind) else {
+            if self.is_reserved(&spec.kind) {
+                return Ok(());
+            }
+            return Err(format!(
                 "config: agent '{}': unknown kind '{}'; registered kinds: {}",
                 spec.name,
                 spec.kind,
                 self.kinds().join(", ")
-            )
-        })?;
+            ));
+        };
         factory.validate(spec, all)
     }
 }
