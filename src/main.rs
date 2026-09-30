@@ -1,28 +1,25 @@
 // Actus — agent execution runtime (REST API server)
 //
-// Launches and supervises agent adapters (Telos over WebSocket, the
-// in-process native reference adapter, future platforms) and exposes a
-// REST API for multi-thread chat with an async task queue.
+// Launches and supervises agent adapters and exposes a REST API for
+// multi-thread chat with an async task queue. This binary is the
+// composition point: the fabric names no platform, and the kinds actus
+// ships are registered here.
 //
 // Usage:
 //    --workdir /path/to/project
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::RwLock;
 
-use actus::agent::config::{load_config, load_control_policy, AgentDefaults};
-use actus::agent::config::{resolve_llm_settings, unquote_env_value};
-use actus::agent::ext_cli::ExtCliAgent;
-use actus::agent::native::NativeAgent;
-use actus::agent::AgentKind;
+use actus::agent::adapter::{FactoryRegistry, LaunchContext};
+use actus::agent::config::{load_config, load_control_policy, unquote_env_value};
+use actus::agent::ext_cli::ExtCliFactory;
+use actus::agent::native::NativeFactory;
 use actus::agent::AgentRegistry;
 use actus::control;
 use actus::server::{run_http_server, AppState};
-use actus::telos::backend::TelosBackend;
-use actus::telos::control::run_ws_server;
-use actus::telos::{ensure_telos_settings, launch_telos, TelosManager, WsCommandTx};
+use actus::telos::adapter::TelosFactory;
+use actus::telos::options::{resolve_llm_settings, TelosDefaults};
 
 /// The `actus control` stdio MCP proxy is a subcommand so the same binary
 /// can serve as a context server of a sessionful agent such as telos.
@@ -38,7 +35,7 @@ struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Telos binary path
+    /// Telos binary path (the default agent kind)
     #[arg(long)]
     bin: Option<PathBuf>,
 
@@ -151,8 +148,8 @@ impl AgentChildren {
         Self(Vec::new())
     }
 
-    fn push(&mut self, child: std::process::Child) {
-        self.0.push(child);
+    fn extend(&mut self, children: Vec<std::process::Child>) {
+        self.0.extend(children);
     }
 
     /// Signal and reap nothing: the agents are killed, and actus is on its way out, so a
@@ -237,9 +234,9 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("LLM_API_KEY").ok())
         .map(|k| unquote_env_value(&k));
 
-    // Resolve the Telos binary path: --bin, TELOS_BIN, or the sibling
-    // build. Used by the Telos adapter only; existence is checked at
-    // launch so non-Telos agents do not require it.
+    // Resolve the telos kind's binary: --bin, TELOS_BIN, or the sibling
+    // build. The factory holds it as a default; a spec that declares its own
+    // `bin` overrides it.
     let bin_path = if let Some(p) = args.bin {
         p
     } else if let Ok(p) = std::env::var("TELOS_BIN") {
@@ -279,8 +276,27 @@ async fn main() -> anyhow::Result<()> {
     let model_display = llm.model_display;
     let reasoning_effort = llm.reasoning_effort;
 
+    // The built-in factories, each holding its own platform's defaults.
+    // This is the composition point: the fabric never names a platform, and
+    // this binary is where the ones it ships are registered.
+    let telos_defaults = TelosDefaults {
+        bin: bin_path.clone(),
+        ws_port: args.ws_port,
+        provider,
+        model: model_name,
+        model_display,
+        base_url,
+        api_key: api_key.clone(),
+        reasoning_effort,
+    };
+    let mut factories = FactoryRegistry::new();
+    factories.register_default(Arc::new(TelosFactory::new(telos_defaults)));
+    factories.register(Arc::new(ExtCliFactory));
+    factories.register(Arc::new(NativeFactory));
+
     // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
-    // Missing file (or no override) means a single default telos agent.
+    // A missing file (or no override) means one agent of the registry's
+    // default kind.
     let config_path = std::env::var("ACTUS_CONFIG")
         .ok()
         .map(PathBuf::from)
@@ -290,17 +306,7 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
 
-    let defaults = AgentDefaults {
-        provider: provider.clone(),
-        model: model_name.clone(),
-        model_display: model_display.clone(),
-        base_url: base_url.clone(),
-        api_key: api_key.clone(),
-        bin: bin_path.clone(),
-        ws_port: args.ws_port,
-        reasoning_effort: reasoning_effort.clone(),
-    };
-    let specs = load_config(config_file.as_deref(), &defaults).map_err(anyhow::Error::msg)?;
+    let specs = load_config(config_file.as_deref(), &factories).map_err(anyhow::Error::msg)?;
     let control_policy = load_control_policy(config_file.as_deref()).map_err(anyhow::Error::msg)?;
     tracing::info!(
         "Config: {} agent(s) from {}",
@@ -318,166 +324,27 @@ async fn main() -> anyhow::Result<()> {
         .join("threads");
     std::fs::create_dir_all(&threads_root)?;
 
+    let launch_ctx = LaunchContext {
+        workdir: workdir.clone(),
+        threads_root: threads_root.clone(),
+        http_port: args.http_port,
+        api_token: api_token.clone(),
+    };
+
     // Launch every configured agent and register it in the fabric.
     let mut registry = AgentRegistry::new();
     let mut children = AgentChildren::new();
-    // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
-    let mut monitors: Vec<(Arc<RwLock<TelosManager>>, WsCommandTx)> = Vec::new();
-    // Per-agent user data dirs stay alive for the process lifetime; Telos
-    // reads settings at startup and watches them while running.
-    let mut _user_data_dirs: Vec<tempfile::TempDir> = Vec::new();
 
     // The first configured agent is the fabric default.
     let default_name = specs[0].name.clone();
 
     for spec in &specs {
-        match spec.kind {
-            AgentKind::Telos => {
-                if !spec.bin.exists() {
-                    return Err(anyhow::anyhow!(
-                        "agent '{}': telos binary not found at {}",
-                        spec.name,
-                        spec.bin.display()
-                    ));
-                }
-                // A per-agent workdir scopes this agent to one project. Without
-                // one the agent opens the fabric-wide workdir, which is what
-                // every agent did before per-agent scoping existed. A missing
-                // directory is an error rather than a silent fallback: telos
-                // only opens a worktree for a path that exists, so a typo would
-                // otherwise yield an agent with no project at all.
-                let agent_workdir = match &spec.workdir {
-                    Some(dir) => {
-                        if !dir.is_dir() {
-                            return Err(anyhow::anyhow!(
-                                "agent '{}': workdir not found at {}",
-                                spec.name,
-                                dir.display()
-                            ));
-                        }
-                        dir.clone()
-                    }
-                    None => workdir.clone(),
-                };
-                let ws_host = format!("127.0.0.1:{}", spec.ws_port);
-                let user_data_dir = tempfile::tempdir()?;
-                ensure_telos_settings(user_data_dir.path(), spec)?;
-                let threads_dir = threads_root.join(&spec.name);
-                std::fs::create_dir_all(&threads_dir)?;
-                let session_id = format!(
-                    "ses_actus-{}-{}",
-                    spec.name,
-                    &uuid::Uuid::new_v4().to_string()[..8]
-                );
-                let manager = Arc::new(RwLock::new(TelosManager::new(
-                    session_id.clone(),
-                    ws_host.clone(),
-                    &threads_dir,
-                )));
-                let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-                monitors.push((manager.clone(), ws_tx.clone()));
-
-                // Per-agent WebSocket server (Telos connects back here).
-                tokio::spawn({
-                    let host = ws_host.clone();
-                    let mgr = manager.clone();
-                    let tx = ws_tx.clone();
-                    async move {
-                        if let Err(e) = run_ws_server(&host, mgr, tx).await {
-                            tracing::error!("WS server for agent failed: {}", e);
-                        }
-                    }
-                });
-                // Debounced thread persistence (see TelosManager::save_threads).
-                TelosManager::spawn_thread_saver(manager.clone());
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-                let child = launch_telos(
-                    &spec.bin,
-                    &agent_workdir,
-                    user_data_dir.path(),
-                    &session_id,
-                    &ws_host,
-                    spec.tool_approval,
-                    &spec.name,
-                    args.http_port,
-                    &api_token,
-                    &threads_dir.join("telos.log"),
-                )
-                .await?;
-                _user_data_dirs.push(user_data_dir);
-                tracing::info!(
-                    "Agent '{}' launched (PID {:?}, WS ws://{}, threads {})",
-                    spec.name,
-                    child.id(),
-                    ws_host,
-                    threads_dir.display()
-                );
-                children.push(child);
-
-                let backend = Arc::new(TelosBackend {
-                    name: spec.name.clone(),
-                    manager: manager.clone(),
-                    ws_tx: ws_tx.clone(),
-                    scope: Some(agent_workdir.display().to_string()),
-                });
-                registry.register(backend, spec.name == default_name);
-            }
-            AgentKind::Native => {
-                let backend = Arc::new(NativeAgent::new(spec.name.clone()));
-                registry.register(backend, spec.name == default_name);
-                tracing::info!(
-                    "Agent '{}' running (native reference adapter, in-process)",
-                    spec.name
-                );
-            }
-            AgentKind::ExtCli => {
-                // Per-agent working directory overrides the server
-                // workdir for cwd-sensitive CLIs; None falls back to the
-                // server workdir. The path is canonicalized at launch so
-                // a bad entry fails fast with the agent name.
-                let agent_workdir = match &spec.workdir {
-                    Some(p) => std::fs::canonicalize(p).map_err(|e| {
-                        anyhow::anyhow!(
-                            "agent '{}': cannot resolve workdir {}: {}",
-                            spec.name,
-                            p.display(),
-                            e
-                        )
-                    })?,
-                    None => workdir.clone(),
-                };
-                let backend = Arc::new(ExtCliAgent::new(
-                    spec.name.clone(),
-                    spec.bin.clone(),
-                    spec.cli_args.clone(),
-                    spec.cli_env.clone(),
-                    spec.cli_prompt,
-                    spec.cli_timeout_secs,
-                    agent_workdir.clone(),
-                ));
-                if let Some(err) = backend.probe_error() {
-                    tracing::warn!(
-                        "Agent '{}': launch probe failed ({}); health reports ready=false",
-                        spec.name,
-                        err
-                    );
-                }
-                registry.register(backend, spec.name == default_name);
-                tracing::info!(
-                    "Agent '{}' running (ext_cli adapter, raw transport, bin {}, workdir {})",
-                    spec.name,
-                    spec.bin.display(),
-                    agent_workdir.display()
-                );
-            }
-            AgentKind::LangGraph => {
-                tracing::warn!(
-                    "Agent '{}': kind langgraph has no adapter yet, skipping",
-                    spec.name
-                );
-            }
-        }
+        let factory = factories.get(&spec.kind).ok_or_else(|| {
+            anyhow::anyhow!("agent '{}': unknown kind '{}'", spec.name, spec.kind)
+        })?;
+        let launched = factory.launch(spec, &launch_ctx).await?;
+        children.extend(launched.children);
+        registry.register(launched.backend, spec.name == default_name);
     }
 
     if registry.default_agent().is_none() {
@@ -537,11 +404,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Graceful shutdown ────────────────────────────────────────────
-    // Handle SIGTERM/SIGINT: save threads per agent, exit cleanly.
+    // Handle SIGTERM/SIGINT: ask every registered agent to persist what it
+    // holds, then exit cleanly.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     {
-        let monitors = monitors.clone();
+        let state = state.clone();
 
         tokio::spawn(async move {
             let mut sigterm =
@@ -558,71 +426,11 @@ async fn main() -> anyhow::Result<()> {
 
             tracing::info!("Shutdown signal received, cleaning up...");
 
-            // Cancel active turns and persist threads for every agent.
-            for (mgr, _tx) in &monitors {
-                {
-                    let g = mgr.read().await;
-                    g.cancel_current_turn().ok();
-                }
-                {
-                    let g = mgr.read().await;
-                    g.flush_threads();
-                }
+            for (_, backend) in state.agents.agents() {
+                backend.shutdown().await;
             }
 
             let _ = shutdown_tx.send(());
-        });
-    }
-
-    // ── WebSocket health monitor ─────────────────────────────────────
-    // Detects a half-open WebSocket where the read loop would otherwise
-    // block forever. Reconnection is forced only when a turn is actively
-    // in flight and no events arrive for a long window: LLM responses
-    // routinely pause for tens of seconds (thinking, slow providers) and
-    // long turns (code review, multi-tool research) pause for minutes, so
-    // the timeout must be generous or the monitor kills live turns. The
-    // 30-minute ceiling matches the CLI poll and SSE stream.
-    {
-        let monitors = monitors.clone();
-
-        tokio::spawn(async move {
-            tracing::info!("Health monitor started (check every 30s, timeout 1800s)");
-            let check_interval = Duration::from_secs(30);
-            let timeout = Duration::from_secs(1800);
-
-            loop {
-                tokio::time::sleep(check_interval).await;
-
-                for (mgr, ws_tx) in &monitors {
-                    let (connected, elapsed, active_turn) = {
-                        let g = mgr.read().await;
-                        (
-                            g.telos_connected,
-                            g.last_sse_event_time.elapsed(),
-                            !g.pending_chat_queue.is_empty(),
-                        )
-                    };
-
-                    if connected && active_turn && elapsed > timeout {
-                        tracing::warn!(
-                            "Health monitor: no events for {}s during an active turn, forcing reconnection",
-                            elapsed.as_secs()
-                        );
-                        // Force reconnection: clear telos_connected and the
-                        // shared command channel. The WS read loop's
-                        // periodic check breaks, and the connection loop
-                        // accepts a new connection (Telos auto-reconnects).
-                        {
-                            let mut g = mgr.write().await;
-                            g.telos_connected = false;
-                        }
-                        {
-                            let mut guard = ws_tx.lock().await;
-                            *guard = None;
-                        }
-                    }
-                }
-            }
         });
     }
 

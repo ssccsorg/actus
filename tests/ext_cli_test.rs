@@ -9,8 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use actus::agent::config::PromptMode;
-use actus::agent::ext_cli::ExtCliAgent;
+use actus::agent::ext_cli::{ExtCliAgent, PromptMode};
 use actus::agent::AgentBackend;
 
 fn stub_bin(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {

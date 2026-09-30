@@ -24,7 +24,6 @@ use crate::agent::{AgentBackend, AgentRegistry, AgentStatus, ThreadParent};
 use crate::context;
 use crate::files;
 use crate::git;
-pub use crate::telos::WsCommandTx;
 
 // ── App State ──────────────────────────────────────────────────────────
 
@@ -156,6 +155,9 @@ async fn agent_for(
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
+    /// The default agent's transport state, under its historical field name:
+    /// the kletos client pins the name (`kletos/client/src/api.rs`), so the
+    /// rename travels with that client.
     pub telos_connected: bool,
     pub agent_ready: bool,
     pub active_threads: usize,
@@ -688,7 +690,7 @@ pub struct PollMessage {
 /// Poll for new thread state.
 ///
 /// Alternative to SSE for clients that cannot maintain a persistent connection
-/// or when WebSocket events from Telos are unreliable. The client calls this
+/// or when the agent's event stream is unreliable. The client calls this
 /// endpoint at regular intervals (e.g., every 500ms).
 ///
 /// The response serves the turn in flight: every message the agent has written

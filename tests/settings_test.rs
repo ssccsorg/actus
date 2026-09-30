@@ -1,29 +1,30 @@
 // Integration tests for the settings an actus-launched agent starts from
 // (issue #25: an agent thinks at the level the operator chose, or not at all).
 
-use actus::agent::config::{load_config, AgentDefaults, AgentSpec, ToolApproval};
 use actus::telos::ensure_telos_settings;
+use actus::telos::options::TelosSettings;
+use actus::telos::options::ToolApproval;
 use std::path::PathBuf;
 
-fn spec_with_effort(level: &str) -> AgentSpec {
-    let defaults = AgentDefaults {
+fn settings_with_effort(level: &str) -> TelosSettings {
+    TelosSettings {
+        name: "telos".to_string(),
+        bin: PathBuf::from("/bin/telos"),
+        ws_port: 8080,
+        tool_approval: ToolApproval::Always,
         provider: "openai-compatible".to_string(),
         model: "example-model".to_string(),
         model_display: "example-model".to_string(),
         base_url: "https://api.example.com/v1".to_string(),
         api_key: Some("sk-test".to_string()),
-        bin: PathBuf::from("/bin/telos"),
-        ws_port: 8080,
         reasoning_effort: level.to_string(),
-    };
-    let mut spec = load_config(None, &defaults).unwrap().remove(0);
-    spec.tool_approval = ToolApproval::Always;
-    spec
+        mcp: Vec::new(),
+    }
 }
 
-fn settings_written(spec: &AgentSpec) -> serde_json::Value {
+fn settings_written(settings: &TelosSettings) -> serde_json::Value {
     let dir = tempfile::tempdir().unwrap();
-    ensure_telos_settings(dir.path(), spec).unwrap();
+    ensure_telos_settings(dir.path(), settings).unwrap();
     serde_json::from_str(&std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap())
         .unwrap()
 }
@@ -35,7 +36,7 @@ fn settings_written(spec: &AgentSpec) -> serde_json::Value {
 #[test]
 fn a_declared_effort_reaches_the_model_entry_and_the_default_model() {
     for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
-        let settings = settings_written(&spec_with_effort(level));
+        let settings = settings_written(&settings_with_effort(level));
 
         let model = &settings["language_models"]["openai_compatible"]["openai-compatible"]
             ["available_models"][0];
@@ -64,7 +65,7 @@ fn a_declared_effort_reaches_the_model_entry_and_the_default_model() {
 /// parameter has nothing else to reach for.
 #[test]
 fn none_sends_no_reasoning_parameter_and_starts_without_thinking() {
-    let settings = settings_written(&spec_with_effort("none"));
+    let settings = settings_written(&settings_with_effort("none"));
 
     let model = &settings["language_models"]["openai_compatible"]["openai-compatible"]
         ["available_models"][0];
@@ -82,10 +83,10 @@ fn none_sends_no_reasoning_parameter_and_starts_without_thinking() {
 /// named no model is not given a thinking stance for one.
 #[test]
 fn no_endpoint_writes_no_model_or_thinking_settings() {
-    let mut spec = spec_with_effort("high");
-    spec.base_url = String::new();
-    spec.model = String::new();
-    let settings = settings_written(&spec);
+    let mut settings = settings_with_effort("high");
+    settings.base_url = String::new();
+    settings.model = String::new();
+    let settings = settings_written(&settings);
 
     assert!(settings.get("language_models").is_none(), "{settings}");
     assert!(
@@ -106,7 +107,7 @@ fn an_existing_default_model_is_left_alone() {
     )
     .unwrap();
 
-    ensure_telos_settings(dir.path(), &spec_with_effort("high")).unwrap();
+    ensure_telos_settings(dir.path(), &settings_with_effort("high")).unwrap();
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
     )

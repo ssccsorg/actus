@@ -2,10 +2,9 @@
 //
 // Actus weaves heterogeneous agent platforms behind one thin execution
 // interface, the same way neXus weaves heterogeneous FIH storage types
-// behind one knowledge fabric. A platform adapter (TelosBackend now, a
-// LangGraph or Native adapter later) implements `AgentBackend`; the
-// registry maps agent names to running adapters; HTTP handlers talk only
-// to the trait.
+// behind one knowledge fabric. A platform implements `AgentBackend` and
+// registers an `AgentFactory` under its kind name; the registry maps agent
+// names to running adapters; HTTP handlers talk only to the trait.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,99 +12,17 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+pub mod adapter;
 pub mod config;
 pub mod ext_cli;
 pub mod native;
-
-/// Supported agent platform kinds. Adding a platform means adding a kind
-/// and an `AgentBackend` adapter; the rest of actus is unchanged.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentKind {
-    /// Telos over ACP/WebSocket. Default agent when a Telos binary and
-    /// provider credentials are available.
-    Telos,
-    /// LangGraph Server over REST/SSE. Future adapter.
-    LangGraph,
-    /// In-process Rust agent loop. Reference adapter (deterministic,
-    /// no LLM); proves the fabric seam and lets actus run without Telos.
-    Native,
-    /// Any external CLI binary as an auxiliary agent. Raw transport: per
-    /// turn, actus spawns `bin <args...> <prompt>` and records the output.
-    /// Ante is the first attached binary (`cli_args = ["-p"]`).
-    #[serde(rename = "ext_cli")]
-    ExtCli,
-}
-
-impl AgentKind {
-    pub const ALL: [AgentKind; 4] = [
-        AgentKind::Telos,
-        AgentKind::LangGraph,
-        AgentKind::Native,
-        AgentKind::ExtCli,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AgentKind::Telos => "telos",
-            AgentKind::LangGraph => "langgraph",
-            AgentKind::Native => "native",
-            AgentKind::ExtCli => "ext_cli",
-        }
-    }
-
-    /// Strict lookup of a kind by its wire name. Returns None for
-    /// unknown names.
-    pub fn parse(s: &str) -> Option<AgentKind> {
-        AgentKind::ALL.iter().find(|k| k.as_str() == s).copied()
-    }
-
-    /// Declared capabilities for this kind. A full ACP agent (Telos) is
-    /// sessionful; a raw-CLI agent is a one-shot, parallel act.
-    pub fn capabilities(self) -> AgentCapabilities {
-        match self {
-            AgentKind::Telos => AgentCapabilities {
-                sessionful: true,
-                streaming: true,
-                tools: true,
-                approval: true,
-                parallel: false,
-                transport: "acp_ws",
-            },
-            AgentKind::LangGraph => AgentCapabilities {
-                sessionful: true,
-                streaming: true,
-                tools: true,
-                approval: false,
-                parallel: false,
-                transport: "rest_sse",
-            },
-            AgentKind::Native => AgentCapabilities {
-                sessionful: true,
-                streaming: false,
-                tools: false,
-                approval: false,
-                parallel: false,
-                transport: "inproc",
-            },
-            AgentKind::ExtCli => AgentCapabilities {
-                sessionful: false,
-                streaming: false,
-                tools: false,
-                approval: false,
-                parallel: true,
-                transport: "cli",
-            },
-        }
-    }
-}
 
 /// Declared capabilities of one agent backend. Upper layers (the CLI, a
 /// future kineTic orchestrator) read these to decide which agent fits a
 /// situation instead of assuming every agent is a full session.
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentCapabilities {
-    /// Multi-turn conversation with resume (Telos, Native).
+    /// Multi-turn conversation with resume.
     pub sessionful: bool,
     /// Intermediate streaming events during a turn.
     pub streaming: bool,
@@ -123,7 +40,8 @@ pub struct AgentCapabilities {
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentStatus {
     pub name: String,
-    pub kind: AgentKind,
+    /// The registered kind name this agent's factory answers to.
+    pub kind: String,
     pub connected: bool,
     pub ready: bool,
     pub capabilities: AgentCapabilities,
@@ -145,7 +63,7 @@ pub struct PendingAuthorization {
 }
 
 /// Truncate a first user message into a thread title.
-pub(crate) fn truncate_title(message: &str) -> String {
+pub fn truncate_title(message: &str) -> String {
     let flat = message.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= 60 {
         flat
@@ -189,9 +107,10 @@ pub struct ThreadSession {
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
     /// True when the last assistant response is complete.
     pub completed: bool,
-    /// Platform-side thread id (ACP thread id for Telos). Kept on the
-    /// session so persisted files stay backward compatible; a future
-    /// platform adapter maps its own id into this field.
+    /// Platform-side thread id, in the platform's own terms (the ACP
+    /// thread id for an ACP agent). Kept on the session so persisted files
+    /// stay backward compatible; a platform adapter maps its own id into
+    /// this field.
     pub acp_thread_id: Option<String>,
     /// Monotonically increasing turn counter. SSE consumers wait for
     /// `turn_completed` to exceed the value captured at submit time.
@@ -244,7 +163,12 @@ impl ThreadSession {
 pub trait AgentBackend: Send + Sync {
     fn name(&self) -> &str;
 
-    fn kind(&self) -> AgentKind;
+    /// The registered kind name this agent runs as, e.g. "telos".
+    fn kind(&self) -> &'static str;
+
+    /// Declared capabilities of this backend. Upper layers read them
+    /// instead of assuming every agent is a full session.
+    fn capabilities(&self) -> AgentCapabilities;
 
     /// What this agent works in, in the backend's own terms: a workspace
     /// directory for an agent that edits files, a queue or a job for an
@@ -309,10 +233,14 @@ pub trait AgentBackend: Send + Sync {
 
     /// Create a fresh thread immediately (without sending a message).
     async fn create_thread(&self) -> Result<String, String>;
+
+    /// Persist or release what this agent holds before actus exits. The
+    /// default does nothing; a backend that keeps state writes it here.
+    async fn shutdown(&self) {}
 }
 
-/// Registry of running agent backends. The default agent serves the
-/// chat and thread endpoints until per-agent routing lands.
+/// Registry of running agent backends, keyed by agent name. The default
+/// agent serves the endpoints that name no agent.
 #[derive(Default)]
 pub struct AgentRegistry {
     agents: HashMap<String, Arc<dyn AgentBackend>>,

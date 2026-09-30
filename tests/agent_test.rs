@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use actus::agent::{AgentBackend, AgentKind, AgentRegistry};
+use actus::agent::{AgentBackend, AgentRegistry};
 use actus::telos::backend::TelosBackend;
 use actus::telos::control::handle_telos_event;
 use actus::telos::{WsCommandTx, TelosManager};
@@ -16,38 +16,22 @@ fn telos_manager(dir: &std::path::Path) -> TelosManager {
     )
 }
 
-#[test]
-fn agent_kind_roundtrip() {
-    assert_eq!(AgentKind::parse("telos"), Some(AgentKind::Telos));
-    assert_eq!(AgentKind::parse("langgraph"), Some(AgentKind::LangGraph));
-    assert_eq!(AgentKind::parse("native"), Some(AgentKind::Native));
-    assert_eq!(AgentKind::parse("unknown"), None);
-    assert_eq!(AgentKind::Telos.as_str(), "telos");
-    assert_eq!(serde_json::to_string(&AgentKind::Telos).unwrap(), "\"telos\"");
-    assert_eq!(
-        serde_json::from_str::<AgentKind>("\"langgraph\"").unwrap(),
-        AgentKind::LangGraph
-    );
-}
-
 fn telos_backend() -> TelosBackend {
     telos_backend_named("telos")
 }
 
 fn telos_backend_named(name: &str) -> TelosBackend {
     let dir = tempfile::tempdir().expect("tempdir");
-    let manager = Arc::new(RwLock::new(TelosManager::new(
-        "ses_test".to_string(),
-        "127.0.0.1:9999".to_string(),
-        dir.path(),
-    )));
+    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-    TelosBackend {
-        name: name.to_string(),
+    let user_data_dir = tempfile::tempdir().expect("tempdir");
+    TelosBackend::new(
+        name.to_string(),
         manager,
         ws_tx,
-        scope: Some(dir.path().display().to_string()),
-    }
+        Some(dir.path().display().to_string()),
+        user_data_dir,
+    )
 }
 
 #[tokio::test]
@@ -58,7 +42,7 @@ async fn registry_default_agent_status() {
     let default = registry.default_agent().expect("default agent");
     let status = default.status().await;
     assert_eq!(status.name, "telos");
-    assert_eq!(status.kind, AgentKind::Telos);
+    assert_eq!(status.kind, "telos");
     assert!(!status.connected);
     assert!(!status.ready);
 

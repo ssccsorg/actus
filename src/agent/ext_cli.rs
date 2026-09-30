@@ -20,14 +20,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
 use tokio::sync::{watch, Mutex, RwLock};
 
-use crate::agent::config::PromptMode;
+use crate::agent::adapter::{AgentFactory, LaunchContext, LaunchedAgent};
+use crate::agent::config::AgentSpec;
 use crate::agent::{
-    truncate_title, AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt,
-    ThreadMessage, ThreadParent, ThreadSession,
+    truncate_title, AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization,
+    SubmitReceipt, ThreadMessage, ThreadParent, ThreadSession,
 };
 
 /// Cap on the recorded assistant message, in characters. A CLI can emit
@@ -66,6 +68,105 @@ async fn kill_child_group(child: &mut tokio::process::Child) {
             libc::kill(-(pid as i32), libc::SIGKILL);
         }
         let _ = child.wait().await;
+    }
+}
+
+/// How a cli-kind agent receives the prompt message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptMode {
+    /// Pass the prompt as a command argument. A `{prompt}` marker in
+    /// `cli_args` is replaced; without a marker the prompt is appended
+    /// as the final argument.
+    Arg,
+    /// Write the prompt to the child's stdin instead of passing it as an
+    /// argument (for CLIs that read the prompt from stdin).
+    Stdin,
+}
+
+fn default_prompt_mode() -> PromptMode {
+    PromptMode::Arg
+}
+
+fn default_cli_timeout() -> u64 {
+    300
+}
+
+/// The declaration an `ext_cli` agent reads from its options table.
+#[derive(Deserialize)]
+pub struct ExtCliOptions {
+    /// Binary path or PATH name.
+    pub bin: PathBuf,
+    /// Fixed arguments; a `{prompt}` marker is replaced by the message,
+    /// without a marker the message is appended as the final argument.
+    #[serde(default)]
+    pub cli_args: Vec<String>,
+    /// Extra environment for the child. A value of the form `$NAME` is
+    /// replaced by the server process environment variable NAME, so a
+    /// profile can map credentials without duplicating secrets.
+    #[serde(default)]
+    pub cli_env: HashMap<String, String>,
+    #[serde(default = "default_prompt_mode")]
+    pub cli_prompt: PromptMode,
+    /// Per-turn timeout; the child is killed on expiry.
+    #[serde(default = "default_cli_timeout")]
+    pub cli_timeout_secs: u64,
+}
+
+/// Factory for the `ext_cli` kind: any external CLI binary as a one-shot
+/// auxiliary agent. A declaration is a profile, so attaching a new CLI is a
+/// config entry rather than code.
+pub struct ExtCliFactory;
+
+#[async_trait::async_trait]
+impl AgentFactory for ExtCliFactory {
+    fn kind(&self) -> &'static str {
+        "ext_cli"
+    }
+
+    async fn launch(&self, spec: &AgentSpec, ctx: &LaunchContext) -> anyhow::Result<LaunchedAgent> {
+        let options: ExtCliOptions = spec.options().map_err(anyhow::Error::msg)?;
+        // Per-agent working directory overrides the server workdir for
+        // cwd-sensitive CLIs; None falls back to the server workdir. The
+        // path is canonicalized at launch so a bad entry fails fast with
+        // the agent name.
+        let workdir = match &spec.workdir {
+            Some(p) => std::fs::canonicalize(p).map_err(|e| {
+                anyhow::anyhow!(
+                    "agent '{}': cannot resolve workdir {}: {}",
+                    spec.name,
+                    p.display(),
+                    e
+                )
+            })?,
+            None => ctx.workdir.clone(),
+        };
+        let backend = ExtCliAgent::new(
+            spec.name.clone(),
+            options.bin.clone(),
+            options.cli_args,
+            options.cli_env,
+            options.cli_prompt,
+            options.cli_timeout_secs,
+            workdir.clone(),
+        );
+        if let Some(err) = backend.probe_error() {
+            tracing::warn!(
+                "Agent '{}': launch probe failed ({}); health reports ready=false",
+                spec.name,
+                err
+            );
+        }
+        tracing::info!(
+            "Agent '{}' running (ext_cli adapter, raw transport, bin {}, workdir {})",
+            spec.name,
+            options.bin.display(),
+            workdir.display()
+        );
+        Ok(LaunchedAgent {
+            backend: Arc::new(backend),
+            children: Vec::new(),
+        })
     }
 }
 
@@ -171,12 +272,25 @@ impl AgentBackend for ExtCliAgent {
         &self.name
     }
 
-    fn kind(&self) -> AgentKind {
-        AgentKind::ExtCli
+    fn kind(&self) -> &'static str {
+        "ext_cli"
+    }
+
+    fn capabilities(&self) -> AgentCapabilities {
+        // A raw-CLI agent is a one-shot, parallel act: no session, no
+        // streaming events, no tool surface, one process per turn.
+        AgentCapabilities {
+            sessionful: false,
+            streaming: false,
+            tools: false,
+            approval: false,
+            parallel: true,
+            transport: "cli",
+        }
     }
 
     /// The directory this CLI runs in. A command-line agent is scoped to one
-    /// project the same way a telos agent is.
+    /// project the same way a sessionful agent is.
     fn scope(&self) -> Option<String> {
         Some(self.workdir.display().to_string())
     }
@@ -193,10 +307,10 @@ impl AgentBackend for ExtCliAgent {
         };
         AgentStatus {
             name: self.name.clone(),
-            kind: AgentKind::ExtCli,
+            kind: self.kind().to_string(),
             connected: last_error.is_none(),
             ready: last_error.is_none(),
-            capabilities: AgentKind::ExtCli.capabilities(),
+            capabilities: self.capabilities(),
             last_error,
         }
     }

@@ -6,47 +6,77 @@
 // Unit tests cover config parsing and settings injection; the scenario
 // test proves an injected stdio entry spawns a working MCP server.
 
-use actus::agent::config::{
-    load_config, AgentDefaults, AgentSpec, McpServer, ToolApproval, DEFAULT_REASONING_EFFORT,
-};
+use actus::agent::adapter::FactoryRegistry;
+use actus::agent::config::load_config;
+use actus::telos::adapter::TelosFactory;
 use actus::telos::ensure_telos_settings;
+use actus::telos::options::{
+    McpServer, TelosDefaults, TelosSettings, ToolApproval, DEFAULT_REASONING_EFFORT,
+};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-fn defaults() -> AgentDefaults {
-    defaults_with_endpoint("https://api.example.com/v1", "example-model")
-}
-
-/// The defaults a test inherits from, with the endpoint the settings writer
+/// The defaults a launch inherits, with the endpoint the settings writer
 /// records. An empty base URL or model means no endpoint, which is the case
 /// that must write no provider entry at all.
-fn defaults_with_endpoint(base_url: &str, model: &str) -> AgentDefaults {
-    AgentDefaults {
+fn telos_defaults_with_endpoint(base_url: &str, model: &str) -> TelosDefaults {
+    TelosDefaults {
+        bin: PathBuf::from("/bin/telos"),
+        ws_port: 8080,
         provider: "openai-compatible".to_string(),
         model: model.to_string(),
         model_display: model.to_string(),
         base_url: base_url.to_string(),
         api_key: Some("sk-test".to_string()),
-        bin: PathBuf::from("/bin/telos"),
-        ws_port: 8080,
         reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
     }
 }
 
-/// A resolved spec for the settings writer: everything a launched agent would
-/// carry, with the MCP servers and approval stance a test is about.
-fn spec_with(mcp: Vec<McpServer>, tool_approval: ToolApproval) -> AgentSpec {
-    let mut spec = load_config(None, &defaults()).unwrap().remove(0);
-    spec.mcp = mcp;
-    spec.tool_approval = tool_approval;
-    spec
+fn telos_defaults() -> TelosDefaults {
+    telos_defaults_with_endpoint("https://api.example.com/v1", "example-model")
 }
 
-/// A spec with no endpoint configured, which is what an operator who set no
-/// base URL and no model has.
-fn spec_without_endpoint() -> AgentSpec {
-    load_config(None, &defaults_with_endpoint("", ""))
-        .unwrap()
-        .remove(0)
+/// The registry a config file is loaded against, with the telos kind as the
+/// default: a spec that omits `kind` is a telos agent.
+fn registry() -> FactoryRegistry {
+    let mut factories = FactoryRegistry::new();
+    factories.register_default(Arc::new(TelosFactory::new(telos_defaults())));
+    factories
+}
+
+/// Load one config file and resolve its agent the way a launch does.
+fn resolve_one(cfg: &std::path::Path) -> TelosSettings {
+    let specs = load_config(Some(cfg), &registry()).unwrap();
+    assert_eq!(specs.len(), 1);
+    TelosFactory::new(telos_defaults()).resolve(&specs[0]).unwrap()
+}
+
+/// The settings a launch reaches for, with the MCP servers and approval
+/// stance a test is about.
+fn settings_with(mcp: Vec<McpServer>, tool_approval: ToolApproval) -> TelosSettings {
+    TelosSettings {
+        name: "telos".to_string(),
+        bin: PathBuf::from("/bin/telos"),
+        ws_port: 8080,
+        tool_approval,
+        provider: "openai-compatible".to_string(),
+        model: "example-model".to_string(),
+        model_display: "example-model".to_string(),
+        base_url: "https://api.example.com/v1".to_string(),
+        api_key: Some("sk-test".to_string()),
+        reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
+        mcp,
+    }
+}
+
+/// The same, with no endpoint configured, which is what an operator who set
+/// no base URL and no model has.
+fn settings_without_endpoint() -> TelosSettings {
+    TelosSettings {
+        base_url: String::new(),
+        model: String::new(),
+        ..settings_with(Vec::new(), ToolApproval::Always)
+    }
 }
 
 /// The production six-server TOML, token redacted.
@@ -92,9 +122,7 @@ fn six_server_config_parses() {
     let path = dir.path().join("config.toml");
     std::fs::write(&path, SIX_SERVER_TOML).unwrap();
 
-    let specs = load_config(Some(&path), &defaults()).unwrap();
-    assert_eq!(specs.len(), 1);
-    let mcp = &specs[0].mcp;
+    let mcp = resolve_one(&path).mcp;
     assert_eq!(mcp.len(), 6);
 
     let by_name = |n: &str| mcp.iter().find(|m| m.name == n).expect(n);
@@ -141,12 +169,10 @@ fn six_server_settings_injection_schema() {
     let dir = tempfile::tempdir().unwrap();
     let data_dir = dir.path();
 
-    let specs = {
-        let cfg = dir.path().join("config.toml");
-        std::fs::write(&cfg, SIX_SERVER_TOML).unwrap();
-        load_config(Some(&cfg), &defaults()).unwrap()
-    };
-    ensure_telos_settings(data_dir, &specs[0]).unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(&cfg, SIX_SERVER_TOML).unwrap();
+    let settings_for_agent = resolve_one(&cfg);
+    ensure_telos_settings(data_dir, &settings_for_agent).unwrap();
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(data_dir.join("config/settings.json")).unwrap(),
@@ -195,7 +221,7 @@ fn settings_injection_skipped_without_endpoint_config() {
     // whose own built-in provider matches the label can still resolve the
     // key.
     let dir = tempfile::tempdir().unwrap();
-    ensure_telos_settings(dir.path(), &spec_without_endpoint()).unwrap();
+    ensure_telos_settings(dir.path(), &settings_without_endpoint()).unwrap();
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
@@ -288,11 +314,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
         headers: Default::default(),
         timeout: None,
     }];
-    ensure_telos_settings(
-        dir.path(),
-        &spec_with(mcp, actus::agent::config::ToolApproval::Always),
-    )
-    .unwrap();
+    ensure_telos_settings(dir.path(), &settings_with(mcp, ToolApproval::Always)).unwrap();
 
     // Read the injected entry back and spawn it exactly as configured.
     let settings: serde_json::Value = serde_json::from_str(
@@ -340,22 +362,22 @@ fn scenario_injected_stdio_server_is_spawnable() {
 /// agent's own setting, and the prompt, alone.
 #[test]
 fn an_always_agent_is_allowed_the_terminal() {
-    fn settings_for(tool_approval: actus::agent::config::ToolApproval) -> serde_json::Value {
+    fn settings_for(tool_approval: ToolApproval) -> serde_json::Value {
         let dir = tempfile::tempdir().unwrap();
-        ensure_telos_settings(dir.path(), &spec_with(Vec::new(), tool_approval)).unwrap();
+        ensure_telos_settings(dir.path(), &settings_with(Vec::new(), tool_approval)).unwrap();
         serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
         )
         .unwrap()
     }
 
-    let opened = settings_for(actus::agent::config::ToolApproval::Always);
+    let opened = settings_for(ToolApproval::Always);
     assert_eq!(
         opened["agent"]["tool_permissions"]["tools"]["terminal"]["default"], "allow",
         "an agent that never asks is allowed the terminal"
     );
 
-    let asked = settings_for(actus::agent::config::ToolApproval::Ask);
+    let asked = settings_for(ToolApproval::Ask);
     assert!(
         asked["agent"]["tool_permissions"]["tools"]["terminal"]["default"].is_null(),
         "an agent that asks keeps its own setting"
@@ -388,15 +410,15 @@ args = ["-y", "@modelcontextprotocol/server-github"]
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.toml");
     std::fs::write(&cfg, TOML).unwrap();
-    let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
-    assert!(spec.mcp.iter().all(|server| !server.enabled) == false);
+    let settings_for_agent = resolve_one(&cfg);
+    let mcp = &settings_for_agent.mcp;
+    assert!(mcp.iter().any(|server| server.enabled));
     assert!(
-        spec.mcp.iter().find(|s| s.name == "memory").unwrap().enabled,
+        mcp.iter().find(|s| s.name == "memory").unwrap().enabled,
         "a server the declaration does not mention is on"
     );
     assert!(
-        !spec
-            .mcp
+        !mcp
             .iter()
             .find(|s| s.name == "mcp-server-github")
             .unwrap()
@@ -404,7 +426,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
         "a declaration may put a server in the catalog without starting it"
     );
 
-    ensure_telos_settings(dir.path(), &spec).unwrap();
+    ensure_telos_settings(dir.path(), &settings_for_agent).unwrap();
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
     )
@@ -443,8 +465,8 @@ headers = { "Authorization" = "Bearer $KLETOS_MCP_ENV_TEST" }
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.toml");
     std::fs::write(&cfg, TOML).unwrap();
-    let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
-    let result = ensure_telos_settings(dir.path(), &spec);
+    let settings_for_agent = resolve_one(&cfg);
+    let result = ensure_telos_settings(dir.path(), &settings_for_agent);
 
     match previous {
         Some(value) => unsafe { std::env::set_var("KLETOS_MCP_ENV_TEST", value) },
@@ -488,9 +510,9 @@ env = { "GITHUB_PERSONAL_ACCESS_TOKEN" = "$KLETOS_MCP_UNSET_TEST" }
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.toml");
     std::fs::write(&cfg, TOML).unwrap();
-    let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
+    let settings_for_agent = resolve_one(&cfg);
 
-    let error = ensure_telos_settings(dir.path(), &spec)
+    let error = ensure_telos_settings(dir.path(), &settings_for_agent)
         .expect_err("an unset declared variable must fail the launch of a server that starts")
         .to_string();
     assert!(error.contains("mcp-server-github"), "{error}");
@@ -519,8 +541,8 @@ env = { "GITHUB_PERSONAL_ACCESS_TOKEN" = "$KLETOS_MCP_OFF_UNSET_TEST" }
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.toml");
     std::fs::write(&cfg, TOML).unwrap();
-    let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
-    ensure_telos_settings(dir.path(), &spec)
+    let settings_for_agent = resolve_one(&cfg);
+    ensure_telos_settings(dir.path(), &settings_for_agent)
         .expect("a server that is off must not hold up the launch");
 
     let settings: serde_json::Value = serde_json::from_str(
@@ -549,7 +571,7 @@ fn declared_servers_merge_into_the_file() {
     )
     .unwrap();
 
-    let spec = spec_with(
+    let settings_for_agent = settings_with(
         vec![McpServer {
             name: "memory".to_string(),
             enabled: true,
@@ -560,9 +582,9 @@ fn declared_servers_merge_into_the_file() {
             headers: Default::default(),
             timeout: None,
         }],
-        actus::agent::config::ToolApproval::Always,
+        ToolApproval::Always,
     );
-    ensure_telos_settings(dir.path(), &spec).unwrap();
+    ensure_telos_settings(dir.path(), &settings_for_agent).unwrap();
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(config_dir.join("settings.json")).unwrap(),

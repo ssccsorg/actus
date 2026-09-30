@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use actus::agent::native::NativeAgent;
-use actus::agent::{AgentBackend, AgentKind, AgentRegistry};
+use actus::agent::{AgentBackend, AgentRegistry};
 
 #[tokio::test]
 async fn native_agent_echoes_and_owns_threads() {
@@ -47,7 +47,7 @@ async fn native_agent_registers_as_fabric_default() {
 
     assert!(registry.default_agent().is_some());
     let status = backend.status().await;
-    assert_eq!(status.kind, AgentKind::Native);
+    assert_eq!(status.kind, "native");
     assert!(status.connected);
     assert!(status.ready);
 

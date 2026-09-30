@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use actus::agent::config::{ControlPolicy, ControlRule, PromptMode};
-use actus::agent::ext_cli::ExtCliAgent;
+use actus::agent::config::{ControlPolicy, ControlRule};
+use actus::agent::ext_cli::{ExtCliAgent, PromptMode};
 use actus::agent::AgentRegistry;
 use actus::server::{build_router, AppState, SharedState};
 use tokio::net::TcpListener;

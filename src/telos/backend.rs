@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tokio::sync::{Notify, RwLock};
 
 use crate::agent::{
-    AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadParent,
+    AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadParent,
     ThreadSession,
 };
 use crate::telos::{TelosManager, WsCommandTx};
@@ -35,6 +35,30 @@ pub struct TelosBackend {
     /// to; the backend answers with it rather than the listing deriving it
     /// from the configuration, which is what keeps the notion a backend's.
     pub scope: Option<String>,
+    /// The launch-time user data directory. The agent reads its settings
+    /// from here and watches them while running, so it is held, not dropped.
+    _user_data_dir: Option<tempfile::TempDir>,
+}
+
+impl TelosBackend {
+    /// Build one backend. `user_data_dir` is the launch-time directory the
+    /// agent's settings were written into; it must live as long as the
+    /// process.
+    pub fn new(
+        name: String,
+        manager: Arc<RwLock<TelosManager>>,
+        ws_tx: WsCommandTx,
+        scope: Option<String>,
+        user_data_dir: tempfile::TempDir,
+    ) -> Self {
+        Self {
+            name,
+            manager,
+            ws_tx,
+            scope,
+            _user_data_dir: Some(user_data_dir),
+        }
+    }
 }
 
 /// The wire command that cancels a turn.
@@ -63,8 +87,19 @@ impl AgentBackend for TelosBackend {
         &self.name
     }
 
-    fn kind(&self) -> AgentKind {
-        AgentKind::Telos
+    fn kind(&self) -> &'static str {
+        "telos"
+    }
+
+    fn capabilities(&self) -> AgentCapabilities {
+        AgentCapabilities {
+            sessionful: true,
+            streaming: true,
+            tools: true,
+            approval: true,
+            parallel: false,
+            transport: "acp_ws",
+        }
     }
 
     fn scope(&self) -> Option<String> {
@@ -75,10 +110,10 @@ impl AgentBackend for TelosBackend {
         let mgr = self.manager.read().await;
         AgentStatus {
             name: self.name().to_string(),
-            kind: self.kind(),
+            kind: self.kind().to_string(),
             connected: mgr.telos_connected,
             ready: mgr.agent_ready,
-            capabilities: self.kind().capabilities(),
+            capabilities: self.capabilities(),
             last_error: None,
         }
     }
@@ -294,6 +329,20 @@ impl AgentBackend for TelosBackend {
         })
         .to_string();
         self.send_command(cmd).await
+    }
+
+    /// Persist what this agent holds before actus leaves: stop the turn in
+    /// flight and write the threads out. Called for every registered agent
+    /// on the way down.
+    async fn shutdown(&self) {
+        {
+            let mgr = self.manager.read().await;
+            mgr.cancel_current_turn().ok();
+        }
+        {
+            let mgr = self.manager.read().await;
+            mgr.flush_threads();
+        }
     }
 }
 

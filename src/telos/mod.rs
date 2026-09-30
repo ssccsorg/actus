@@ -1,10 +1,11 @@
 // Telos management — process lifecycle, WebSocket bridge, and protocol types.
 
+pub mod adapter;
 pub mod backend;
 pub mod control;
+pub mod options;
 pub mod types;
 
-use crate::agent::config::AgentSpec;
 use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -38,6 +39,8 @@ use std::time::{Duration, Instant};
 use serde_json;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 use uuid::Uuid;
+
+use self::options::TelosSettings;
 
 /// Manages a single Telos WebSocket connection and message dispatch.
 #[allow(dead_code)]
@@ -459,6 +462,53 @@ impl TelosManager {
         });
     }
 
+    /// Reconnect monitor: detect a half-open WebSocket where the read loop
+    /// would otherwise block forever. Reconnection is forced only when a turn
+    /// is actively in flight and no events arrive for a long window: LLM
+    /// responses routinely pause for tens of seconds (thinking, slow
+    /// providers) and long turns (code review, multi-tool research) pause
+    /// for minutes, so the timeout must be generous or the monitor kills live
+    /// turns. The 30-minute ceiling matches the CLI poll and SSE stream.
+    pub fn spawn_health_monitor(manager: Arc<RwLock<TelosManager>>, ws_tx: WsCommandTx) {
+        tokio::spawn(async move {
+            tracing::info!("Health monitor started (check every 30s, timeout 1800s)");
+            let check_interval = Duration::from_secs(30);
+            let timeout = Duration::from_secs(1800);
+
+            loop {
+                tokio::time::sleep(check_interval).await;
+
+                let (connected, elapsed, active_turn) = {
+                    let g = manager.read().await;
+                    (
+                        g.telos_connected,
+                        g.last_sse_event_time.elapsed(),
+                        !g.pending_chat_queue.is_empty(),
+                    )
+                };
+
+                if connected && active_turn && elapsed > timeout {
+                    tracing::warn!(
+                        "Health monitor: no events for {}s during an active turn, forcing reconnection",
+                        elapsed.as_secs()
+                    );
+                    // Force reconnection: clear the connection flag and the
+                    // shared command channel. The WS read loop's periodic
+                    // check breaks, and the connection loop accepts a new
+                    // connection (the agent reconnects on its own).
+                    {
+                        let mut g = manager.write().await;
+                        g.telos_connected = false;
+                    }
+                    {
+                        let mut guard = ws_tx.lock().await;
+                        *guard = None;
+                    }
+                }
+            }
+        });
+    }
+
     /// Load threads from a JSON file. Returns an empty map if the file does not exist or is unreadable.
     /// Fills in missing titles from the first user message for backward compatibility.
     pub fn load_threads(path: &Path) -> HashMap<String, ThreadSession> {
@@ -572,7 +622,7 @@ fn telos_command(
     user_data_dir: &Path,
     session_id: &str,
     ws_host: &str,
-    tool_approval: crate::agent::config::ToolApproval,
+    tool_approval: crate::telos::options::ToolApproval,
     agent_name: &str,
     http_port: u16,
     api_token: &str,
@@ -612,7 +662,7 @@ pub async fn launch_telos(
     user_data_dir: &Path,
     session_id: &str,
     ws_host: &str,
-    tool_approval: crate::agent::config::ToolApproval,
+    tool_approval: crate::telos::options::ToolApproval,
     agent_name: &str,
     http_port: u16,
     api_token: &str,
@@ -718,23 +768,23 @@ fn resolve_variables(
     Ok(out)
 }
 
-pub fn ensure_telos_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
+pub fn ensure_telos_settings(data_dir: &Path, settings_for_agent: &TelosSettings) -> anyhow::Result<()> {
     use std::fs;
     use std::io::Write;
 
-    let api_key = spec.api_key.as_deref().ok_or_else(|| {
+    let api_key = settings_for_agent.api_key.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
             "agent '{}': LLM API key required (LLM_API_KEY or --api-key)",
-            spec.name
+            settings_for_agent.name
         )
     })?;
-    let provider = spec.provider.as_str();
-    let base_url = spec.base_url.as_str();
-    let model_name = spec.model.as_str();
-    let model_display = spec.model_display.as_str();
-    let reasoning_effort = spec.reasoning_effort.as_str();
-    let mcp = &spec.mcp;
-    let tool_approval = spec.tool_approval;
+    let provider = settings_for_agent.provider.as_str();
+    let base_url = settings_for_agent.base_url.as_str();
+    let model_name = settings_for_agent.model.as_str();
+    let model_display = settings_for_agent.model_display.as_str();
+    let reasoning_effort = settings_for_agent.reasoning_effort.as_str();
+    let mcp = &settings_for_agent.mcp;
+    let tool_approval = settings_for_agent.tool_approval;
 
     let settings_dir = data_dir.join("config");
     fs::create_dir_all(&settings_dir)?;
@@ -813,7 +863,7 @@ pub fn ensure_telos_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Resul
     //
     // Only the terminal's own default is written, and only when nothing set it, so a rule
     // an operator wrote by hand stays theirs.
-    if tool_approval == crate::agent::config::ToolApproval::Always {
+    if tool_approval == crate::telos::options::ToolApproval::Always {
         let permissions = &mut settings["agent"]["tool_permissions"];
         if permissions["tools"]["terminal"]["default"].is_null() {
             permissions["tools"]["terminal"]["default"] = serde_json::json!("allow");
@@ -914,7 +964,7 @@ mod tests {
             &user_data_dir,
             "ses_actus-test",
             "127.0.0.1:8080",
-            crate::agent::config::ToolApproval::Always,
+            crate::telos::options::ToolApproval::Always,
             "telos",
             9090,
             "process-token-7f3a",

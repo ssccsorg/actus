@@ -38,12 +38,14 @@ fn test_state_with_manager() -> (SharedState, tempfile::TempDir, Manager) {
         workdir.path(),
     )));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-    let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend {
-        name: "telos".to_string(),
-        manager: manager.clone(),
+    let user_data_dir = tempfile::tempdir().expect("tempdir");
+    let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend::new(
+        "telos".to_string(),
+        manager.clone(),
         ws_tx,
-        scope: Some(workdir.path().display().to_string()),
-    });
+        Some(workdir.path().display().to_string()),
+        user_data_dir,
+    ));
 
     let mut registry = AgentRegistry::new();
     registry.register(backend, true);
@@ -100,12 +102,14 @@ fn two_agent_state() -> (SharedState, tempfile::TempDir, Manager, Manager) {
             &threads_dir,
         )));
         let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-        let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend {
-            name: name.to_string(),
-            manager: manager.clone(),
+        let user_data_dir = tempfile::tempdir().expect("tempdir");
+        let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend::new(
+            name.to_string(),
+            manager.clone(),
             ws_tx,
-            scope: Some(project.to_string()),
-        });
+            Some(project.to_string()),
+            user_data_dir,
+        ));
         registry.register(backend, name == "one");
         managers.push(manager);
     }

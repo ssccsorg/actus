@@ -1,22 +1,24 @@
 // NativeBackend — reference in-process adapter implementing the agent
 // fabric trait.
 //
-// The adapter is deterministic and needs no LLM, no Telos binary, and no
+// The adapter is deterministic and needs no LLM, no external binary, and no
 // network. It answers every submission with a canned reply so that the
 // fabric seam (AgentBackend, AgentRegistry, HTTP handlers) can be
-// exercised end to end without any external agent. It exists to prove
-// that Telos is one adapter among several: adding a real platform is a
-// new `AgentBackend` implementation plus one registry entry, with no
-// change to the server.
+// exercised end to end without any external agent. It exists to prove that
+// a platform is an adapter plus a factory registration, with no change to
+// the server.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio::sync::watch;
 use tokio::sync::RwLock;
 
+use crate::agent::adapter::{AgentFactory, LaunchContext, LaunchedAgent};
+use crate::agent::config::AgentSpec;
 use crate::agent::{
-    truncate_title, AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt,
-    ThreadMessage, ThreadSession,
+    truncate_title, AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization,
+    SubmitReceipt, ThreadMessage, ThreadSession,
 };
 
 /// Deterministic in-process agent instance.
@@ -79,17 +81,30 @@ impl AgentBackend for NativeAgent {
         &self.name
     }
 
-    fn kind(&self) -> AgentKind {
-        AgentKind::Native
+    fn kind(&self) -> &'static str {
+        "native"
+    }
+
+    fn capabilities(&self) -> AgentCapabilities {
+        // In-process, deterministic, no tool surface: it proves the seam
+        // rather than acting on the workspace.
+        AgentCapabilities {
+            sessionful: true,
+            streaming: false,
+            tools: false,
+            approval: false,
+            parallel: false,
+            transport: "inproc",
+        }
     }
 
     async fn status(&self) -> AgentStatus {
         AgentStatus {
             name: self.name.clone(),
-            kind: AgentKind::Native,
+            kind: self.kind().to_string(),
             connected: true,
             ready: true,
-            capabilities: AgentKind::Native.capabilities(),
+            capabilities: self.capabilities(),
             last_error: None,
         }
     }
@@ -173,5 +188,26 @@ impl AgentBackend for NativeAgent {
     async fn create_thread(&self) -> Result<String, String> {
         let (tid, _) = self.get_or_create(None).await;
         Ok(tid)
+    }
+}
+
+/// Factory for the `native` kind: the in-process reference adapter.
+pub struct NativeFactory;
+
+#[async_trait::async_trait]
+impl AgentFactory for NativeFactory {
+    fn kind(&self) -> &'static str {
+        "native"
+    }
+
+    async fn launch(&self, spec: &AgentSpec, _ctx: &LaunchContext) -> anyhow::Result<LaunchedAgent> {
+        tracing::info!(
+            "Agent '{}' running (native reference adapter, in-process)",
+            spec.name
+        );
+        Ok(LaunchedAgent {
+            backend: Arc::new(NativeAgent::new(spec.name.clone())),
+            children: Vec::new(),
+        })
     }
 }

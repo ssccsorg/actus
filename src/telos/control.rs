@@ -20,7 +20,7 @@ use tokio_tungstenite::accept_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::server::WsCommandTx;
+use crate::telos::WsCommandTx;
 use crate::telos::TelosManager;
 
 /// Run the WebSocket server that accepts connections from the Telos process.

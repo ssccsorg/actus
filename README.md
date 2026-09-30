@@ -53,26 +53,32 @@ Agents are the first implemented family of acts. Any agent platform can
 be orchestrated through the same actus surface; Telos is the default
 agent.
 
-- `agent::AgentKind`: platform kinds (`telos`, `ext_cli`, `native`,
-  `langgraph` declared), extensible by adding a kind and an adapter.
+- `agent::AgentSpec`: the declaration the fabric understands: `name`,
+  `kind`, `workdir`, and an options table the kind's factory reads.
+- `agent::adapter`: the seam. An `AgentFactory` answers to one kind name,
+  validates its own specs, and launches one agent; the `FactoryRegistry`
+  maps kind names to factories, and an unknown kind is refused at config
+  load with the registered kinds named.
 - `agent::AgentBackend`: uniform async trait (`status`, `submit`,
-  `cancel`, `cancel_request`, `thread`, `threads`, `subscribe`) implemented
-  by every platform adapter.
+  `cancel`, `cancel_request`, `thread`, `threads`, `subscribe`,
+  `capabilities`, `shutdown`) implemented by every platform adapter.
 - `agent::AgentRegistry`: name to running adapter map with a default
   agent.
-- `telos::backend::TelosBackend`: first adapter, wrapping `TelosManager`.
-  ACP-over-WebSocket details (reconnect, event dispatch) stay inside
-  `telos::control`; the adapter owns thread state and command submission.
-- `agent::ext_cli`: one-shot raw-CLI adapter that spawns a declared
-  binary per turn (probe, per-agent workdir, request-scoped cancel).
+- `telos::adapter::TelosFactory`: the default kind, a sessionful agent over
+  ACP/WebSocket. Options, launch path, reconnect monitor, and thread flush
+  stay inside the telos module; `telos::backend::TelosBackend` is its
+  `AgentBackend`.
+- `agent::ext_cli::ExtCliFactory`: one-shot raw-CLI kind that spawns a
+  declared binary per turn (probe, per-agent workdir, request-scoped
+  cancel).
+- `agent::native::NativeFactory`: the in-process reference kind.
 - Direct acts: the server performs file, git, rules, fetch, and symbol
   services in-process; they are acts with no agent attached.
 
-HTTP handlers talk only to the `AgentBackend` trait, so a new platform
-(LangGraph Server over REST/SSE, an in-process Rust agent, a lightweight
-auxiliary agent binary) plugs in by implementing the trait and
-registering it. `/v1/health` reports per-agent status in the `agents`
-map.
+HTTP handlers talk only to the `AgentBackend` trait. A new platform is an
+`AgentFactory` plus one registration in `main.rs`; the fabric itself names
+no platform (issue #36). `/v1/health` reports per-agent status in the
+`agents` map.
 
 ## Kinds of Acts
 
@@ -97,18 +103,23 @@ process, a transducer, or a human interface.
 ## Configuration
 
 Agents are declared in `~/.actus/config.toml` (or `ACTUS_CONFIG`). When
-the file is absent, a single default `telos` agent is derived from the CLI
-flags and environment (`LLM_API_KEY`, `LLM_PROVIDER`, `LLM_BASE_URL`,
-`LLM_MODEL`). The LLM layer belongs to the agent processes: actus treats
-the endpoint as an OpenAI-compatible API and ships no LLM-specific
-provider, model name, or API host of its own. The provider label, model,
-and base URL always come from the local environment or the agent's config
-entry.
+the file is absent, a single default agent of the registry's default kind
+(`telos`) is derived from the CLI flags and environment (`LLM_API_KEY`,
+`LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`). The LLM layer belongs to the
+agent processes: actus treats the endpoint as an OpenAI-compatible API and
+ships no LLM-specific provider, model name, or API host of its own. The
+provider label, model, and base URL always come from the local environment
+or the agent's config entry.
+
+An entry names the agent, its `kind`, and optionally its `workdir`. The
+rest of the entry is the kind's options, read by the kind's factory, so
+the fabric never parses a platform field. An unknown kind is refused at
+config load, and the error names the kinds that are registered.
 
 ```toml
 [[agents]]
 name = "telos"             # default agent; routed when no agent is named
-kind = "telos"             # telos | langgraph | native (telos default; native is in-process)
+kind = "telos"             # registered kind; the kind's factory reads the rest
 provider = "openai-compatible"          # label of the OpenAI-compatible endpoint
 model = "example-model"                 # model served by that endpoint (LLM_MODEL)
 base_url = "https://api.example.com/v1" # base URL of that endpoint (LLM_BASE_URL)
@@ -135,18 +146,37 @@ model = "claude-sonnet-4"
 ws_port = 8081
 ```
 
-Each agent inherits any omitted field from the defaults. Every `telos`
-agent needs a unique `ws_port`; thread state is persisted per agent under
-`~/.actus/threads/{name}/`. Chat and thread endpoints accept an `agent`
-field to route to a specific agent; without it the first configured
-agent is the fabric default. MCP servers declared under an agent
-are injected into the agent's `context_servers` settings and started by
-the headless agent, exposing their tools to the model.
+Each agent inherits any omitted option from its kind's defaults. Every
+`telos` agent needs a unique `ws_port`; thread state is persisted per agent
+under `~/.actus/threads/{name}/`. Chat and thread endpoints accept an
+`agent` field to route to a specific agent; without it the first configured
+agent is the fabric default. MCP servers declared under an agent are
+injected into the agent's `context_servers` settings and started by the
+headless agent, exposing their tools to the model.
 
 `tool_approval` sets the tool call approval policy. `always` auto-approves
 tool calls (headless task execution); `ask` waits for a human or approval
 bridge; `never` rejects them. The mode is carried to the agent via the
 `TELOS_TOOL_APPROVAL` environment variable.
+
+### Kinds and Options
+
+A kind is a name the config resolves against the factories actus registers
+at startup. `name`, `kind`, and `workdir` belong to the fabric; every other
+field belongs to the kind's factory, which fills what the entry omits from
+its own defaults and validates what it declares.
+
+| Kind | Fields it reads | Shape |
+|---|---|---|
+| `telos` (default) | `bin`, `ws_port`, `tool_approval`, `provider`, `model`, `model_display`, `base_url`, `api_key`, `reasoning_effort`, `mcp` | Sessionful over ACP/WebSocket; streaming, tools, and an approval surface; one turn at a time |
+| `ext_cli` | `bin`, `cli_args`, `cli_env`, `cli_prompt`, `cli_timeout_secs` | One-shot: one process per turn, parallel, threads in memory |
+| `native` | none | In-process reference adapter |
+
+The LLM fields belong to the `telos` kind: a deployment whose model rejects
+the reasoning parameter declares `reasoning_effort = "none"`, and a typo
+fails the launch rather than leaving the agent at the provider's default.
+A kind that is not registered is refused at config load; adding one is an
+`AgentFactory` plus a registration in `main.rs` (issue #36).
 
 ### Auxiliary Raw-CLI Agents
 
@@ -266,10 +296,9 @@ spawned per turn.
 | Telos | General execution agent: converts plans into system effects across files, commands, and network; sessionful and meta-capable through the control surface | ACP over WebSocket |
 | Native | In-process reference adapter: deterministic loop that proves the fabric seam without an external process | in-process |
 | Auxiliary (`ext_cli`) | One-shot raw-CLI acts attached by profile; first candidates are Ante (`-p` one-shot) and AURA (`--query` one-shot) | CLI (one process per turn) |
-| LangGraph (declared) | Config entries parse; the adapter is not implemented yet and entries are skipped at launch with a warning | REST/SSE (future) |
-| (planned) Research Agent | Literature search, experiment design | TBD |
-| (planned) Review Agent | Code review, compliance checking | TBD |
-| (planned) Deploy Agent | CI/CD, infrastructure management | TBD |
+| (planned) Research Agent | Literature search, experiment design | a registered kind |
+| (planned) Review Agent | Code review, compliance checking | a registered kind |
+| (planned) Deploy Agent | CI/CD, infrastructure management | a registered kind |
 
 ## Getting Started
 
@@ -384,10 +413,11 @@ actus/
 │   ├── main.rs          Server entry point (also `actus control` subcommand)
 │   ├── lib.rs           Library target for the integration tests
 │   ├── agent/
-│   │   ├── mod.rs       Execution fabric: AgentKind, AgentBackend, AgentRegistry, capabilities
-│   │   ├── config.rs    Config loading: agent specs, cli profiles, control policy, LLM env resolution
-│   │   ├── ext_cli.rs   ExtCliAgent: one-shot raw-CLI adapter (probe, workdir, cancel)
-│   │   └── native.rs    In-process reference adapter
+│   │   ├── mod.rs       Execution fabric: AgentBackend, AgentRegistry, capabilities
+│   │   ├── adapter.rs   Adapter seam: AgentFactory, FactoryRegistry, LaunchContext
+│   │   ├── config.rs    Config loading: agent specs, control policy, env hygiene
+│   │   ├── ext_cli.rs   ext_cli kind: one-shot raw-CLI adapter and factory
+│   │   └── native.rs    native kind: in-process reference adapter and factory
 │   ├── server.rs        REST API routes and handlers
 │   ├── control.rs       `actus control` stdio MCP proxy for meta-agent dispatch
 │   ├── context.rs       Workspace context (symbols, rules)
@@ -395,6 +425,8 @@ actus/
 │   ├── git.rs           Git operations (direct act)
 │   └── telos/
 │       ├── mod.rs       Telos lifecycle, settings bootstrap, session management
+│       ├── adapter.rs   TelosFactory: the telos kind's validate and launch
+│       ├── options.rs   Telos options, defaults, and LLM endpoint resolution
 │       ├── backend.rs   TelosBackend adapter (AgentBackend impl)
 │       ├── control.rs   WebSocket bridge and event dispatch
 │       └── types.rs     Protocol type definitions

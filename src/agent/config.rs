@@ -1,129 +1,41 @@
-// Agent configuration — static declaration of the platforms the fabric
-// weaves. Agents live in `~/.actus/config.toml` (or `ACTUS_CONFIG`); when
-// the file is absent a single default "telos" agent is derived from the CLI
-// and environment.
+// Agent configuration: the declaration the fabric understands.
+//
+// An agent entry names the agent, its kind, and its working directory, and
+// carries the rest of its declaration as an options table that the kind's
+// factory reads. The fabric never parses a platform field; a factory parses
+// its own, with its own defaults and its own validation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use crate::agent::AgentKind;
+use crate::agent::adapter::FactoryRegistry;
 
-/// How a cli-kind agent receives the prompt message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PromptMode {
-    /// Pass the prompt as a command argument. A `{prompt}` marker in
-    /// `cli_args` is replaced; without a marker the prompt is appended
-    /// as the final argument.
-    Arg,
-    /// Write the prompt to the child's stdin instead of passing it as an
-    /// argument (for CLIs that read the prompt from stdin).
-    Stdin,
-}
-
-fn default_prompt_mode() -> PromptMode {
-    PromptMode::Arg
-}
-
-/// Tool call approval policy for an agent. `Always` auto-approves every
-/// tool call (headless task execution); `Ask` waits for a human or a
-/// future approval bridge; `Never` rejects tool calls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolApproval {
-    Always,
-    Ask,
-    Never,
-}
-
-impl ToolApproval {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ToolApproval::Always => "always",
-            ToolApproval::Ask => "ask",
-            ToolApproval::Never => "never",
-        }
-    }
-}
-
-/// One MCP (Model Context Protocol) server attached to an agent. Matches
-/// Telos's `context_servers` settings entries: either a local stdio process
-/// (`command`/`args`/`env`) or a remote HTTP endpoint (`url`/`headers`).
-#[derive(Clone, Debug, Deserialize)]
-pub struct McpServer {
-    pub name: String,
-    /// Whether the server starts with the agent. A declared server is on
-    /// unless the declaration says otherwise, and a server that is off is
-    /// still written to the agent's settings: it is in the agent's catalog,
-    /// where the agent can turn it on itself.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Stdio transport: executable path.
-    #[serde(default)]
-    pub command: Option<String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Stdio transport: environment for the server process. A value of the
-    /// form `$NAME` is resolved from the actus environment when the agent
-    /// starts, so a token stays out of the config file.
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    /// HTTP transport: remote MCP endpoint.
-    #[serde(default)]
-    pub url: Option<String>,
-    /// HTTP transport: request headers. Values resolve like `env` above.
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-    /// Tool call timeout in seconds (stdio only).
-    #[serde(default)]
-    pub timeout: Option<u64>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// Resolved declaration of one agent platform instance. All fields are
-/// concrete: `load_config` fills anything the file omits from defaults.
+/// Resolved declaration of one agent platform instance.
 #[derive(Clone, Debug)]
 pub struct AgentSpec {
-    /// Unique agent name used in routing (e.g. "telos", "claude").
+    /// Unique agent name used in routing (e.g. "telos", "browser").
     pub name: String,
-    pub kind: AgentKind,
-    pub provider: String,
-    pub model: String,
-    pub model_display: String,
-    pub base_url: String,
-    /// LLM API key. Optional at the fabric level; the Telos adapter
-    /// requires one when it launches an agent.
-    pub api_key: Option<String>,
-    /// Telos binary path.
-    pub bin: PathBuf,
-    /// WebSocket port the agent process connects back to.
-    pub ws_port: u16,
-    /// Tool call approval policy; drives the fork's TELOS_TOOL_APPROVAL env.
-    pub tool_approval: ToolApproval,
-    /// Reasoning effort this agent's model is asked for. Normalized to one of
-    /// `REASONING_EFFORT_LEVELS`.
-    pub reasoning_effort: String,
+    /// Registered kind name, resolved against the factory registry.
+    pub kind: String,
     /// Working directory for spawned agent processes. None means the
     /// server working directory.
     pub workdir: Option<PathBuf>,
-    /// MCP servers attached to this agent.
-    pub mcp: Vec<McpServer>,
-    /// Fixed CLI arguments prepended before the prompt for cli-kind agents.
-    /// A `{prompt}` marker is replaced by the message; without a marker
-    /// the message is appended as the final argument.
-    pub cli_args: Vec<String>,
-    /// Extra environment variables for cli-kind agents, merged over the
-    /// inherited server environment.
-    pub cli_env: HashMap<String, String>,
-    /// Prompt injection mode for cli-kind agents.
-    pub cli_prompt: PromptMode,
-    /// Per-turn timeout in seconds for cli-kind agents.
-    pub cli_timeout_secs: u64,
+    /// The declaration table as written, minus the fields above. The kind's
+    /// factory deserializes it into its own options type; the fabric never
+    /// reads it.
+    pub options: toml::Table,
+}
+
+impl AgentSpec {
+    /// Read the declaration as one adapter's options. Keys the adapter does
+    /// not declare are ignored, so every adapter can read the same table.
+    pub fn options<T: serde::de::DeserializeOwned>(&self) -> Result<T, String> {
+        toml::Value::Table(self.options.clone())
+            .try_into()
+            .map_err(|e| format!("agent '{}': cannot read its options: {e}", self.name))
+    }
 }
 
 /// One allow rule: `controller` may dispatch to every name in
@@ -180,19 +92,6 @@ pub fn load_control_policy(file: Option<&Path>) -> Result<ControlPolicy, String>
     }
 }
 
-/// Resolved LLM endpoint settings. Actus ships no vendor defaults: the
-/// provider label, model, and base URL come from the local environment
-/// or the CLI flags only (issue #16).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LlmSettings {
-    pub provider: String,
-    pub base_url: String,
-    pub model: String,
-    pub model_display: String,
-    /// Reasoning effort the model is asked for, already normalized.
-    pub reasoning_effort: String,
-}
-
 /// Trim a value and strip one pair of surrounding quotes. `.env` files
 /// often carry `KEY="value"`; a quoted model name or key would fail the
 /// agent-side lookup.
@@ -208,121 +107,17 @@ pub fn unquote_env_value(value: &str) -> String {
     }
 }
 
-/// Resolve the OpenAI-compatible endpoint from the local environment and
-/// CLI flags. Precedence matches the original main.rs behavior: env wins
-/// over flags for provider, base URL and reasoning effort; model and display
-/// name come from the env only, with display falling back to the model.
-/// Missing values stay empty so a later launch step can warn instead of
-/// inventing an endpoint. The reasoning effort falls back to
-/// `DEFAULT_REASONING_EFFORT`, and is validated when the specs are resolved.
-pub fn resolve_llm_settings(
-    env_get: impl Fn(&str) -> Option<String>,
-    provider_default: String,
-    base_url_flag: Option<String>,
-    reasoning_effort_flag: Option<String>,
-) -> LlmSettings {
-    let provider = unquote_env_value(&env_get("LLM_PROVIDER").unwrap_or(provider_default));
-    let base_url = env_get("LLM_BASE_URL")
-        .map(|v| unquote_env_value(&v))
-        .or_else(|| base_url_flag.map(|v| unquote_env_value(&v)))
-        .unwrap_or_default();
-    let model = unquote_env_value(&env_get("LLM_MODEL").unwrap_or_default());
-    let model_display =
-        unquote_env_value(&env_get("LLM_MODEL_DISPLAY").unwrap_or_else(|| model.clone()));
-    let reasoning_effort = env_get("LLM_REASONING_EFFORT")
-        .map(|v| unquote_env_value(&v))
-        .or_else(|| reasoning_effort_flag.map(|v| unquote_env_value(&v)))
-        .unwrap_or_else(|| DEFAULT_REASONING_EFFORT.to_string());
-    LlmSettings {
-        provider,
-        base_url,
-        model,
-        model_display,
-        reasoning_effort,
-    }
-}
-
-/// The reasoning effort an agent's model is asked for when nothing sets one.
-///
-/// An agent is more useful thinking, and the value is a default rather than a
-/// claim about any model: `LLM_REASONING_EFFORT=none` (or the equivalent agent
-/// config field) turns thinking off explicitly, and any other level moves it.
-/// A deployment whose model rejects the parameter has to say `none`, which is
-/// why the level is validated loudly rather than dropped.
-pub const DEFAULT_REASONING_EFFORT: &str = "high";
-
-/// The reasoning-effort levels a model entry may declare, lowercased as the
-/// agent parses them.
-pub const REASONING_EFFORT_LEVELS: [&str; 7] =
-    ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-
-/// Normalize a declared reasoning effort, or explain what is accepted.
-///
-/// The agent parses the value case-sensitively into its own enum and drops one
-/// it cannot parse without a word, which would leave an agent silently thinking
-/// at the provider's default. A typo here fails the launch instead.
-pub fn normalize_reasoning_effort(value: &str) -> Result<String, String> {
-    let normalized = unquote_env_value(value).to_lowercase();
-    if REASONING_EFFORT_LEVELS.contains(&normalized.as_str()) {
-        Ok(normalized)
-    } else {
-        Err(format!(
-            "reasoning effort '{value}' is not one of: {}",
-            REASONING_EFFORT_LEVELS.join(", ")
-        ))
-    }
-}
-
-/// Values every agent inherits when the config file omits them.
-#[derive(Clone, Debug)]
-pub struct AgentDefaults {
-    pub provider: String,
-    pub model: String,
-    pub model_display: String,
-    pub base_url: String,
-    pub api_key: Option<String>,
-    pub bin: PathBuf,
-    pub ws_port: u16,
-    pub reasoning_effort: String,
-}
-
-/// File-format variant of `AgentSpec`: every field optional so a minimal
-/// TOML entry can inherit the rest from defaults.
+/// File-format variant of `AgentSpec`: the fabric fields typed, everything
+/// else kept as written for the factory.
 #[derive(Deserialize)]
 struct AgentSpecFile {
     name: String,
     #[serde(default)]
-    kind: Option<AgentKind>,
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    model_display: Option<String>,
-    #[serde(default)]
-    base_url: Option<String>,
-    #[serde(default)]
-    api_key: Option<String>,
-    #[serde(default)]
-    bin: Option<PathBuf>,
-    #[serde(default)]
-    ws_port: Option<u16>,
-    #[serde(default)]
-    tool_approval: Option<ToolApproval>,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
+    kind: Option<String>,
     #[serde(default)]
     workdir: Option<PathBuf>,
-    #[serde(default)]
-    mcp: Vec<McpServer>,
-    #[serde(default)]
-    cli_args: Vec<String>,
-    #[serde(default)]
-    cli_env: HashMap<String, String>,
-    #[serde(default = "default_prompt_mode")]
-    cli_prompt: PromptMode,
-    #[serde(default = "default_cli_timeout")]
-    cli_timeout_secs: u64,
+    #[serde(flatten)]
+    options: toml::Table,
 }
 
 #[derive(Deserialize)]
@@ -331,14 +126,15 @@ struct ConfigFile {
     agents: Vec<AgentSpecFile>,
 }
 
-/// Load and resolve agent specs.
+/// Load and resolve agent specs against the registered factories.
 ///
-/// `file = None` yields a single default "telos" spec. When `file` is Some
-/// the TOML must parse and contain at least one agent. Resolved specs have
-/// unique names and unique WebSocket ports among `telos`-kind agents.
+/// `file = None` yields one default agent of the registry's default kind.
+/// A file must parse, name at least one agent, and name each agent once.
+/// Every kind is resolved against the registry, and every spec is validated
+/// by its factory, before anything launches.
 pub fn load_config(
     file: Option<&Path>,
-    defaults: &AgentDefaults,
+    registry: &FactoryRegistry,
 ) -> Result<Vec<AgentSpec>, String> {
     let files: Vec<AgentSpecFile> = match file {
         Some(p) => {
@@ -349,23 +145,15 @@ pub fn load_config(
             cfg.agents
         }
         None => vec![AgentSpecFile {
-            name: "telos".to_string(),
+            name: registry
+                .default_kind()
+                .ok_or_else(|| {
+                    "config: no agents defined and no default kind registered".to_string()
+                })?
+                .to_string(),
             kind: None,
-            provider: None,
-            model: None,
-            model_display: None,
-            base_url: None,
-            api_key: None,
-            bin: None,
-            ws_port: None,
-            tool_approval: None,
-            reasoning_effort: None,
             workdir: None,
-            mcp: Vec::new(),
-            cli_args: Vec::new(),
-            cli_env: HashMap::new(),
-            cli_prompt: default_prompt_mode(),
-            cli_timeout_secs: default_cli_timeout(),
+            options: toml::Table::new(),
         }],
     };
 
@@ -375,55 +163,34 @@ pub fn load_config(
 
     let mut specs = Vec::with_capacity(files.len());
     let mut names = HashSet::new();
-    let mut ports = HashMap::new();
     for f in files {
         if !names.insert(f.name.clone()) {
             return Err(format!("config: duplicate agent name '{}'", f.name));
         }
-        let kind = f.kind.unwrap_or(AgentKind::Telos);
-        let ws_port = f.ws_port.unwrap_or(defaults.ws_port);
-        if kind == AgentKind::Telos {
-            if let Some(prev) = ports.insert(ws_port, f.name.clone()) {
-                return Err(format!(
-                    "config: agents '{}' and '{}' share WebSocket port {}",
-                    prev, f.name, ws_port
-                ));
-            }
-        }
-        let model_display = f.model_display.unwrap_or_else(|| {
-            f.model
-                .clone()
-                .unwrap_or_else(|| defaults.model_display.clone())
-        });
-        let tool_approval = f.tool_approval.unwrap_or(ToolApproval::Always);
-        let declared_effort = f
-            .reasoning_effort
-            .unwrap_or_else(|| defaults.reasoning_effort.clone());
-        let reasoning_effort = normalize_reasoning_effort(&declared_effort)
-            .map_err(|e| format!("agent '{}': {e}", f.name))?;
+        let kind = match f.kind {
+            Some(kind) => kind,
+            None => registry
+                .default_kind()
+                .ok_or_else(|| {
+                    format!(
+                        "config: agent '{}': no kind declared and no default kind registered",
+                        f.name
+                    )
+                })?
+                .to_string(),
+        };
         specs.push(AgentSpec {
             name: f.name,
             kind,
-            provider: f.provider.unwrap_or_else(|| defaults.provider.clone()),
-            model: f.model.unwrap_or_else(|| defaults.model.clone()),
-            model_display,
-            base_url: f.base_url.unwrap_or_else(|| defaults.base_url.clone()),
-            api_key: f.api_key.or_else(|| defaults.api_key.clone()),
-            bin: f.bin.unwrap_or_else(|| defaults.bin.clone()),
-            ws_port,
-            tool_approval,
-            reasoning_effort,
             workdir: f.workdir,
-            mcp: f.mcp,
-            cli_args: f.cli_args,
-            cli_env: f.cli_env,
-            cli_prompt: f.cli_prompt,
-            cli_timeout_secs: f.cli_timeout_secs,
+            options: f.options,
         });
     }
-    Ok(specs)
-}
 
-fn default_cli_timeout() -> u64 {
-    300
+    // Factories validate their own specs, with the whole list in hand so a
+    // constraint across a kind's agents (a shared port, say) is theirs too.
+    for spec in &specs {
+        registry.validate(spec, &specs)?;
+    }
+    Ok(specs)
 }

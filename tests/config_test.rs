@@ -1,23 +1,37 @@
-// Integration tests for agent config loading (issue #7).
+// Integration tests for agent config loading (issue #7). The spec the loader
+// produces is the fabric's own shape (issue #36): name, kind, workdir, and an
+// options table the kind's factory reads.
 
-use actus::agent::config::{
-    load_config, load_control_policy, normalize_reasoning_effort, resolve_llm_settings,
-    AgentDefaults, PromptMode, ToolApproval, DEFAULT_REASONING_EFFORT, REASONING_EFFORT_LEVELS,
-};
-use actus::agent::AgentKind;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-fn defaults() -> AgentDefaults {
-    AgentDefaults {
+use actus::agent::adapter::FactoryRegistry;
+use actus::agent::config::{load_config, load_control_policy};
+use actus::agent::ext_cli::{ExtCliFactory, ExtCliOptions, PromptMode};
+use actus::agent::native::NativeFactory;
+use actus::telos::adapter::TelosFactory;
+use actus::telos::options::{TelosDefaults, DEFAULT_REASONING_EFFORT};
+
+fn telos_defaults() -> TelosDefaults {
+    TelosDefaults {
+        bin: PathBuf::from("/bin/telos"),
+        ws_port: 8080,
         provider: "openai-compatible".to_string(),
         model: "example-model".to_string(),
         model_display: "example-model".to_string(),
         base_url: "https://api.example.com/v1".to_string(),
         api_key: Some("sk-test".to_string()),
-        bin: PathBuf::from("/bin/telos"),
-        ws_port: 8080,
         reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
     }
+}
+
+/// The built-in kinds, registered the way main registers them.
+fn registry() -> FactoryRegistry {
+    let mut factories = FactoryRegistry::new();
+    factories.register_default(Arc::new(TelosFactory::new(telos_defaults())));
+    factories.register(Arc::new(ExtCliFactory));
+    factories.register(Arc::new(NativeFactory));
+    factories
 }
 
 fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
@@ -27,130 +41,102 @@ fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn no_file_yields_single_default_telos() {
-    let specs = load_config(None, &defaults()).unwrap();
+fn no_file_yields_single_default_agent() {
+    let specs = load_config(None, &registry()).unwrap();
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].name, "telos");
-    assert_eq!(specs[0].kind, AgentKind::Telos);
-    assert_eq!(specs[0].provider, "openai-compatible");
-    assert_eq!(specs[0].model, "example-model");
-    assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
-    assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
-    assert_eq!(specs[0].ws_port, 8080);
-    assert_eq!(specs[0].tool_approval, ToolApproval::Always);
+    assert_eq!(specs[0].kind, "telos");
     assert!(specs[0].workdir.is_none());
-}
-
-#[test]
-fn llm_settings_resolution_env_wins_and_unquotes() {
-    let env = |key: &str| -> Option<String> {
-        match key {
-            "LLM_PROVIDER" => Some("\"openai\"".to_string()),
-            "LLM_BASE_URL" => Some("'https://api.openai.com'".to_string()),
-            "LLM_MODEL" => Some("\"llm_model\"".to_string()),
-            _ => None,
-        }
-    };
-    let resolved = resolve_llm_settings(
-        env,
-        "openai-compatible".to_string(),
-        Some("https://flag.example/v1".to_string()),
-        None,
+    assert!(
+        specs[0].options.is_empty(),
+        "a default agent declares no options; the factory supplies its defaults"
     );
-    // The env values win over the flag and the default, and surrounding
-    // quotes are stripped (issue #16 parity: local env drives the LLM).
-    assert_eq!(resolved.provider, "openai");
-    assert_eq!(resolved.base_url, "https://api.openai.com");
-    assert_eq!(resolved.model, "llm_model");
-    assert_eq!(resolved.model_display, "llm_model");
 }
 
 #[test]
-fn llm_settings_resolution_defaults_and_display_fallback() {
-    // No env: the neutral provider default stays, the flag base URL is
-    // used, and model values stay empty (no vendor model invented).
-    let resolved = resolve_llm_settings(
-        |_| None,
-        "openai-compatible".to_string(),
-        Some("https://flag.example/v1".to_string()),
-        None,
+fn a_kind_omitted_is_the_registry_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), "[[agents]]\nname = \"plain\"\n");
+    let specs = load_config(Some(&path), &registry()).unwrap();
+    assert_eq!(specs[0].kind, "telos");
+}
+
+#[test]
+fn an_unknown_kind_is_refused_and_names_the_registered_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        "[[agents]]\nname = \"claude\"\nkind = \"langgraph\"\n",
     );
-    assert_eq!(resolved.provider, "openai-compatible");
-    assert_eq!(resolved.base_url, "https://flag.example/v1");
-    assert_eq!(resolved.model, "");
-    assert_eq!(resolved.model_display, "");
-    assert_eq!(resolved.reasoning_effort, DEFAULT_REASONING_EFFORT);
-
-    // An explicit display name wins over the model fallback.
-    let env = |key: &str| -> Option<String> {
-        match key {
-            "LLM_MODEL" => Some("model-a".to_string()),
-            "LLM_MODEL_DISPLAY" => Some("Model A".to_string()),
-            _ => None,
-        }
-    };
-    let resolved = resolve_llm_settings(env, "openai-compatible".to_string(), None, None);
-    assert_eq!(resolved.model, "model-a");
-    assert_eq!(resolved.model_display, "Model A");
-}
-
-/// Every level an operator may declare is accepted, normalized, and survives
-/// the round trip the agent parses.
-#[test]
-fn reasoning_effort_levels_are_accepted_and_normalized() {
-    for level in REASONING_EFFORT_LEVELS {
-        assert_eq!(normalize_reasoning_effort(level).unwrap(), level);
-        assert_eq!(
-            normalize_reasoning_effort(&level.to_uppercase()).unwrap(),
-            level,
-            "a level typed in upper case is the same level"
-        );
-        assert_eq!(
-            normalize_reasoning_effort(&format!("\"{level}\"")).unwrap(),
-            level,
-            "a quoted value from a .env file is the same level"
+    let error = load_config(Some(&path), &registry()).unwrap_err();
+    assert!(error.contains("agent 'claude'"), "{error}");
+    assert!(error.contains("langgraph"), "{error}");
+    for kind in ["ext_cli", "native", "telos"] {
+        assert!(
+            error.contains(kind),
+            "the registered kinds are named: {error}"
         );
     }
 }
 
-/// A typo fails the launch rather than leaving the agent thinking at the
-/// provider's default without a word.
 #[test]
-fn an_unknown_reasoning_effort_is_refused() {
-    let error = normalize_reasoning_effort("highest").unwrap_err();
-    assert!(error.contains("highest"), "{error}");
-    assert!(
-        error.contains("high"),
-        "the accepted levels are named: {error}"
+fn the_options_table_keeps_the_declaration_for_the_factory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        r#"
+[[agents]]
+name = "aux"
+kind = "ext_cli"
+bin = "ante"
+cli_args = ["-p", "{prompt}"]
+cli_env = { "FOO" = "bar", "KEY" = "$LLM_API_KEY" }
+cli_prompt = "stdin"
+cli_timeout_secs = 42
+workdir = "/tmp/aux-work"
+"#,
+    );
+    let specs = load_config(Some(&path), &registry()).unwrap();
+    assert_eq!(specs.len(), 1);
+    let s = &specs[0];
+    assert_eq!(s.name, "aux");
+    assert_eq!(s.kind, "ext_cli");
+    assert_eq!(
+        s.workdir.as_deref(),
+        Some(std::path::Path::new("/tmp/aux-work"))
     );
 
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = dir.path().join("config.toml");
-    std::fs::write(
-        &cfg,
-        "[[agents]]\nname = \"telos\"\nreasoning_effort = \"fast\"\n",
-    )
-    .unwrap();
-    let error = load_config(Some(&cfg), &defaults()).unwrap_err();
-    assert!(error.contains("agent 'telos'"), "{error}");
-    assert!(error.contains("fast"), "{error}");
+    // The fabric reads none of these; the kind's factory reads them out of
+    // the same table.
+    let options: ExtCliOptions = s.options().unwrap();
+    assert_eq!(options.bin, PathBuf::from("ante"));
+    assert_eq!(
+        options.cli_args,
+        vec!["-p".to_string(), "{prompt}".to_string()]
+    );
+    assert_eq!(options.cli_env.get("FOO").map(String::as_str), Some("bar"));
+    assert_eq!(
+        options.cli_env.get("KEY").map(String::as_str),
+        Some("$LLM_API_KEY")
+    );
+    assert_eq!(options.cli_prompt, PromptMode::Stdin);
+    assert_eq!(options.cli_timeout_secs, 42);
 }
 
-/// A per-agent level wins over the default, and the default reaches every
-/// agent that does not declare one.
 #[test]
-fn reasoning_effort_falls_back_to_the_default_and_is_overridable() {
+fn ext_cli_profile_defaults_when_fields_are_omitted() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = dir.path().join("config.toml");
-    std::fs::write(
-        &cfg,
-        "[[agents]]\nname = \"plain\"\n\n\
-         [[agents]]\nname = \"raising\"\nws_port = 8081\nreasoning_effort = \"max\"\n",
-    )
-    .unwrap();
-    let specs = load_config(Some(&cfg), &defaults()).unwrap();
-    assert_eq!(specs[0].reasoning_effort, DEFAULT_REASONING_EFFORT);
-    assert_eq!(specs[1].reasoning_effort, "max");
+    let path = write_config(
+        dir.path(),
+        "[[agents]]\nname = \"aux\"\nkind = \"ext_cli\"\nbin = \"some-cli\"\n",
+    );
+    let specs = load_config(Some(&path), &registry()).unwrap();
+    let options: ExtCliOptions = specs[0].options().unwrap();
+    assert_eq!(options.bin, PathBuf::from("some-cli"));
+    assert!(options.cli_args.is_empty());
+    assert!(options.cli_env.is_empty());
+    assert_eq!(options.cli_prompt, PromptMode::Arg);
+    assert_eq!(options.cli_timeout_secs, 300);
 }
 
 #[test]
@@ -190,141 +176,6 @@ fn control_policy_defaults_to_deny() {
 }
 
 #[test]
-fn ext_cli_profile_fields_parsed() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_config(
-        dir.path(),
-        r#"
-[[agents]]
-name = "aux"
-kind = "ext_cli"
-bin = "ante"
-cli_args = ["-p", "{prompt}"]
-cli_env = { "FOO" = "bar", "KEY" = "$LLM_API_KEY" }
-cli_prompt = "stdin"
-cli_timeout_secs = 42
-workdir = "/tmp/aux-work"
-"#,
-    );
-    let specs = load_config(Some(&path), &defaults()).unwrap();
-    assert_eq!(specs.len(), 1);
-    let s = &specs[0];
-    assert_eq!(s.name, "aux");
-    assert_eq!(s.kind, AgentKind::ExtCli);
-    assert_eq!(s.bin, PathBuf::from("ante"));
-    assert_eq!(s.cli_args, vec!["-p".to_string(), "{prompt}".to_string()]);
-    assert_eq!(s.cli_env.get("FOO").map(String::as_str), Some("bar"));
-    assert_eq!(
-        s.cli_env.get("KEY").map(String::as_str),
-        Some("$LLM_API_KEY")
-    );
-    assert_eq!(s.cli_prompt, PromptMode::Stdin);
-    assert_eq!(s.cli_timeout_secs, 42);
-    assert_eq!(
-        s.workdir.as_deref(),
-        Some(std::path::Path::new("/tmp/aux-work"))
-    );
-}
-
-#[test]
-fn ext_cli_profile_defaults_when_fields_omitted() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_config(
-        dir.path(),
-        r#"
-[[agents]]
-name = "aux"
-kind = "ext_cli"
-bin = "some-cli"
-"#,
-    );
-    let specs = load_config(Some(&path), &defaults()).unwrap();
-    let s = &specs[0];
-    assert!(s.cli_args.is_empty());
-    assert!(s.cli_env.is_empty());
-    assert_eq!(s.cli_prompt, PromptMode::Arg);
-    assert_eq!(s.cli_timeout_secs, 300);
-    assert!(s.workdir.is_none());
-}
-
-#[test]
-fn tool_approval_modes_parsed() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_config(
-        dir.path(),
-        r#"
-[[agents]]
-name = "telos"
-tool_approval = "never"
-ws_port = 8080
-
-[[agents]]
-name = "asker"
-tool_approval = "ask"
-ws_port = 8081
-"#,
-    );
-    let specs = load_config(Some(&path), &defaults()).unwrap();
-    assert_eq!(specs[0].tool_approval, ToolApproval::Never);
-    assert_eq!(specs[1].tool_approval, ToolApproval::Ask);
-}
-
-#[test]
-fn toml_fills_missing_fields_from_defaults() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_config(
-        dir.path(),
-        r#"
-[[agents]]
-name = "telos"
-ws_port = 8080
-
-[[agents]]
-name = "claude"
-kind = "langgraph"
-provider = "anthropic"
-model = "claude-sonnet-4"
-base_url = "https://api.anthropic.com/v1"
-"#,
-    );
-    let specs = load_config(Some(&path), &defaults()).unwrap();
-    assert_eq!(specs.len(), 2);
-
-    // telos inherits everything from defaults
-    assert_eq!(specs[0].kind, AgentKind::Telos);
-    assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
-    assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
-
-    // claude overrides provider/model/base_url, inherits api_key
-    assert_eq!(specs[1].kind, AgentKind::LangGraph);
-    assert_eq!(specs[1].provider, "anthropic");
-    assert_eq!(specs[1].model, "claude-sonnet-4");
-    assert_eq!(specs[1].model_display, "claude-sonnet-4");
-    assert_eq!(specs[1].base_url, "https://api.anthropic.com/v1");
-    assert_eq!(specs[1].api_key.as_deref(), Some("sk-test"));
-    assert_eq!(specs[1].ws_port, 8080);
-}
-
-#[test]
-fn duplicate_ports_rejected_for_telos_kind() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_config(
-        dir.path(),
-        r#"
-[[agents]]
-name = "a"
-ws_port = 8080
-
-[[agents]]
-name = "b"
-ws_port = 8080
-"#,
-    );
-    let err = load_config(Some(&path), &defaults()).unwrap_err();
-    assert!(err.contains("share WebSocket port"), "unexpected: {}", err);
-}
-
-#[test]
 fn duplicate_names_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(
@@ -337,7 +188,7 @@ name = "telos"
 name = "telos"
 "#,
     );
-    let err = load_config(Some(&path), &defaults()).unwrap_err();
+    let err = load_config(Some(&path), &registry()).unwrap_err();
     assert!(err.contains("duplicate agent name"), "unexpected: {}", err);
 }
 
@@ -345,7 +196,7 @@ name = "telos"
 fn empty_agents_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), "");
-    let err = load_config(Some(&path), &defaults()).unwrap_err();
+    let err = load_config(Some(&path), &registry()).unwrap_err();
     assert!(err.contains("no agents"), "unexpected: {}", err);
 }
 
@@ -353,50 +204,6 @@ fn empty_agents_rejected() {
 fn malformed_toml_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), "not [ valid toml");
-    let err = load_config(Some(&path), &defaults()).unwrap_err();
+    let err = load_config(Some(&path), &registry()).unwrap_err();
     assert!(err.contains("cannot parse"), "unexpected: {}", err);
-}
-
-#[test]
-fn mcp_servers_parsed_stdio_and_http() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_config(
-        dir.path(),
-        r#"
-[[agents]]
-name = "telos"
-ws_port = 8080
-
-[[agents.mcp]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "./"]
-env = { "FOO" = "bar" }
-
-[[agents.mcp]]
-name = "cloudflare-api"
-url = "https://mcp.cloudflare.com/mcp"
-"#,
-    );
-    let specs = load_config(Some(&path), &defaults()).unwrap();
-    assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].mcp.len(), 2);
-
-    let fs = &specs[0].mcp[0];
-    assert_eq!(fs.name, "filesystem");
-    assert_eq!(fs.command.as_deref(), Some("npx"));
-    assert_eq!(fs.args.len(), 3);
-    assert_eq!(fs.env.get("FOO").map(String::as_str), Some("bar"));
-    assert!(fs.url.is_none());
-
-    let cf = &specs[0].mcp[1];
-    assert_eq!(cf.name, "cloudflare-api");
-    assert_eq!(cf.url.as_deref(), Some("https://mcp.cloudflare.com/mcp"));
-    assert!(cf.command.is_none());
-}
-
-#[test]
-fn no_mcp_by_default() {
-    let specs = load_config(None, &defaults()).unwrap();
-    assert!(specs[0].mcp.is_empty());
 }
