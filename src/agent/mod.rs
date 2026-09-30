@@ -17,6 +17,8 @@ pub mod browser;
 pub mod config;
 pub mod ext_cli;
 pub mod native;
+pub mod process;
+pub mod session;
 
 /// Declared capabilities of one agent backend. Upper layers (the CLI, a
 /// future kineTic orchestrator) read these to decide which agent fits a

@@ -35,13 +35,15 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{watch, Mutex};
 
 use crate::agent::adapter::{AgentFactory, LaunchContext, LaunchedAgent};
 use crate::agent::config::AgentSpec;
+use crate::agent::process::kill_child_group;
+use crate::agent::session::{ThreadStore, TurnReply};
 use crate::agent::{
-    truncate_title, AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization,
-    SubmitReceipt, ThreadMessage, ThreadParent, ThreadSession,
+    AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization, SubmitReceipt,
+    ThreadParent, ThreadSession,
 };
 
 /// The operations this adapter implements, which is the whole of its policy.
@@ -665,21 +667,6 @@ fn poll_step(state: &mut TurnState, deadline: tokio::time::Instant) -> Poll {
     }
 }
 
-/// Kill a step's process group and reap it. The direct child is the CLI, and
-/// the group covers what it spawned; a straggler holding the output pipes
-/// would otherwise delay the recorded outcome. The group signal goes out
-/// before the reap, while the group is known to exist.
-async fn kill_child_group(child: &mut Child) {
-    if let Some(pid) = child.id() {
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-    }
-}
-
 /// Drain a captured pipe to EOF.
 async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(mut pipe: Option<R>) -> Vec<u8> {
     match pipe.as_mut() {
@@ -766,15 +753,13 @@ pub struct BrowserAgent {
     /// Turns run one at a time: one browser is one page, and two turns
     /// interleaving would fill the same fields twice.
     turn_lock: Arc<Mutex<()>>,
-    threads: Arc<RwLock<HashMap<String, ThreadSession>>>,
-    notify: watch::Sender<u64>,
+    store: Arc<ThreadStore>,
     /// Launch probe failure at construction; readiness derives from it.
     start_error: Option<String>,
 }
 
 impl BrowserAgent {
     pub fn new(name: String, options: &BrowserOptions, workdir: PathBuf) -> Self {
-        let (notify, _) = watch::channel(0u64);
         let env = resolve_env(&options.env);
         // The probe runs with the declaration's environment, so what it
         // reports is what a step will get.
@@ -790,8 +775,7 @@ impl BrowserAgent {
                 running: Arc::new(Mutex::new(HashMap::new())),
             },
             turn_lock: Arc::new(Mutex::new(())),
-            threads: Arc::new(RwLock::new(HashMap::new())),
-            notify,
+            store: Arc::new(ThreadStore::new("browser")),
             start_error,
             name,
         }
@@ -816,52 +800,6 @@ impl BrowserAgent {
         } else {
             self.runner.workdir.join(bin).exists()
         }
-    }
-
-    fn blank_session(id: String) -> ThreadSession {
-        ThreadSession {
-            id,
-            title: None,
-            messages: Vec::new(),
-            created_at: chrono::Utc::now(),
-            updated_at: None,
-            completed: true,
-            acp_thread_id: None,
-            turn_completed: 0,
-            parent: None,
-        }
-    }
-
-    async fn get_or_create(&self, thread_id: Option<&str>) -> (String, bool) {
-        let mut threads = self.threads.write().await;
-        let tid = match thread_id {
-            Some(t) if threads.contains_key(t) => t.to_string(),
-            Some(t) => {
-                let tid = t.to_string();
-                threads.insert(tid.clone(), Self::blank_session(tid.clone()));
-                tid
-            }
-            None => {
-                let tid = format!("browser-{}", uuid::Uuid::new_v4());
-                threads.insert(tid.clone(), Self::blank_session(tid.clone()));
-                tid
-            }
-        };
-        let is_new = threads
-            .get(&tid)
-            .map(|t| t.messages.is_empty())
-            .unwrap_or(true);
-        (tid, is_new)
-    }
-
-    /// Whether a finished turn recorded a reply under this request id.
-    async fn has_reply(&self, request_id: &str) -> bool {
-        self.threads.read().await.values().any(|session| {
-            session
-                .messages
-                .iter()
-                .any(|message| message.message_id.as_deref() == Some(request_id))
-        })
     }
 }
 
@@ -1145,32 +1083,12 @@ impl AgentBackend for BrowserAgent {
         parent: Option<ThreadParent>,
         _thinking_effort: Option<&str>,
     ) -> Result<SubmitReceipt, String> {
-        let (tid, is_new) = self.get_or_create(thread_id).await;
+        let (tid, is_new) = self.store.get_or_create(thread_id).await;
         let request_id = uuid::Uuid::new_v4().to_string();
-        {
-            let mut threads = self.threads.write().await;
-            let session = threads
-                .get_mut(&tid)
-                .ok_or_else(|| format!("thread '{}' vanished", tid))?;
-            if session.title.is_none() {
-                session.title = Some(truncate_title(message));
-            }
-            // Record the dispatch origin once: the first submit into a
-            // thread decides its parent.
-            if session.parent.is_none() {
-                session.parent = parent;
-            }
-            session.messages.push(ThreadMessage {
-                role: "user".to_string(),
-                content: message.to_string(),
-                message_id: None,
-                entry_type: None,
-                tool_name: None,
-                tool_status: None,
-                timestamp: chrono::Utc::now(),
-            });
-            session.completed = false;
-        }
+        // The thread's title, its dispatch origin, the user message, and the
+        // incomplete mark are the session layer's; this adapter supplies only
+        // where the turn came from.
+        self.store.begin_turn(&tid, message, parent).await?;
         {
             let mut running = self.runner.running.lock().await;
             running.insert(
@@ -1181,17 +1099,16 @@ impl AgentBackend for BrowserAgent {
                 },
             );
         }
-        let _ = self
-            .notify
-            .send(chrono::Utc::now().timestamp_millis() as u64);
+        // This kind wakes subscribers when a turn opens as well as when it
+        // ends: the page it is about to touch is a state a viewer watches.
+        self.store.notify();
 
         // The turn runs in the background: the receipt returns now, the
         // thread reports the record when it lands, and a cancel can stop the
         // step in flight.
         let runner = self.runner.clone();
         let turn_lock = self.turn_lock.clone();
-        let threads = self.threads.clone();
-        let notify = self.notify.clone();
+        let store = self.store.clone();
         let task_request_id = request_id.clone();
         let task_thread_id = tid.clone();
         let plan = message.to_string();
@@ -1225,22 +1142,14 @@ impl AgentBackend for BrowserAgent {
                 })
                 .to_string()
             });
-            let mut threads = threads.write().await;
-            if let Some(session) = threads.get_mut(&task_thread_id) {
-                session.messages.push(ThreadMessage {
-                    role: "assistant".to_string(),
-                    content: reply,
-                    message_id: Some(task_request_id),
-                    entry_type: Some("agent_message".to_string()),
-                    tool_name: None,
-                    tool_status: None,
-                    timestamp: chrono::Utc::now(),
-                });
-                session.completed = true;
-                session.turn_completed += 1;
+            let reply = TurnReply::message(reply, Some(task_request_id));
+            if let Err(e) = store.finish_turn(&task_thread_id, reply).await {
+                tracing::warn!(
+                    "the record for thread '{}' was not written: {}",
+                    task_thread_id,
+                    e
+                );
             }
-            drop(threads);
-            let _ = notify.send(chrono::Utc::now().timestamp_millis() as u64);
         });
 
         Ok(SubmitReceipt {
@@ -1272,7 +1181,7 @@ impl AgentBackend for BrowserAgent {
                 return Ok(());
             }
         }
-        if self.has_reply(request_id).await {
+        if self.store.has_reply(request_id).await {
             return Ok(());
         }
         Err(format!(
@@ -1283,15 +1192,15 @@ impl AgentBackend for BrowserAgent {
     }
 
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession> {
-        self.threads.read().await.get(thread_id).cloned()
+        self.store.thread(thread_id).await
     }
 
     async fn threads(&self) -> Vec<ThreadSession> {
-        self.threads.read().await.values().cloned().collect()
+        self.store.threads().await
     }
 
     async fn subscribe(&self) -> watch::Receiver<u64> {
-        self.notify.subscribe()
+        self.store.subscribe()
     }
 
     async fn pending_tool_calls(&self) -> Vec<PendingAuthorization> {
@@ -1315,7 +1224,6 @@ impl AgentBackend for BrowserAgent {
     }
 
     async fn create_thread(&self) -> Result<String, String> {
-        let (tid, _) = self.get_or_create(None).await;
-        Ok(tid)
+        Ok(self.store.create_thread().await)
     }
 }

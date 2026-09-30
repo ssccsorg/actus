@@ -23,13 +23,15 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{watch, Mutex};
 
 use crate::agent::adapter::{AgentFactory, LaunchContext, LaunchedAgent};
 use crate::agent::config::AgentSpec;
+use crate::agent::process::kill_child_group;
+use crate::agent::session::{ThreadStore, TurnReply};
 use crate::agent::{
-    truncate_title, AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization,
-    SubmitReceipt, ThreadMessage, ThreadParent, ThreadSession,
+    AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization, SubmitReceipt,
+    ThreadParent, ThreadSession,
 };
 
 /// Cap on the recorded assistant message, in characters. A CLI can emit
@@ -54,21 +56,6 @@ enum ChildOutcome {
     Cancelled,
     TimedOut,
     Exited(Result<std::process::ExitStatus, std::io::Error>),
-}
-
-/// Kill the direct child and its process group, then reap it. The direct
-/// child may be a shell or launcher that spawned its own children;
-/// orphaned grandchildren would keep the output pipes open until they
-/// exit on their own and delay the recorded reply.
-#[cfg(unix)]
-async fn kill_child_group(child: &mut tokio::process::Child) {
-    if let Some(pid) = child.id() {
-        let _ = child.kill().await;
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-        let _ = child.wait().await;
-    }
 }
 
 /// How a cli-kind agent receives the prompt message.
@@ -189,9 +176,8 @@ pub struct ExtCliAgent {
     /// Launch probe failure at construction; None when the binary could
     /// be spawned. Readiness and the health status derive from it.
     start_error: Option<String>,
-    threads: Arc<RwLock<HashMap<String, ThreadSession>>>,
+    store: Arc<ThreadStore>,
     running: Arc<Mutex<HashMap<String, Child>>>,
-    notify: watch::Sender<u64>,
 }
 
 impl ExtCliAgent {
@@ -204,7 +190,6 @@ impl ExtCliAgent {
         timeout_secs: u64,
         workdir: PathBuf,
     ) -> Self {
-        let (notify, _) = watch::channel(0u64);
         let start_error = probe_binary(&bin);
         Self {
             name: name.into(),
@@ -215,9 +200,8 @@ impl ExtCliAgent {
             timeout: Duration::from_secs(timeout_secs.max(1)),
             workdir,
             start_error,
-            threads: Arc::new(RwLock::new(HashMap::new())),
+            store: Arc::new(ThreadStore::new("cli")),
             running: Arc::new(Mutex::new(HashMap::new())),
-            notify,
         }
     }
 
@@ -235,42 +219,6 @@ impl ExtCliAgent {
         } else {
             self.bin.exists()
         }
-    }
-
-    fn blank_session(id: String) -> ThreadSession {
-        ThreadSession {
-            id,
-            title: None,
-            messages: Vec::new(),
-            created_at: chrono::Utc::now(),
-            updated_at: None,
-            completed: true,
-            acp_thread_id: None,
-            turn_completed: 0,
-            parent: None,
-        }
-    }
-
-    async fn get_or_create(&self, thread_id: Option<&str>) -> (String, bool) {
-        let mut threads = self.threads.write().await;
-        let tid = match thread_id {
-            Some(t) if threads.contains_key(t) => t.to_string(),
-            Some(t) => {
-                let tid = t.to_string();
-                threads.insert(tid.clone(), Self::blank_session(tid.clone()));
-                tid
-            }
-            None => {
-                let tid = format!("cli-{}", uuid::Uuid::new_v4());
-                threads.insert(tid.clone(), Self::blank_session(tid.clone()));
-                tid
-            }
-        };
-        let is_new = threads
-            .get(&tid)
-            .map(|t| t.messages.is_empty())
-            .unwrap_or(true);
-        (tid, is_new)
     }
 }
 
@@ -338,34 +286,13 @@ impl AgentBackend for ExtCliAgent {
         parent: Option<ThreadParent>,
         _thinking_effort: Option<&str>,
     ) -> Result<SubmitReceipt, String> {
-        let (tid, is_new) = self.get_or_create(thread_id).await;
+        let (tid, is_new) = self.store.get_or_create(thread_id).await;
         let request_id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now();
 
-        {
-            let mut threads = self.threads.write().await;
-            let session = threads
-                .get_mut(&tid)
-                .ok_or_else(|| format!("thread '{}' vanished", tid))?;
-            if session.title.is_none() {
-                session.title = Some(truncate_title(message));
-            }
-            // Record the dispatch origin once: the first submit into a
-            // thread decides its parent.
-            if session.parent.is_none() {
-                session.parent = parent;
-            }
-            session.messages.push(ThreadMessage {
-                role: "user".to_string(),
-                content: message.to_string(),
-                message_id: None,
-                entry_type: None,
-                tool_name: None,
-                tool_status: None,
-                timestamp: now,
-            });
-            session.completed = false;
-        }
+        // The thread's title, its dispatch origin, the user message, and the
+        // incomplete mark are the session layer's; this adapter supplies only
+        // where the turn came from.
+        self.store.begin_turn(&tid, message, parent).await?;
 
         // Resolve the argument template for this turn.
         let mut cmd_args: Vec<String> = Vec::with_capacity(self.args.len() + 1);
@@ -430,9 +357,8 @@ impl AgentBackend for ExtCliAgent {
             running.insert(request_id.clone(), child);
         }
 
-        let threads = self.threads.clone();
+        let store = self.store.clone();
         let running = self.running.clone();
-        let notify = self.notify.clone();
         let timeout = self.timeout;
         let task_thread_id = tid.clone();
         let task_request_id = request_id.clone();
@@ -519,23 +445,14 @@ impl AgentBackend for ExtCliAgent {
                 },
             };
 
-            let now = chrono::Utc::now();
-            let mut threads = threads.write().await;
-            if let Some(session) = threads.get_mut(&task_thread_id) {
-                session.messages.push(ThreadMessage {
-                    role: "assistant".to_string(),
-                    content,
-                    message_id: Some(task_request_id),
-                    entry_type: Some("agent_message".to_string()),
-                    tool_name: None,
-                    tool_status: None,
-                    timestamp: now,
-                });
-                session.completed = true;
-                session.turn_completed += 1;
+            let reply = TurnReply::message(content, Some(task_request_id));
+            if let Err(e) = store.finish_turn(&task_thread_id, reply).await {
+                tracing::warn!(
+                    "the reply for thread '{}' was not recorded: {}",
+                    task_thread_id,
+                    e
+                );
             }
-            drop(threads);
-            let _ = notify.send(now.timestamp_millis() as u64);
         });
 
         Ok(SubmitReceipt {
@@ -566,15 +483,15 @@ impl AgentBackend for ExtCliAgent {
     }
 
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession> {
-        self.threads.read().await.get(thread_id).cloned()
+        self.store.thread(thread_id).await
     }
 
     async fn threads(&self) -> Vec<ThreadSession> {
-        self.threads.read().await.values().cloned().collect()
+        self.store.threads().await
     }
 
     async fn subscribe(&self) -> watch::Receiver<u64> {
-        self.notify.subscribe()
+        self.store.subscribe()
     }
 
     async fn pending_tool_calls(&self) -> Vec<PendingAuthorization> {
@@ -591,8 +508,7 @@ impl AgentBackend for ExtCliAgent {
     }
 
     async fn create_thread(&self) -> Result<String, String> {
-        let (tid, _) = self.get_or_create(None).await;
-        Ok(tid)
+        Ok(self.store.create_thread().await)
     }
 }
 
