@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use actus::agent::ext_cli::{ExtCliAgent, PromptMode};
 use actus::agent::AgentBackend;
@@ -49,6 +49,29 @@ fn agent_with(dir: &Path, bin: std::path::PathBuf, args: Vec<String>) -> ExtCliA
         30,
         dir.to_path_buf(),
     )
+}
+
+/// Whether a process is still there. The stub writes the pid of its shell and
+/// of the work it started, so a kill can be checked against the OS.
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// The two pids the stub wrote, once it has written them: the shell and the
+/// work it started, which is the pair a group kill has to take.
+async fn wait_for_pids(path: &Path) -> (i32, i32) {
+    for _ in 0..200 {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let mut parts = text.split_whitespace();
+            if let (Some(a), Some(b)) = (parts.next(), parts.next()) {
+                if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
+                    return (a, b);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the stub did not write its pids");
 }
 
 async fn wait_for_assistant(agent: &ExtCliAgent, thread_id: &str) -> String {
@@ -225,6 +248,47 @@ async fn ext_cli_failure_records_exit_diagnostics() {
         "unexpected: {content}"
     );
     assert!(content.contains("boom"), "stderr missing: {content}");
+}
+
+#[tokio::test]
+async fn ext_cli_shutdown_kills_the_child_and_its_work() {
+    // A launcher with children of its own is the shape a group kill exists
+    // for: the shell waits, and the sleep it started holds the output pipes.
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pids");
+    let bin = stub_bin(
+        dir.path(),
+        "slow-cli",
+        "#!/bin/sh\nsleep 10 &\necho \"$$ $!\" > \"$PID_FILE\"\nwait\n",
+    );
+    let env = HashMap::from([("PID_FILE".to_string(), pid_file.display().to_string())]);
+    let agent = ExtCliAgent::new(
+        "aux",
+        bin,
+        Vec::new(),
+        env,
+        PromptMode::Arg,
+        30,
+        dir.path().to_path_buf(),
+    );
+
+    let receipt = agent.submit(None, "long turn").await.unwrap();
+    let (shell, work) = wait_for_pids(&pid_file).await;
+    assert!(alive(shell) && alive(work), "the turn is running");
+
+    let started = Instant::now();
+    agent.shutdown().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "shutdown does not wait out the child"
+    );
+    assert!(!alive(shell), "the direct child is gone");
+    assert!(!alive(work), "the work it started is gone too");
+
+    // The turn's own task is still running here, so the thread records what
+    // an exit path would not wait for: the turn was cancelled.
+    let content = wait_for_assistant(&agent, &receipt.thread_id).await;
+    assert_eq!(content, "[ext-cli] cancelled", "unexpected: {content}");
 }
 
 #[tokio::test]

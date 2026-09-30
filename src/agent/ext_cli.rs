@@ -482,6 +482,14 @@ impl AgentBackend for ExtCliAgent {
         Ok(())
     }
 
+    /// Stop every child this agent still holds. The exit path is the only
+    /// caller, and it cannot rely on the turn's own task to do this: that task
+    /// is not going to run again, so what matters is that no process outlives
+    /// the server.
+    async fn shutdown(&self) {
+        let _ = self.cancel().await;
+    }
+
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession> {
         self.store.thread(thread_id).await
     }

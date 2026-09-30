@@ -1191,6 +1191,26 @@ impl AgentBackend for BrowserAgent {
         ))
     }
 
+    /// Stop the step in flight and reap it. The exit path is the only caller,
+    /// and it cannot leave this to the step loop: the task that owns that loop
+    /// is not going to run again, so this is where the process is taken and
+    /// killed.
+    async fn shutdown(&self) {
+        let children: Vec<Child> = {
+            let mut running = self.runner.running.lock().await;
+            running
+                .values_mut()
+                .filter_map(|state| {
+                    state.cancelled = true;
+                    state.child.take()
+                })
+                .collect()
+        };
+        for mut child in children {
+            kill_child_group(&mut child).await;
+        }
+    }
+
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession> {
         self.store.thread(thread_id).await
     }

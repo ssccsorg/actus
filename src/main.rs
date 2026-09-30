@@ -401,26 +401,11 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
-    // Wait for the default agent to be ready before starting the CLI.
-    let default_backend = state.agents.default_agent();
-    for i in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let ready = match &default_backend {
-            Some(agent) => agent.status().await.ready,
-            None => false,
-        };
-        if ready {
-            tracing::info!("Agent ready after {}s", i + 1);
-            break;
-        }
-        if i == 29 {
-            tracing::warn!("Agent not ready after 30s");
-        }
-    }
-
     // ── Graceful shutdown ────────────────────────────────────────────
     // Handle SIGTERM/SIGINT: ask every registered agent to persist what it
-    // holds, then exit cleanly.
+    // holds, then exit cleanly. This is registered before the readiness wait
+    // below, because a signal that arrives during that wait must still run the
+    // cleanup: a backend can already hold a child process by then.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     {
@@ -447,6 +432,23 @@ async fn main() -> anyhow::Result<()> {
 
             let _ = shutdown_tx.send(());
         });
+    }
+
+    // Wait for the default agent to be ready before starting the CLI.
+    let default_backend = state.agents.default_agent();
+    for i in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let ready = match &default_backend {
+            Some(agent) => agent.status().await.ready,
+            None => false,
+        };
+        if ready {
+            tracing::info!("Agent ready after {}s", i + 1);
+            break;
+        }
+        if i == 29 {
+            tracing::warn!("Agent not ready after 30s");
+        }
     }
 
     if let Some(cli_path) = cli_path {

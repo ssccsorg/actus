@@ -172,6 +172,20 @@ fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
+/// The pid of the first step that reached the stub, once it has.
+async fn wait_for_step_pid(log: &Path) -> u32 {
+    for _ in 0..200 {
+        if let Some(call) = calls(log)
+            .into_iter()
+            .find(|call| call.args.first().map(String::as_str) != Some("--help"))
+        {
+            return call.pid;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no step reached the stub");
+}
+
 async fn wait_for_reply(agent: &BrowserAgent, thread_id: &str) -> String {
     for _ in 0..600 {
         if let Some(session) = agent.thread(thread_id).await {
@@ -713,8 +727,42 @@ async fn a_step_that_times_out_records_it_and_leaves_no_process() {
     assert_eq!(invocations(&log).len(), 1);
 }
 
-/// One browser is one page: a second turn on the same thread waits for the
-/// first, so its first invocation follows the first turn's last one.
+#[tokio::test]
+async fn shutdown_kills_the_step_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("invocations.jsonl");
+    let mut opts = options(stub_bin(dir.path()), &log);
+    opts.env
+        .insert("BROWSER_STUB_SLEEP_ON".to_string(), "snapshot".to_string());
+    opts.env
+        .insert("BROWSER_STUB_SLEEP".to_string(), "10".to_string());
+    let agent = BrowserAgent::new("browser1".to_string(), &opts, dir.path().to_path_buf());
+
+    let receipt = agent
+        .submit(None, r#"{"steps":[{"op":"snapshot"},{"op":"get_title"}]}"#)
+        .await
+        .unwrap();
+    let pid = wait_for_step_pid(&log).await;
+    assert!(alive(pid), "the step is running");
+
+    let started = Instant::now();
+    agent.shutdown().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "shutdown does not wait out the step"
+    );
+    assert!(!alive(pid), "no step outlives the server");
+
+    // The step loop wakes, finds the step taken from it, and records the
+    // cancellation the way it does for a cancel: the page state at that step
+    // is unknown.
+    let record = record(&wait_for_reply(&agent, &receipt.thread_id).await);
+    assert_eq!(record["error"], "cancelled", "{record}");
+    assert_eq!(record["steps"][0]["op"], "snapshot", "{record}");
+}
+
+/// Two turns on one thread serialize: a second turn on the same thread waits
+/// for the first, so its first invocation follows the first turn's last one.
 #[tokio::test]
 async fn two_turns_on_one_thread_serialize() {
     let dir = tempfile::tempdir().unwrap();
