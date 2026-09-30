@@ -2,13 +2,13 @@
 
 ## Purpose
 
-This document records the relationship between actus, an agent execution runtime, and the LangGraph ecosystem. It serves two readers: a maintainer deciding whether to implement the declared `AgentKind::LangGraph` adapter, and an implementer mapping the `AgentBackend` trait onto the LangGraph Agent Server API.
+This document records the relationship between actus, an agent execution runtime, and the LangGraph ecosystem. It serves two readers: a maintainer deciding whether to implement a `langgraph` adapter factory, and an implementer mapping the `AgentBackend` trait onto the LangGraph Agent Server API.
 
 The analysis is grounded in the official LangGraph documentation and repositories as of this writing. Product naming in this area shifted recently (LangGraph Server became the Agent Server inside the LangSmith Deployment surface), so the document records the names that appear in the current docs and flags the ones that changed.
 
 ## Positioning
 
-Actus is an execution fabric. It exposes one `AgentBackend` trait and one REST API, and behind that surface it weaves whatever agent platform a task needs. The telos agent is the first adapter (ACP over WebSocket). LangGraph is the declared second platform kind, but no adapter exists yet.
+Actus is an execution fabric. It exposes one `AgentBackend` trait and one REST API, and behind that surface it weaves whatever agent platform a task needs. The telos agent is the first adapter (ACP over WebSocket). LangGraph was declared as the second platform kind; no adapter exists, and since issue #36 a kind is a registered factory, so an entry that names `langgraph` is refused at config load until one is registered.
 
 LangGraph is a graph-based agent orchestration framework with a server runtime. The ecosystem splits into layers:
 
@@ -93,7 +93,7 @@ LangSmith is the observability layer. Agent Server traces runs into LangSmith au
 
 ## Recommendation
 
-The analysis supports implementing `AgentKind::LangGraph` as the second adapter, with two prerequisites: agree on the interrupt-based approval payload contract, and select a per-agent multitask strategy. The work is a separate task subject; this document is the mapping reference for it.
+The analysis supports implementing a `langgraph` factory as the second adapter, with two prerequisites: agree on the interrupt-based approval payload contract, and select a per-agent multitask strategy. The work is a separate task subject; this document is the mapping reference for it.
 
 ## References
 
