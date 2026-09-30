@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use actus::agent::adapter::{FactoryRegistry, LaunchContext};
+use actus::agent::browser::BrowserFactory;
 use actus::agent::config::{load_config, load_control_policy, unquote_env_value};
 use actus::agent::ext_cli::ExtCliFactory;
 use actus::agent::native::NativeFactory;
@@ -293,6 +294,7 @@ async fn main() -> anyhow::Result<()> {
     factories.register_default(Arc::new(TelosFactory::new(telos_defaults)));
     factories.register(Arc::new(ExtCliFactory));
     factories.register(Arc::new(NativeFactory));
+    factories.register(Arc::new(BrowserFactory));
     // `langgraph` was declared as a platform before the factory seam and has
     // no adapter. A config that names it starts and skips that agent with a
     // warning, which is what actus did when the kind was an enum variant; a

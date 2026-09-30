@@ -72,6 +72,9 @@ agent.
   declared binary per turn (probe, per-agent workdir, request-scoped
   cancel).
 - `agent::native::NativeFactory`: the in-process reference kind.
+- `agent::browser::BrowserFactory`: the fill-only `browser` kind. A turn is
+  a plan of operations the adapter implements; there is no click, press,
+  eval, or submit, so a person submits the form.
 - Direct acts: the server performs file, git, rules, fetch, and symbol
   services in-process; they are acts with no agent attached.
 
@@ -171,6 +174,7 @@ its own defaults and validates what it declares.
 | `telos` (default) | `bin`, `ws_port`, `tool_approval`, `provider`, `model`, `model_display`, `base_url`, `api_key`, `reasoning_effort`, `mcp` | Sessionful over ACP/WebSocket; streaming, tools, and an approval surface; one turn at a time |
 | `ext_cli` | `bin`, `cli_args`, `cli_env`, `cli_prompt`, `cli_timeout_secs` | One-shot: one process per turn, parallel, threads in memory |
 | `native` | none | In-process reference adapter |
+| `browser` | `bin`, `cdp`, `headed`, `profile`, `session`, `init_script`, `domains`, `ops`, `env`, `timeout_secs` | Fill-only plan executor over the `agent-browser` CLI; one browser, one turn at a time |
 
 The LLM fields belong to the `telos` kind: a deployment whose model rejects
 the reasoning parameter declares `reasoning_effort = "none"`, and a typo
@@ -230,6 +234,46 @@ approval surface, and the model settings live inside the agent's own
 configuration, which actus does not read. The profile contract and
 integration notes are recorded in
 `docs/devlogs/2026-09-06-aux-agent-profiles.md`.
+
+### Browser Agents (fill-only)
+
+A `browser` agent drives a browser through the `agent-browser` CLI: it opens
+a page, reads it, and enters values into fields, and a person reviews the
+filled state and submits. The policy is the vocabulary, not an instruction.
+The operations the adapter implements are `open`, `snapshot`, `fill`,
+`get_attr`, `get_text`, `get_value`, `get_title`, `get_url`, `screenshot`,
+`tabs`, `wait`, and `close`. There is no click, no key press, no JavaScript,
+and no submit, so no configuration can name one, and a plan that does fails
+before any process starts. The `ops` option can only narrow the set further.
+
+A turn is a plan, as JSON:
+
+```json
+{"steps": [
+  {"op": "open", "url": "https://example.com/apply"},
+  {"op": "snapshot", "interactive": true},
+  {"op": "fill", "target": "#name", "value": "..."},
+  {"op": "get_attr", "target": "#bio", "name": "maxlength"}
+]}
+```
+
+The reply is a record of what each step printed, one entry per operation, so
+the filled state is inspectable before a person submits. Targets are the
+CLI's own, a CSS selector or a ref from the snapshot (`@e2`). Values arrive
+in the plan: the adapter reads no knowledge base, and the agent that planned
+the turn is where the text came from.
+
+Preview is a deployment choice. With `cdp = "9222"` the agent attaches to a
+Chrome a person started (with `--remote-debugging-port=9222`), and with
+`headed = true` it shows the window it launched itself; either way the person
+watches and submits. `profile` reuses login state, `session` isolates one
+browser from other agents, `init_script` registers a page script before the
+first navigation, and `domains` restricts where the browser may go.
+
+The adapter is one browser per agent: turns run one at a time, and the page
+survives between turns, so a follow-up plan can read what an earlier plan
+filled. The design record is
+`docs/devlogs/2026-09-30-browser-agent.md`.
 
 ### Meta Agents and the Control Surface
 
@@ -299,6 +343,7 @@ spawned per turn.
 | Telos | General execution agent: converts plans into system effects across files, commands, and network; sessionful and meta-capable through the control surface | ACP over WebSocket |
 | Native | In-process reference adapter: deterministic loop that proves the fabric seam without an external process | in-process |
 | Auxiliary (`ext_cli`) | One-shot raw-CLI acts attached by profile; first candidates are Ante (`-p` one-shot) and AURA (`--query` one-shot) | CLI (one process per turn) |
+| Browser (`browser`) | Fill-only browser executor: opens a page, reads it, enters values; a person submits. No click, press, eval, or submit exists | `agent-browser` CLI over CDP |
 | (planned) Research Agent | Literature search, experiment design | a registered kind |
 | (planned) Review Agent | Code review, compliance checking | a registered kind |
 | (planned) Deploy Agent | CI/CD, infrastructure management | a registered kind |
@@ -419,6 +464,7 @@ actus/
 │   │   ├── mod.rs       Execution fabric: AgentBackend, AgentRegistry, capabilities
 │   │   ├── adapter.rs   Adapter seam: AgentFactory, FactoryRegistry, LaunchContext
 │   │   ├── config.rs    Config loading: agent specs, control policy, env hygiene
+│   │   ├── browser.rs   browser kind: fill-only plan executor over agent-browser
 │   │   ├── ext_cli.rs   ext_cli kind: one-shot raw-CLI adapter and factory
 │   │   └── native.rs    native kind: in-process reference adapter and factory
 │   ├── server.rs        REST API routes and handlers

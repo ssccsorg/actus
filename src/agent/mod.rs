@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 pub mod adapter;
+pub mod browser;
 pub mod config;
 pub mod ext_cli;
 pub mod native;
