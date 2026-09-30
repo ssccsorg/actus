@@ -174,7 +174,7 @@ its own defaults and validates what it declares.
 | `telos` (default) | `bin`, `ws_port`, `tool_approval`, `provider`, `model`, `model_display`, `base_url`, `api_key`, `reasoning_effort`, `mcp` | Sessionful over ACP/WebSocket; streaming, tools, and an approval surface; one turn at a time |
 | `ext_cli` | `bin`, `cli_args`, `cli_env`, `cli_prompt`, `cli_timeout_secs` | One-shot: one process per turn, parallel, threads in memory |
 | `native` | none | In-process reference adapter |
-| `browser` | `bin`, `cdp`, `headed`, `profile`, `session`, `init_script`, `domains`, `ops`, `env`, `timeout_secs` | Fill-only plan executor over the `agent-browser` CLI; one browser, one turn at a time |
+| `browser` | `bin`, `cdp`, `namespace`, `headed`, `profile`, `session`, `init_script`, `domains`, `ops`, `env`, `timeout_secs` | Fill-only plan executor over the `agent-browser` CLI; one browser, one turn at a time |
 
 The LLM fields belong to the `telos` kind: a deployment whose model rejects
 the reasoning parameter declares `reasoning_effort = "none"`, and a typo
@@ -263,17 +263,38 @@ CLI's own, a CSS selector or a ref from the snapshot (`@e2`). Values arrive
 in the plan: the adapter reads no knowledge base, and the agent that planned
 the turn is where the text came from.
 
+A plan is held to what the CLI can express safely, and a plan that breaks one
+of these rules is refused before any process starts:
+
+- A positional that begins with `-` is refused, because the CLI reads it as
+  an option and has no separator to turn that off. A dash-leading fill value
+  would otherwise leave the field empty while the command still exits 0, so a
+  value that begins with `-` cannot be entered through this CLI at all.
+- A `screenshot` path must be relative, stay inside the agent's workdir, and
+  end in an image extension, since the CLI reads a bare word as a selector. It
+  is passed on absolute, because the CLI's daemon resolves a relative path
+  against its own working directory.
+- A plan has at most 64 steps, a `wait` of at most 30 seconds, and a whole-plan
+  budget of the smaller of the per-step timeout times the step count and 600
+  seconds. An unknown field in the options table, the plan, or a step is an
+  error rather than a key that is quietly dropped.
+
 Preview is a deployment choice. With `cdp = "9222"` the agent attaches to a
 Chrome a person started (with `--remote-debugging-port=9222`), and with
 `headed = true` it shows the window it launched itself; either way the person
 watches and submits. `profile` reuses login state, `session` isolates one
-browser from other agents, `init_script` registers a page script before the
-first navigation, and `domains` restricts where the browser may go.
+browser from other agents, `namespace` isolates the CLI's daemon sockets from
+another fleet on the same host, and `init_script` registers a page script
+before the first navigation. `domains` restricts where the browser may go, and
+it cannot be combined with `cdp` or `profile`: the CLI refuses that, because
+network containment cannot be installed over a browser it did not launch.
 
 The adapter is one browser per agent: turns run one at a time, and the page
 survives between turns, so a follow-up plan can read what an earlier plan
-filled. The design record is
-`docs/devlogs/2026-09-30-browser-agent.md`.
+filled. A cancel stops the step in flight and records that the page state at
+that step is unknown, so the record never claims more than it saw. The design
+record is `docs/devlogs/2026-09-30-browser-agent.md`, and the review that
+settled the rules above is `docs/devlogs/2026-09-30-browser-agent-review.md`.
 
 ### Meta Agents and the Control Surface
 
