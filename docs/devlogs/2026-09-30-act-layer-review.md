@@ -290,6 +290,27 @@ lets the absence harden, so the two recommendations that stand on their own
 (the session layer and the structured result) should proceed independently of
 that decision.
 
+## Status
+
+Two of the recommendations above have landed on this branch since this review,
+and the rest have not:
+
+- The session and turn layer moved into the fabric as `src/agent/session.rs`
+  (`ThreadStore`), with the three auxiliary kinds on it and telos untouched
+  (`refactor #18: give the auxiliary kinds one session layer, and one way to
+  kill a turn's process`). The same change folded the two copies of the group
+  kill into `src/agent/process.rs`, and pinned the store's contract in
+  `tests/session_test.rs`.
+- The exit path stops an auxiliary turn's process
+  (`fix #5: stop an auxiliary turn's process on the exit path`). That change
+  also moved the signal handler in `main.rs` ahead of the readiness wait, after
+  a live measurement showed a SIGTERM inside that window killing the server and
+  leaving the child running.
+
+Still open from the list: the capability declaration as a contract, the direct
+acts in the record, per-turn provenance, the adapter test kit, and the record
+ type that waits on nexus.
+
 ## What this review did not cover
 
 - Runtime behavior: nothing was executed, so every claim is a property of the
