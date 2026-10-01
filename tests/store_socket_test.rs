@@ -72,8 +72,8 @@ fn handle(stream: UnixStream, volume: Arc<Mutex<Volume>>) {
     }
 }
 
-fn bind(dir: &std::path::Path) -> (Arc<Mutex<Volume>>, std::path::PathBuf) {
-    let socket = dir.join("volume.sock");
+fn bind(dir: &std::path::Path, name: &str) -> (Arc<Mutex<Volume>>, std::path::PathBuf) {
+    let socket = dir.join(name);
     let listener = UnixListener::bind(&socket).expect("bind");
     let volume = Arc::new(Mutex::new(Volume::default()));
     serve(Arc::clone(&volume), listener);
@@ -122,7 +122,7 @@ fn from_hex(text: &str) -> Vec<u8> {
 #[test]
 fn a_thread_round_trips_through_record_names() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (volume, socket) = bind(dir.path());
+    let (volume, socket) = bind(dir.path(), "volume.sock");
     let store = SocketStore::new(socket.clone(), dir.path());
 
     assert_eq!(store.load().expect("load an empty volume").len(), 0);
@@ -178,7 +178,7 @@ fn a_thread_round_trips_through_record_names() {
 #[test]
 fn an_extension_appends_only_what_is_new() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (volume, socket) = bind(dir.path());
+    let (volume, socket) = bind(dir.path(), "volume.sock");
     let store = SocketStore::new(socket.clone(), dir.path());
 
     let mut threads = HashMap::new();
@@ -213,7 +213,7 @@ fn an_extension_appends_only_what_is_new() {
 #[test]
 fn a_first_start_seeds_from_the_document() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (volume, socket) = bind(dir.path());
+    let (volume, socket) = bind(dir.path(), "volume.sock");
 
     let mut threads = HashMap::new();
     threads.insert(
@@ -241,19 +241,31 @@ fn a_first_start_seeds_from_the_document() {
     assert_eq!(document["t1"].messages.len(), 1);
 }
 
-/// A store that was selected and cannot be pointed at is a misconfiguration, not a reason
-/// to serve the document instead.
+/// The environment selects the store, and a socket store with no variable naming a socket
+/// takes the one that follows the agent's own directory. A name that is not a store is a
+/// misconfiguration rather than a reason to serve the document instead.
 #[test]
-fn a_socket_store_without_a_socket_fails() {
+fn the_environment_selects_the_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (volume, _socket) = bind(dir.path(), "store.sock");
+
     unsafe {
         std::env::set_var("ACTUS_RECORD_STORE", "socket");
         std::env::remove_var("ACTUS_RECORD_STORE_SOCKET");
     }
-    let dir = tempfile::tempdir().expect("tempdir");
+    let store = actus::store::open(dir.path()).expect("the default socket is the store");
+    assert_eq!(store.load().expect("load").len(), 0);
+
+    let mut threads = HashMap::new();
+    threads.insert("t1".to_string(), thread(vec![message("user", "hi")], None));
+    store.persist(&threads).expect("persist");
+    assert!(volume.lock().unwrap().records.contains_key("thread/t1/0"));
+
+    unsafe { std::env::set_var("ACTUS_RECORD_STORE", "elsewhere") };
     let error = match actus::store::open(dir.path()) {
-        Ok(_) => panic!("a socket store without a socket must fail"),
+        Ok(_) => panic!("a name that is not a store must fail"),
         Err(error) => error,
     };
-    assert!(error.contains("ACTUS_RECORD_STORE_SOCKET"), "{error}");
+    assert!(error.contains("names no store"), "{error}");
     unsafe { std::env::remove_var("ACTUS_RECORD_STORE") };
 }

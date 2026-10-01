@@ -18,7 +18,7 @@ pub use document::DocumentStore;
 pub use socket::SocketStore;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::agent::ThreadSession;
@@ -26,8 +26,13 @@ use crate::agent::ThreadSession;
 /// The store a deployment selected. Absent means the document.
 pub const STORE_ENV: &str = "ACTUS_RECORD_STORE";
 
-/// The unix socket a `socket` store connects to. Required when the store is `socket`.
+/// The unix socket a `socket` store connects to. When it is not set, the socket is
+/// `store.sock` in the agent's own directory, which is what lets one host run one volume
+/// per agent without a per-agent variable to name it.
 pub const STORE_SOCKET_ENV: &str = "ACTUS_RECORD_STORE_SOCKET";
+
+/// The socket a `socket` store uses when the environment names none.
+pub const DEFAULT_SOCKET_FILE: &str = "store.sock";
 
 /// The store a host gets when it names none. Overridable, and that is why it is allowed.
 pub const DEFAULT_STORE: &str = "document";
@@ -53,13 +58,13 @@ pub fn open(dir: &Path) -> Result<Arc<dyn RecordStore>, String> {
     match name.as_str() {
         "document" => Ok(Arc::new(DocumentStore::new(dir.join("threads.json")))),
         "socket" => {
-            // The socket is the deployment's address and this module does not guess it: a
-            // store that was selected and cannot be pointed at is a misconfiguration, and
-            // it fails here rather than falling back to the document.
-            let socket = std::env::var(STORE_SOCKET_ENV).map_err(|_| {
-                format!("{STORE_ENV}=socket needs {STORE_SOCKET_ENV} to name the socket")
-            })?;
-            Ok(Arc::new(SocketStore::new(socket.into(), dir)))
+            // The socket is the deployment's address. An explicit one is used as it is;
+            // otherwise it follows the agent's own directory, because the environment is
+            // one value for the process and a host runs one volume per agent.
+            let socket = std::env::var(STORE_SOCKET_ENV)
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| dir.join(DEFAULT_SOCKET_FILE));
+            Ok(Arc::new(SocketStore::new(socket, dir)))
         }
         other => Err(format!(
             "{STORE_ENV}={other} names no store: the stores are {DEFAULT_STORE} and socket"
