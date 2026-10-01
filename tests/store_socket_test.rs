@@ -135,7 +135,7 @@ fn a_thread_round_trips_through_record_names() {
             Some("hi"),
         ),
     );
-    store.persist(&threads).expect("persist");
+    store.persist(threads.clone()).expect("persist");
 
     {
         let volume = volume.lock().unwrap();
@@ -166,7 +166,7 @@ fn a_thread_round_trips_through_record_names() {
 
     // A second persist of the same state writes nothing: the same name with the payload
     // it holds is a retry, and the stand-in would refuse anything else.
-    restarted.persist(&read).expect("persist again");
+    restarted.persist(read.clone()).expect("persist again");
     {
         let volume = volume.lock().unwrap();
         assert_eq!(volume.records.len(), 3, "a repeat appended nothing");
@@ -186,14 +186,14 @@ fn an_extension_appends_only_what_is_new() {
         "t1".to_string(),
         thread(vec![message("user", "hi")], Some("hi")),
     );
-    store.persist(&threads).expect("persist");
+    store.persist(threads.clone()).expect("persist");
     assert_eq!(volume.lock().unwrap().records.len(), 2);
 
     let mut grown = threads.clone();
     let thread = grown.get_mut("t1").unwrap();
     thread.messages.push(message("assistant", "hello"));
     thread.title = Some("hi again".to_string());
-    store.persist(&grown).expect("persist the extension");
+    store.persist(grown.clone()).expect("persist the extension");
 
     {
         let volume = volume.lock().unwrap();
@@ -231,7 +231,7 @@ fn a_first_start_seeds_from_the_document() {
     assert_eq!(loaded["t1"].messages.len(), 1, "the document is the seed");
     assert_eq!(volume.lock().unwrap().records.len(), 0, "nothing was deposited yet");
 
-    store.persist(&loaded).expect("persist");
+    store.persist(loaded.clone()).expect("persist");
     assert_eq!(volume.lock().unwrap().records.len(), 2, "a message and a title");
 
     // The document is read and never written, so giving the store up is complete.
@@ -258,7 +258,7 @@ fn the_environment_selects_the_store() {
 
     let mut threads = HashMap::new();
     threads.insert("t1".to_string(), thread(vec![message("user", "hi")], None));
-    store.persist(&threads).expect("persist");
+    store.persist(threads.clone()).expect("persist");
     assert!(volume.lock().unwrap().records.contains_key("thread/t1/0"));
 
     unsafe { std::env::set_var("ACTUS_RECORD_STORE", "elsewhere") };

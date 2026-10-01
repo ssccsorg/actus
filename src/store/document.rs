@@ -59,9 +59,9 @@ impl RecordStore for DocumentStore {
         Ok(threads)
     }
 
-    fn persist(&self, threads: &HashMap<String, ThreadSession>) -> Result<(), String> {
+    fn persist(&self, threads: HashMap<String, ThreadSession>) -> Result<(), String> {
         let json =
-            serde_json::to_string_pretty(threads).map_err(|e| format!("serialize threads: {e}"))?;
+            serde_json::to_string_pretty(&threads).map_err(|e| format!("serialize threads: {e}"))?;
         std::fs::write(&self.path, json).map_err(|e| format!("write {}: {e}", self.path.display()))
     }
 }

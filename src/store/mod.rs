@@ -31,11 +31,15 @@ pub const STORE_ENV: &str = "ACTUS_RECORD_STORE";
 /// per agent without a per-agent variable to name it.
 pub const STORE_SOCKET_ENV: &str = "ACTUS_RECORD_STORE_SOCKET";
 
-/// The socket a `socket` store uses when the environment names none.
-pub const DEFAULT_SOCKET_FILE: &str = "store.sock";
+/// The document that holds the record, named once for both stores: it is where the
+/// document store writes and where the socket store seeds from.
+const DOCUMENT_FILE: &str = "threads.json";
 
 /// The store a host gets when it names none. Overridable, and that is why it is allowed.
-pub const DEFAULT_STORE: &str = "document";
+const DEFAULT_STORE: &str = "document";
+
+/// The socket a `socket` store uses when the environment names none.
+const DEFAULT_SOCKET_FILE: &str = "store.sock";
 
 /// A thread's record, kept and read back outside the router.
 ///
@@ -48,7 +52,11 @@ pub trait RecordStore: Send + Sync {
 
     /// Persist the current state of every thread. [`load`](Self::load) must read back what
     /// this wrote.
-    fn persist(&self, threads: &HashMap<String, ThreadSession>) -> Result<(), String>;
+    ///
+    /// The snapshot is the caller's copy and this call consumes it: a caller that keeps its
+    /// own state passes a copy, and an implementation may take the snapshot apart rather
+    /// than copy it a second time.
+    fn persist(&self, threads: HashMap<String, ThreadSession>) -> Result<(), String>;
 }
 
 /// Open the store this deployment selected. `dir` is the agent's own directory, and an
@@ -56,7 +64,7 @@ pub trait RecordStore: Send + Sync {
 pub fn open(dir: &Path) -> Result<Arc<dyn RecordStore>, String> {
     let name = std::env::var(STORE_ENV).unwrap_or_else(|_| DEFAULT_STORE.to_string());
     match name.as_str() {
-        "document" => Ok(Arc::new(DocumentStore::new(dir.join("threads.json")))),
+        "document" => Ok(Arc::new(DocumentStore::new(dir.join(DOCUMENT_FILE)))),
         "socket" => {
             // The socket is the deployment's address. An explicit one is used as it is;
             // otherwise it follows the agent's own directory, because the environment is

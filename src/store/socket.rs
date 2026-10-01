@@ -48,7 +48,7 @@ const TITLE_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 ///
 /// A label for the writer rather than an address of one instance, so a default is allowed
 /// and it is overridable: a deployment that wants its own attribution names it here.
-pub const CREATOR_ENV: &str = "ACTUS_RECORD_STORE_CREATOR";
+const CREATOR_ENV: &str = "ACTUS_RECORD_STORE_CREATOR";
 const DEFAULT_CREATOR: &str = "actus";
 
 /// How long a call waits for the store's answer before giving up.
@@ -58,7 +58,7 @@ const DEFAULT_CREATOR: &str = "actus";
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The name of a thread's head document, which is actus's own and is not a record.
-pub const HEAD_FILE: &str = "heads.json";
+const HEAD_FILE: &str = "heads.json";
 
 /// One connection's two halves, kept together so a buffered read cannot lose the bytes
 /// that follow the answer it wanted.
@@ -94,7 +94,7 @@ impl SocketStore {
         Self {
             socket,
             head: dir.join(HEAD_FILE),
-            seed: dir.join("threads.json"),
+            seed: dir.join(super::DOCUMENT_FILE),
             link: Mutex::new(None),
             deposited: Mutex::new(HashMap::new()),
             titled: Mutex::new(HashMap::new()),
@@ -280,8 +280,8 @@ impl RecordStore for SocketStore {
         Ok(threads)
     }
 
-    fn persist(&self, threads: &HashMap<String, ThreadSession>) -> Result<(), String> {
-        for (id, thread) in threads {
+    fn persist(&self, mut threads: HashMap<String, ThreadSession>) -> Result<(), String> {
+        for (id, thread) in &threads {
             let from = {
                 let deposited = self.deposited.lock().unwrap();
                 deposited.get(id).copied().unwrap_or(0)
@@ -327,12 +327,12 @@ impl RecordStore for SocketStore {
         }
 
         // The head is actus's own: the thread list, the routing fields, and the title text
-        // as a cache. It carries no messages, which is what keeps a persist small.
-        let mut heads = threads.clone();
-        for thread in heads.values_mut() {
+        // as a cache. It carries no messages, which is what keeps a persist small, and the
+        // snapshot this call was given is taken apart rather than copied to write it.
+        for thread in threads.values_mut() {
             thread.messages.clear();
         }
-        let json = serde_json::to_string(&heads).map_err(|e| format!("serialize heads: {e}"))?;
+        let json = serde_json::to_string(&threads).map_err(|e| format!("serialize heads: {e}"))?;
         std::fs::write(&self.head, json).map_err(|e| format!("write {}: {e}", self.head.display()))
     }
 }

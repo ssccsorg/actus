@@ -410,7 +410,7 @@ impl TelosManager {
     /// Write the full threads file synchronously. Used at shutdown, where
     /// the process is about to exit and the debounced saver may not run.
     pub fn flush_threads(&self) {
-        if let Err(e) = self.store.persist(&self.threads) {
+        if let Err(e) = self.store.persist(self.threads.clone()) {
             tracing::error!("Failed to persist threads: {}", e);
         }
     }
@@ -438,7 +438,7 @@ impl TelosManager {
                     (mgr.threads.clone(), mgr.store.clone())
                 };
                 tokio::task::spawn_blocking(move || {
-                    if let Err(e) = store.persist(&snapshot) {
+                    if let Err(e) = store.persist(snapshot) {
                         tracing::error!("Failed to persist threads: {}", e);
                     }
                 })
