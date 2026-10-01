@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use actus::agent::{AgentBackend, AgentKind, AgentRegistry};
+use actus::store::RecordStore;
 use actus::telos::backend::TelosBackend;
 use actus::telos::control::handle_telos_event;
 use actus::telos::{WsCommandTx, TelosManager};
@@ -14,6 +15,7 @@ fn telos_manager(dir: &std::path::Path) -> TelosManager {
         "127.0.0.1:9999".to_string(),
         dir,
     )
+    .expect("document store")
 }
 
 #[test]
@@ -36,11 +38,14 @@ fn telos_backend() -> TelosBackend {
 
 fn telos_backend_named(name: &str) -> TelosBackend {
     let dir = tempfile::tempdir().expect("tempdir");
-    let manager = Arc::new(RwLock::new(TelosManager::new(
-        "ses_test".to_string(),
-        "127.0.0.1:9999".to_string(),
-        dir.path(),
-    )));
+    let manager = Arc::new(RwLock::new(
+        TelosManager::new(
+            "ses_test".to_string(),
+            "127.0.0.1:9999".to_string(),
+            dir.path(),
+        )
+        .expect("document store"),
+    ));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
     TelosBackend {
         name: name.to_string(),
@@ -310,7 +315,7 @@ fn load_threads_repairs_turn_counter_drift() {
     f.write_all(serde_json::to_string_pretty(&map).unwrap().as_bytes())
         .unwrap();
 
-    let loaded = TelosManager::load_threads(&threads_file);
+    let loaded = actus::store::DocumentStore::new(threads_file.clone()).load().expect("load");
     let repaired = loaded.get("t1").expect("thread loaded");
     assert_eq!(repaired.turn_completed, 2, "counter must be repaired to message count");
 
@@ -329,7 +334,7 @@ fn load_threads_repairs_turn_counter_drift() {
     let mut f = std::fs::File::create(&threads_file).unwrap();
     f.write_all(serde_json::to_string_pretty(&map2).unwrap().as_bytes())
         .unwrap();
-    let loaded = TelosManager::load_threads(&threads_file);
+    let loaded = actus::store::DocumentStore::new(threads_file.clone()).load().expect("load");
     let repaired = loaded.get("t1").unwrap();
     assert_eq!(repaired.turn_completed, 2, "tool_call entries must be excluded");
 }

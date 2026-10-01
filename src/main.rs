@@ -369,11 +369,10 @@ async fn main() -> anyhow::Result<()> {
                     spec.name,
                     &uuid::Uuid::new_v4().to_string()[..8]
                 );
-                let manager = Arc::new(RwLock::new(TelosManager::new(
-                    session_id.clone(),
-                    ws_host.clone(),
-                    &threads_dir,
-                )));
+                let manager = Arc::new(RwLock::new(
+                    TelosManager::new(session_id.clone(), ws_host.clone(), &threads_dir)
+                        .map_err(anyhow::Error::msg)?,
+                ));
                 let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
                 monitors.push((manager.clone(), ws_tx.clone()));
 

@@ -32,11 +32,14 @@ fn test_state() -> (SharedState, tempfile::TempDir) {
 /// a disconnected backend cannot produce one.
 fn test_state_with_manager() -> (SharedState, tempfile::TempDir, Manager) {
     let workdir = tempfile::tempdir().expect("tempdir");
-    let manager: Manager = Arc::new(RwLock::new(TelosManager::new(
-        "ses_test".to_string(),
-        "127.0.0.1:9999".to_string(),
-        workdir.path(),
-    )));
+    let manager: Manager = Arc::new(RwLock::new(
+        TelosManager::new(
+            "ses_test".to_string(),
+            "127.0.0.1:9999".to_string(),
+            workdir.path(),
+        )
+        .expect("document store"),
+    ));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
     let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend {
         name: "telos".to_string(),
@@ -94,11 +97,14 @@ fn two_agent_state() -> (SharedState, tempfile::TempDir, Manager, Manager) {
     for (name, project) in [("one", "/srv/one"), ("two", "/srv/two")] {
         let threads_dir = workdir.path().join(name);
         std::fs::create_dir_all(&threads_dir).expect("threads dir");
-        let manager: Manager = Arc::new(RwLock::new(TelosManager::new(
-            format!("ses_{name}"),
-            "127.0.0.1:9999".to_string(),
-            &threads_dir,
-        )));
+        let manager: Manager = Arc::new(RwLock::new(
+            TelosManager::new(
+                format!("ses_{name}"),
+                "127.0.0.1:9999".to_string(),
+                &threads_dir,
+            )
+            .expect("document store"),
+        ));
         let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
         let backend: Arc<dyn AgentBackend> = Arc::new(TelosBackend {
             name: name.to_string(),

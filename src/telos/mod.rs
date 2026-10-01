@@ -17,7 +17,7 @@ pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Strin
 /// Truncate `s` to at most `max` bytes without splitting a UTF-8
 /// character. Returns the original string when it is already short
 /// enough; otherwise the longest prefix that ends on a char boundary.
-fn truncate_utf8(s: &str, max: usize) -> &str {
+pub(crate) fn truncate_utf8(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
     }
@@ -31,7 +31,7 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
 // Telos manager — WebSocket connection, session management, and settings bootstrap
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -54,8 +54,9 @@ pub struct TelosManager {
     pub pending_requests: HashMap<String, String>,
     /// Mapping from telos_thread_id to local_thread_id (for reverse lookup)
     pub thread_id_map: HashMap<String, String>,
-    /// Path to the threads persistence file
-    pub threads_file: PathBuf,
+    /// Where this agent's thread record lives. The store owns its shape; the
+    /// manager only asks it to load and to persist.
+    pub store: Arc<dyn crate::store::RecordStore>,
     /// Threads that have been activated (context sent) in the current Telos session
     pub threads_activated: HashSet<String>,
     /// Notifier for thread state changes (SSE consumers)
@@ -93,9 +94,9 @@ pub struct TelosManager {
 }
 
 impl TelosManager {
-    pub fn new(session_id: String, ws_host: String, threads_dir: &Path) -> Self {
-        let threads_file = threads_dir.join("threads.json");
-        let threads = Self::load_threads(&threads_file);
+    pub fn new(session_id: String, ws_host: String, threads_dir: &Path) -> Result<Self, String> {
+        let store = crate::store::open(threads_dir)?;
+        let threads = store.load()?;
 
         // Rebuild thread_id_map from persisted threads that have an acp_thread_id
         let mut thread_id_map = HashMap::new();
@@ -107,7 +108,7 @@ impl TelosManager {
 
         let (thread_notify, _) = watch::channel(0u64);
 
-        Self {
+        Ok(Self {
             session_id,
             ws_host,
             telos_connected: false,
@@ -116,7 +117,7 @@ impl TelosManager {
             threads,
             pending_requests: HashMap::new(),
             thread_id_map,
-            threads_file,
+            store,
             threads_activated: HashSet::new(),
             thread_notify,
             thread_waiters: HashMap::new(),
@@ -128,7 +129,7 @@ impl TelosManager {
             prior_message_content: HashMap::new(),
             sentinel_cap: 512,
             threads_dirty: AtomicBool::new(false),
-        }
+        })
     }
 
     /// Prepare the user message, injecting conversation context if this
@@ -409,15 +410,8 @@ impl TelosManager {
     /// Write the full threads file synchronously. Used at shutdown, where
     /// the process is about to exit and the debounced saver may not run.
     pub fn flush_threads(&self) {
-        match serde_json::to_string_pretty(&self.threads) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&self.threads_file, &json) {
-                    tracing::error!("Failed to write threads file: {}", e);
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to serialize threads: {}", e);
-            }
+        if let Err(e) = self.store.persist(&self.threads) {
+            tracing::error!("Failed to persist threads: {}", e);
         }
     }
 
@@ -439,119 +433,19 @@ impl TelosManager {
                 if !dirty {
                     continue;
                 }
-                let (snapshot, path) = {
+                let (snapshot, store) = {
                     let mgr = manager.read().await;
-                    (mgr.threads.clone(), mgr.threads_file.clone())
+                    (mgr.threads.clone(), mgr.store.clone())
                 };
                 tokio::task::spawn_blocking(move || {
-                    match serde_json::to_string_pretty(&snapshot) {
-                        Ok(json) => {
-                            if let Err(e) = std::fs::write(&path, &json) {
-                                tracing::error!("Failed to write threads file: {}", e);
-                            }
-                        }
-                        Err(e) => tracing::error!("Failed to serialize threads: {}", e),
+                    if let Err(e) = store.persist(&snapshot) {
+                        tracing::error!("Failed to persist threads: {}", e);
                     }
                 })
                 .await
                 .ok();
             }
         });
-    }
-
-    /// Load threads from a JSON file. Returns an empty map if the file does not exist or is unreadable.
-    /// Fills in missing titles from the first user message for backward compatibility.
-    pub fn load_threads(path: &Path) -> HashMap<String, ThreadSession> {
-        if !path.exists() {
-            return HashMap::new();
-        }
-        match std::fs::read_to_string(path) {
-            Ok(content) => match serde_json::from_str::<HashMap<String, ThreadSession>>(&content) {
-                Ok(mut threads) => {
-                    // Backfill titles for threads saved before the title field existed
-                    for thread in threads.values_mut() {
-                        if thread.title.is_none() {
-                            if let Some(first_user) =
-                                thread.messages.iter().find(|m| m.role == "user")
-                            {
-                                let content = first_user.content.trim();
-                                let mut truncated = truncate_utf8(content, 80).to_string();
-                                if content.len() > 80 {
-                                    truncated.push_str("...");
-                                }
-                                thread.title = Some(truncated);
-                            }
-                        }
-                    }
-                    // Repair a historical bug where streaming updates to the
-                    // same message id were appended instead of replaced
-                    // (Telos emits thinking, tool call, and answer messages
-                    // with interleaved ids), swelling a turn into dozens of
-                    // duplicate entries. Keep the last occurrence of each id
-                    // and drop the earlier duplicates; user messages and
-                    // id-less entries are kept as-is.
-                    for thread in threads.values_mut() {
-                        let mut seen: std::collections::HashSet<String> =
-                            std::collections::HashSet::new();
-                        let mut kept: Vec<ThreadMessage> =
-                            Vec::with_capacity(thread.messages.len());
-                        for m in std::mem::take(&mut thread.messages) {
-                            match &m.message_id {
-                                Some(id) if !seen.insert(id.clone()) => {
-                                    tracing::warn!(
-                                        "Dropping duplicate message id {} in thread {}",
-                                        id,
-                                        thread.id
-                                    );
-                                }
-                                _ => kept.push(m),
-                            }
-                        }
-                        thread.messages = kept;
-                    }
-                    // Repair a historical index drift: an errored or
-                    // cancelled turn used to bump turn_completed without
-                    // adding an assistant message, so persisted threads
-                    // can have turn_completed > assistant-message count.
-                    // Poll and SSE address assistant messages by turn
-                    // index, so the counter must not point past them.
-                    for thread in threads.values_mut() {
-                        let text_assistants = thread
-                            .messages
-                            .iter()
-                            .filter(|m| {
-                                m.role == "assistant"
-                                    && m.entry_type.as_deref() != Some("tool_call")
-                            })
-                            .count();
-                        if thread.turn_completed > text_assistants as u64 {
-                            tracing::warn!(
-                                "Repairing turn_completed {} -> {} ({} assistant msgs) for thread {}",
-                                thread.turn_completed,
-                                text_assistants,
-                                text_assistants,
-                                thread.id
-                            );
-                            thread.turn_completed = text_assistants as u64;
-                        }
-                    }
-                    tracing::info!("Loaded {} threads from {}", threads.len(), path.display());
-                    threads
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to deserialize threads from {}: {}",
-                        path.display(),
-                        e
-                    );
-                    HashMap::new()
-                }
-            },
-            Err(e) => {
-                tracing::error!("Failed to read threads file {}: {}", path.display(), e);
-                HashMap::new()
-            }
-        }
     }
 
     /// Send a JSON command to Telos via WebSocket. Returns error if not connected.
