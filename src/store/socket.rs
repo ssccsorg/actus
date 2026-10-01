@@ -238,6 +238,39 @@ impl SocketStore {
             .map_err(|e| format!("{} is not a thread document: {e}", path.display()))?;
         Ok(Some(threads))
     }
+
+    /// Refuse to seed onto a volume that already holds another writer's records.
+    ///
+    /// A record never changes, so a name this store would take and did not write is a name
+    /// it can never take: every deposit is refused, and a turn then lives only in memory
+    /// until the process ends. That is a startup failure here instead, and the message
+    /// names both ways out.
+    fn ensure_a_fresh_volume(&self, threads: &HashMap<String, ThreadSession>) -> Result<(), String> {
+        let described = self.call(&serde_json::json!({ "verb": "describe" }))?;
+        let count = described["count"].as_u64().unwrap_or(0);
+        if count == 0 {
+            return Ok(());
+        }
+        for (id, thread) in threads {
+            let Some(first) = thread.messages.first() else {
+                continue;
+            };
+            let name = message_name(id, 0);
+            let Some(held) = self.payload(&name)? else {
+                continue;
+            };
+            let ours = serde_json::to_vec(first)
+                .map_err(|e| format!("serialize a message of {id}: {e}"))?;
+            if held != ours {
+                return Err(format!(
+                    "the volume on {} holds {count} records, and {name} is not the record this store would write there. A volume belongs to one writer: give that volume up, or serve the document with {}=document.",
+                    self.socket.display(),
+                    super::STORE_ENV,
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl RecordStore for SocketStore {
@@ -246,6 +279,7 @@ impl RecordStore for SocketStore {
             Some(threads) => threads,
             None => match Self::read_document(&self.seed)? {
                 Some(threads) => {
+                    self.ensure_a_fresh_volume(&threads)?;
                     tracing::info!(
                         "the record store has no head of its own; seeding from {}",
                         self.seed.display()

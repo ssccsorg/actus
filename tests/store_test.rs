@@ -73,24 +73,26 @@ fn the_document_is_the_default_and_holds_the_messages() {
     unsafe { std::env::remove_var("ACTUS_RECORD_STORE") };
 }
 
-/// The socket store and the document store are different files: the socket store reads the
-/// document to seed itself and never writes it, so a volume that cannot be reached leaves
-/// the document exactly as it was and a switch back is complete.
+/// The socket store and the document store are different files. A volume that cannot be
+/// reached fails when the manager loads, which is startup, and it leaves the document
+/// exactly as it was, so a switch back is complete.
 #[test]
-fn a_volume_that_cannot_be_reached_leaves_the_document_alone() {
+fn a_volume_that_cannot_be_reached_fails_at_startup() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     let document = actus::store::open(dir.path()).expect("the document");
     document.persist(stored("from the document")).expect("persist");
     let before = std::fs::read_to_string(dir.path().join("threads.json")).expect("the document");
 
-    // With no head of its own the store seeds from the document, which needs no socket.
+    // Nothing serves this socket, so the store fails where it is opened rather than
+    // answering from the document and calling it a volume.
     let socket = SocketStore::new(dir.path().join("store.sock"), dir.path());
-    let seeded = socket.load().expect("the document seeds it");
-    assert_eq!(seeded["t1"].messages.len(), 2);
+    let error = match socket.load() {
+        Ok(_) => panic!("a volume nobody serves must fail at startup"),
+        Err(error) => error,
+    };
+    assert!(error.contains("connect"), "{error}");
 
-    // The deposit needs the socket, and there is none, so it fails without writing a head.
-    assert!(socket.persist(seeded).is_err(), "a socket nobody serves cannot be deposited to");
     let after = std::fs::read_to_string(dir.path().join("threads.json")).expect("the document");
     assert_eq!(before, after, "the document was not touched");
     assert!(!dir.path().join("heads.json").exists(), "no head was written");

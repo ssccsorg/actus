@@ -56,6 +56,10 @@ fn handle(stream: UnixStream, volume: Arc<Mutex<Volume>>) {
                     }
                 }
             }
+            "describe" => {
+                let volume = volume.lock().unwrap();
+                serde_json::json!({ "ok": true, "format": "test", "count": volume.records.len() })
+            }
             "read_payload" => {
                 let name = request["name"].as_str().expect("a name");
                 let volume = volume.lock().unwrap();
@@ -239,6 +243,40 @@ fn a_first_start_seeds_from_the_document() {
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("threads.json")).unwrap())
             .unwrap();
     assert_eq!(document["t1"].messages.len(), 1);
+}
+
+/// A volume another writer filled is refused when the store seeds, because a name this
+/// store would take and did not write is a volume it can never add to: every deposit would
+/// be refused and a turn would live only in memory.
+#[test]
+fn a_volume_another_writer_filled_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (volume, socket) = bind(dir.path(), "volume.sock");
+    volume.lock().unwrap().records.insert(
+        "thread/t1/0".to_string(),
+        b"{\"role\":\"user\",\"content\":\"another writer\"}".to_vec(),
+    );
+
+    let mut threads = HashMap::new();
+    threads.insert(
+        "t1".to_string(),
+        thread(vec![message("user", "mine")], None),
+    );
+    std::fs::write(
+        dir.path().join("threads.json"),
+        serde_json::to_string(&threads).expect("serialize"),
+    )
+    .expect("the document");
+
+    let store = SocketStore::new(socket, dir.path());
+    let error = match store.load() {
+        Ok(_) => panic!("a volume another writer filled must be refused"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("one writer") && error.contains("thread/t1/0"),
+        "{error}"
+    );
 }
 
 /// The environment selects the store, and a socket store with no variable naming a socket
