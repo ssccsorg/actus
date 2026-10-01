@@ -7,6 +7,7 @@ pub mod context;
 pub mod control;
 pub mod files;
 pub mod git;
+pub mod run;
 pub mod server;
 pub mod store;
 pub mod telos;

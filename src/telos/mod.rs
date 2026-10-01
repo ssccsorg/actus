@@ -94,8 +94,21 @@ pub struct TelosManager {
 }
 
 impl TelosManager {
+    /// Open the manager over the store this deployment's environment selects.
     pub fn new(session_id: String, ws_host: String, threads_dir: &Path) -> Result<Self, String> {
-        let store = crate::store::open(threads_dir)?;
+        Self::with_store(session_id, ws_host, crate::store::open(threads_dir)?)
+    }
+
+    /// The same, with the store the caller supplies.
+    ///
+    /// The composition root calls this. A build that links an engine of its own passes a
+    /// store that reaches that engine, so one process serves and no socket or second
+    /// supervisor sits between the record and the server.
+    pub fn with_store(
+        session_id: String,
+        ws_host: String,
+        store: Arc<dyn crate::store::RecordStore>,
+    ) -> Result<Self, String> {
         let threads = store.load()?;
 
         // Rebuild thread_id_map from persisted threads that have an acp_thread_id
