@@ -239,6 +239,12 @@ impl<V: Volume> VolumeStore<V> {
                     let title = self.read_titles(&id)?;
                     title_versions.insert(id.clone(), title.versions);
                     let mut thread = thread;
+                    // A listing orders by the last message's time, and a head written before
+                    // this shape carries none: it is taken here, where the messages are
+                    // already in hand, rather than left to a read per thread later.
+                    if thread.updated_at.is_none() {
+                        thread.updated_at = messages.last().map(|m| m.timestamp);
+                    }
                     thread.messages.clear();
                     if title.text.is_some() {
                         thread.title = title.text;
@@ -294,6 +300,11 @@ impl<V: Volume> VolumeStore<V> {
         }
         let mut threads = threads;
         for thread in threads.values_mut() {
+            // The last message's time is what a listing orders by and the messages are in
+            // hand here, so it is kept rather than derived from the record later.
+            if thread.updated_at.is_none() {
+                thread.updated_at = thread.messages.last().map(|m| m.timestamp);
+            }
             thread.messages.clear();
         }
         threads
@@ -349,6 +360,12 @@ impl<V: Volume> VolumeStore<V> {
 impl<V: Volume> RecordStore for VolumeStore<V> {
     fn describe(&self) -> String {
         format!("{} volume at {}", self.volume.kind(), self.volume.place())
+    }
+
+    /// This store appends a record per message, so a snapshot that carries a thread's
+    /// metadata and not its messages is a thread with nothing new to record.
+    fn needs_whole_state(&self) -> bool {
+        false
     }
 
     fn load(&self) -> Result<HashMap<String, ThreadSession>, String> {
@@ -447,7 +464,28 @@ impl<V: Volume> RecordStore for VolumeStore<V> {
                 deposited.insert(id.clone(), *count as u64);
             }
         }
-        Ok(head.threads)
+        // A head written before a thread's activity time was carried has none for it, and a
+        // listing orders by it. The thread's last record answers it, one read per thread that
+        // lacks one, and the next persist writes it back. A thread with no messages has no
+        // time to take and keeps whatever it has.
+        let counts = head.counts.clone();
+        let mut threads = head.threads;
+        for (id, thread) in threads.iter_mut() {
+            if thread.updated_at.is_some() {
+                continue;
+            }
+            let count = counts.get(id).copied().unwrap_or(0);
+            if count == 0 {
+                continue;
+            }
+            let Some(bytes) = self.payload(&message_name(id, count as u64 - 1))? else {
+                continue;
+            };
+            if let Ok(last) = serde_json::from_slice::<ThreadMessage>(&bytes) {
+                thread.updated_at = Some(last.timestamp);
+            }
+        }
+        Ok(threads)
     }
 
     fn message_count(&self, id: &str) -> Result<usize, String> {
@@ -485,11 +523,17 @@ impl<V: Volume> RecordStore for VolumeStore<V> {
 
     fn persist(&self, mut threads: HashMap<String, ThreadSession>) -> Result<(), String> {
         for (id, thread) in &threads {
-            let from = {
+            // The cursor is how many messages this store holds for the thread, and it is
+            // what says where a caller's list begins. A caller that holds only the threads
+            // it touched sends the rest with no messages, which is not a thread that lost
+            // them: a record cannot be removed, so the cursor never moves back, and a list
+            // shorter than it writes nothing.
+            let held = {
                 let deposited = self.deposited.lock().unwrap();
                 deposited.get(id).copied().unwrap_or(0)
             };
-            for position in from..thread.messages.len() as u64 {
+            let total = thread.messages.len() as u64;
+            for position in held.min(total)..total {
                 let message = &thread.messages[position as usize];
                 let bytes = serde_json::to_vec(message)
                     .map_err(|e| format!("serialize a message of {id}: {e}"))?;
@@ -503,7 +547,7 @@ impl<V: Volume> RecordStore for VolumeStore<V> {
             self.deposited
                 .lock()
                 .unwrap()
-                .insert(id.clone(), thread.messages.len() as u64);
+                .insert(id.clone(), held.max(total));
 
             let mut titled = self.titled.lock().unwrap();
             let state = titled.entry(id.clone()).or_default();
@@ -538,12 +582,17 @@ impl<V: Volume> RecordStore for VolumeStore<V> {
             ..Default::default()
         };
         {
-            let mut counts = self.counts.lock().unwrap();
-            counts.clear();
+            // A thread the caller does not hold arrives with no messages, and its count is
+            // the one the head already carries. The two are taken together, higher wins,
+            // because a thread whose records are not all in hand must not read as empty.
+            let before = self.counts.lock().unwrap().clone();
+            let mut counts = HashMap::new();
             for (id, thread) in &threads {
-                counts.insert(id.clone(), thread.messages.len());
+                let held = thread.messages.len();
+                counts.insert(id.clone(), held.max(before.get(id).copied().unwrap_or(0)));
             }
-            head.counts = counts.clone();
+            *self.counts.lock().unwrap() = counts.clone();
+            head.counts = counts;
         }
         {
             let titled = self.titled.lock().unwrap();

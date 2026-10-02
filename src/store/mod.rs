@@ -73,6 +73,18 @@ pub trait RecordStore: Send + Sync {
     /// Every thread the store holds, with its messages.
     fn load(&self) -> Result<HashMap<String, ThreadSession>, String>;
 
+    /// Whether [`persist`](Self::persist) needs every thread's messages.
+    ///
+    /// A store that writes one document needs the whole state, because what it writes
+    /// replaces what it had. A store that records one message at a time does not: a thread
+    /// whose messages the caller does not hold is a thread with no new record, and the
+    /// store's own count and title state carry what it already has. A caller that holds only
+    /// the threads it touched, which is what keeps a host's memory off the volume's size,
+    /// asks this before it decides.
+    fn needs_whole_state(&self) -> bool {
+        true
+    }
+
     /// Persist the current state of every thread. [`load`](Self::load) must read back what
     /// this wrote.
     ///

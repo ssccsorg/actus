@@ -48,8 +48,15 @@ pub struct TelosManager {
     pub agent_ready: bool,
     /// Channel to send WebSocket commands to Telos
     pub ws_tx: Option<mpsc::UnboundedSender<String>>,
-    /// Threads managed by this Telos instance
+    /// Threads managed by this Telos instance, as their metadata and, for a thread this
+    /// session has touched, its messages. A store that does not need the whole state is
+    /// asked for the index, and a thread's messages are read from it when the thread is
+    /// first worked on, so what a host holds is the threads in use rather than the volume.
     pub threads: HashMap<String, ThreadSession>,
+    /// The threads of `threads` whose messages are in hand, which is what `hold` fills and
+    /// `window` and `message_count` read. A store that needs the whole state loads every
+    /// thread, so the set is every id and the behavior is the one this manager always had.
+    pub held: HashSet<String>,
     /// Mapping from request_id to acp_thread_id (for correlating responses)
     pub pending_requests: HashMap<String, String>,
     /// Mapping from telos_thread_id to local_thread_id (for reverse lookup)
@@ -109,7 +116,21 @@ impl TelosManager {
         ws_host: String,
         store: Arc<dyn crate::store::RecordStore>,
     ) -> Result<Self, String> {
-        let threads = store.load()?;
+        // A store that records one message at a time does not need every thread's messages
+        // to persist, so the index is what is loaded and the messages of a thread are read
+        // when the thread is worked on. A store that writes one document needs the whole
+        // state, and it is loaded whole, which is the behavior this manager always had.
+        let whole = store.needs_whole_state();
+        let threads = if whole {
+            store.load()?
+        } else {
+            store.load_index()?
+        };
+        let held: HashSet<String> = if whole {
+            threads.keys().cloned().collect()
+        } else {
+            HashSet::new()
+        };
 
         // Rebuild thread_id_map from persisted threads that have an acp_thread_id
         let mut thread_id_map = HashMap::new();
@@ -128,6 +149,7 @@ impl TelosManager {
             agent_ready: false,
             ws_tx: None,
             threads,
+            held,
             pending_requests: HashMap::new(),
             thread_id_map,
             store,
@@ -145,6 +167,65 @@ impl TelosManager {
         })
     }
 
+    /// Read a thread's messages into hand, if they are not already there.
+    ///
+    /// A thread the index holds is metadata only, so anything that reads a thread's messages
+    /// asks for them first. That is what keeps a listing and a health check from paying for a
+    /// volume they do not read, and what makes the first turn of a resumed thread the moment
+    /// its history is read.
+    fn hold(&mut self, thread_id: &str) -> Result<(), String> {
+        if self.held.contains(thread_id) || !self.threads.contains_key(thread_id) {
+            return Ok(());
+        }
+        let messages = self.store.load_messages(thread_id, 0, usize::MAX)?;
+        if let Some(thread) = self.threads.get_mut(thread_id) {
+            thread.messages = messages;
+        }
+        self.held.insert(thread_id.to_string());
+        Ok(())
+    }
+
+    /// How many messages a thread holds.
+    ///
+    /// From memory when the thread is in hand and from the store otherwise, which is what a
+    /// listing counts without reading the volume behind it.
+    pub fn message_count(&self, thread_id: &str) -> Result<usize, String> {
+        if self.held.contains(thread_id) {
+            if let Some(thread) = self.threads.get(thread_id) {
+                return Ok(thread.messages.len());
+            }
+        }
+        self.store.message_count(thread_id)
+    }
+
+    /// A window of a thread's messages, by position.
+    ///
+    /// From memory when the thread is in hand and from the store otherwise, so a view opens
+    /// on a conversation without the whole of it being read into this process.
+    pub fn window(
+        &self,
+        thread_id: &str,
+        from: usize,
+        limit: usize,
+    ) -> Result<Vec<ThreadMessage>, String> {
+        if self.held.contains(thread_id) {
+            if let Some(thread) = self.threads.get(thread_id) {
+                let end = from.saturating_add(limit).min(thread.messages.len());
+                if from >= end {
+                    return Ok(Vec::new());
+                }
+                return Ok(thread.messages[from..end].to_vec());
+            }
+        }
+        self.store.load_messages(thread_id, from, limit)
+    }
+
+    /// The last `limit` messages of a thread, which is what a live turn's reader wants.
+    pub fn tail(&self, thread_id: &str, limit: usize) -> Result<Vec<ThreadMessage>, String> {
+        let total = self.message_count(thread_id)?;
+        self.window(thread_id, total.saturating_sub(limit), limit)
+    }
+
     /// Prepare the user message, injecting conversation context if this
     /// thread has not been activated in the current Telos session yet.
     pub fn prepare_message(&mut self, thread_id: &str, user_message: &str) -> String {
@@ -154,6 +235,12 @@ impl TelosManager {
                 thread.acp_thread_id = None;
             }
             self.thread_id_map.retain(|_, v| v != thread_id);
+            // The context is the whole conversation, so the thread's history is read here.
+            // A store that cannot answer it is named rather than silently dropping the
+            // context: a turn without it reads to the model as a new conversation.
+            if let Err(e) = self.hold(thread_id) {
+                tracing::warn!("reading the history of {thread_id} failed: {e}");
+            }
             if let Some(ctx) = self.format_conversation_context(thread_id) {
                 return format!("{}\n\n{}", ctx, user_message);
             }
@@ -186,6 +273,10 @@ impl TelosManager {
                     parent: None,
                 },
             );
+            // A thread made here has its messages in hand by construction, so it is not one
+            // the index describes: without this, the first turn on it would read the thread
+            // back from the store and drop what was written in between.
+            self.held.insert(id.clone());
             self.notify_thread_change();
             self.save_threads();
         }
@@ -250,6 +341,9 @@ impl TelosManager {
     /// trailing block ends at the last user message, which is the turn
     /// boundary.
     pub fn record_prior_entries(&mut self, thread_id: &str) {
+        if let Err(e) = self.hold(thread_id) {
+            tracing::warn!("reading the history of {thread_id} failed: {e}");
+        }
         let Some(thread) = self.threads.get(thread_id) else {
             return;
         };
@@ -322,6 +416,12 @@ impl TelosManager {
         tool_name: Option<String>,
         tool_status: Option<String>,
     ) {
+        // What a message is compared against is the thread, so a thread the index holds is
+        // read before the compare: without it an id already in the record would be appended
+        // as a second copy, which is the swelling this compare exists to prevent.
+        if let Err(e) = self.hold(thread_id) {
+            tracing::error!("reading the history of {thread_id} failed: {e}");
+        }
         if let Some(thread) = self.threads.get_mut(thread_id) {
             if let Some(ref mid) = message_id {
                 // Same-turn streaming update: the id exists in the thread
@@ -338,6 +438,7 @@ impl TelosManager {
                         existing.entry_type = entry_type;
                         existing.tool_name = tool_name;
                         existing.tool_status = tool_status;
+                        thread.updated_at = Some(chrono::Utc::now());
                         self.notify_thread_change();
                         self.save_threads();
                         return;
@@ -372,6 +473,9 @@ impl TelosManager {
                 tool_status,
                 timestamp: chrono::Utc::now(),
             });
+            // A listing orders by this and never reads the messages, so it is carried in the
+            // thread's metadata rather than derived from the record on every listing.
+            thread.updated_at = Some(chrono::Utc::now());
         }
         self.notify_thread_change();
         self.save_threads();

@@ -219,24 +219,6 @@ impl ThreadSession {
     pub fn last_message_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.messages.iter().map(|message| message.timestamp).max()
     }
-
-    /// The messages of the turn in flight: what the agent has written since the
-    /// person's last message, which is the turn's boundary.
-    ///
-    /// A turn writes several messages in sequence (thinking, tool calls, then the
-    /// answer), so neither "the last message" nor "the last assistant message"
-    /// names it: before the turn's first message arrives, the last assistant message
-    /// of the thread is the previous turn's. Empty before a turn's first message and
-    /// on a thread nobody has written in.
-    pub fn turn_messages(&self) -> &[ThreadMessage] {
-        let start = self
-            .messages
-            .iter()
-            .rposition(|message| message.role == "user")
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        &self.messages[start..]
-    }
 }
 
 /// Uniform execution interface implemented by every platform adapter.
@@ -300,6 +282,39 @@ pub trait AgentBackend: Send + Sync {
 
     /// Snapshot of all threads owned by this backend.
     async fn threads(&self) -> Vec<ThreadSession>;
+
+    /// How many messages a thread holds, from the backend's own record.
+    ///
+    /// The default counts the snapshot [`thread`](Self::thread) returns, which is what a
+    /// backend holding its threads in memory can do. A backend over a store answers from the
+    /// store's index, which is what lets a listing count without holding the record.
+    async fn message_count(&self, thread_id: &str) -> usize {
+        self.thread(thread_id)
+            .await
+            .map(|thread| thread.messages.len())
+            .unwrap_or(0)
+    }
+
+    /// A window of a thread's messages, by position.
+    ///
+    /// The default takes the window from the snapshot [`thread`](Self::thread) returns,
+    /// which is what a backend holding its threads in memory can do. A backend over a store
+    /// reads the window alone, so a view costs the window and not the conversation.
+    async fn messages_window(
+        &self,
+        thread_id: &str,
+        from: usize,
+        limit: usize,
+    ) -> Vec<ThreadMessage> {
+        let Some(thread) = self.thread(thread_id).await else {
+            return Vec::new();
+        };
+        let end = from.saturating_add(limit).min(thread.messages.len());
+        if from >= end {
+            return Vec::new();
+        }
+        thread.messages[from..end].to_vec()
+    }
 
     /// Watch channel that fires on every thread state change. Polling
     /// source for SSE consumers.

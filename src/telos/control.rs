@@ -420,10 +420,9 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 // instead of letting consumers see a silent success with
                 // zero content.
                 let last_is_user = mgr
-                    .threads
-                    .get(&local_id)
-                    .and_then(|t| t.messages.last())
-                    .map(|m| m.role == "user")
+                    .tail(&local_id, 1)
+                    .ok()
+                    .and_then(|tail| tail.last().map(|m| m.role == "user"))
                     .unwrap_or(false);
                 if last_is_user {
                     tracing::warn!(

@@ -12,8 +12,8 @@ use tokio::sync::watch;
 use tokio::sync::{Notify, RwLock};
 
 use crate::agent::{
-    AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadParent,
-    ThreadSession,
+    AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
+    ThreadParent, ThreadSession,
 };
 use crate::telos::{TelosManager, WsCommandTx};
 
@@ -110,9 +110,15 @@ impl AgentBackend for TelosBackend {
                 return Err("agent not connected or not ready".to_string());
             }
             let tid = mgr.get_or_create_thread(thread_id);
-            let is_new = match mgr.threads.get(&tid) {
-                Some(t) => t.messages.is_empty(),
-                None => true,
+            // A thread the index holds has no messages in hand, so the count is what says
+            // whether this is its first turn. Read off the messages, every resumed thread
+            // would read as new.
+            let is_new = match mgr.message_count(&tid) {
+                Ok(n) => n == 0,
+                Err(e) => {
+                    tracing::warn!("cannot count the messages of {tid}: {e}");
+                    true
+                }
             };
             mgr.set_title(&tid, message);
             let enriched = mgr.prepare_message(&tid, message);
@@ -255,6 +261,27 @@ impl AgentBackend for TelosBackend {
             .values()
             .cloned()
             .collect()
+    }
+
+    async fn message_count(&self, thread_id: &str) -> usize {
+        self.manager
+            .read()
+            .await
+            .message_count(thread_id)
+            .unwrap_or(0)
+    }
+
+    async fn messages_window(
+        &self,
+        thread_id: &str,
+        from: usize,
+        limit: usize,
+    ) -> Vec<ThreadMessage> {
+        self.manager
+            .read()
+            .await
+            .window(thread_id, from, limit)
+            .unwrap_or_default()
     }
 
     async fn subscribe(&self) -> watch::Receiver<u64> {

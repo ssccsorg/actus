@@ -20,7 +20,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 
 use crate::agent::config::ControlPolicy;
-use crate::agent::{AgentBackend, AgentRegistry, AgentStatus, ThreadParent};
+use crate::agent::{AgentBackend, AgentRegistry, AgentStatus, ThreadMessage, ThreadParent};
 use crate::context;
 use crate::files;
 use crate::git;
@@ -263,6 +263,67 @@ const THREAD_WINDOW_DEFAULT: usize = 100;
 /// response the size of the reading rather than the size of the thread.
 const THREAD_WINDOW_MAX: usize = 500;
 
+/// How many of a thread's last messages a live turn's reader looks at.
+///
+/// A running turn writes its entries at the end of the thread, so the last assistant
+/// message is within a few of the tail. A bounded tail is what lets the stream follow a turn
+/// without the conversation the turn belongs to being held.
+const STREAM_TAIL: usize = 64;
+
+/// The turn in flight: every message after the person's last one in the thread.
+///
+/// A turn is not addressable by number, because it writes several messages, so the turn is
+/// found by its boundary: the message after the last user message. The search walks the
+/// thread's tail backwards a window at a time, so what is held is the turn rather than the
+/// conversation the turn grew out of, and a thread the backend does not hold is read from
+/// the record instead of the whole of it.
+async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<ThreadMessage> {
+    /// Messages one step of the backwards walk carries.
+    const CHUNK: usize = 64;
+
+    let total = agent.message_count(thread_id).await;
+    let mut collected: Vec<ThreadMessage> = Vec::new();
+    let mut end = total;
+    while end > 0 {
+        let from = end.saturating_sub(CHUNK);
+        let window = agent.messages_window(thread_id, from, end - from).await;
+        if window.is_empty() {
+            break;
+        }
+        match window.iter().rposition(|message| message.role == "user") {
+            Some(index) => {
+                let mut turn: Vec<ThreadMessage> = window[index + 1..].to_vec();
+                turn.extend(collected);
+                return turn;
+            }
+            None => {
+                let mut chunk = window;
+                chunk.extend(collected);
+                collected = chunk;
+                end = from;
+            }
+        }
+    }
+    collected
+}
+
+/// The last assistant message of a thread, read from a tail of it.
+///
+/// A turn emits several entries (thinking, tool call, answer), so the message a stream
+/// follows is the last one whose role is assistant, and it is at the end of a thread being
+/// written to. The count is the backend's, so a thread the backend does not hold is not read
+/// to find the end.
+async fn last_assistant(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Option<ThreadMessage> {
+    let total = agent.message_count(thread_id).await;
+    let from = total.saturating_sub(STREAM_TAIL);
+    agent
+        .messages_window(thread_id, from, STREAM_TAIL)
+        .await
+        .into_iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+}
+
 /// The thread listing's own query, because it takes one parameter the other agent
 /// routes do not: a request that means every agent rather than one.
 #[derive(Deserialize)]
@@ -399,17 +460,9 @@ async fn chat_stream(
         // index-by-turn lookup is not possible; seeding last_content from
         // the latest message means a resumed thread never re-emits old
         // content.
-        let mut last_content = agent_stream
-            .thread(&tid)
+        let mut last_content = last_assistant(&agent_stream, &tid)
             .await
-            .map(|t| {
-                t.messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "assistant")
-                    .map(|m| m.content.clone())
-                    .unwrap_or_default()
-            })
+            .map(|message| message.content)
             .unwrap_or_default();
         let mut done = false;
         let mut rx = agent_stream.subscribe().await;
@@ -440,13 +493,14 @@ async fn chat_stream(
             let thread = agent_stream.thread(&tid).await;
 
             if let Some(thread) = thread {
-                let msg_count = thread.messages.len();
+                let msg_count = agent_stream.message_count(&tid).await;
                 let turn_comp = thread.turn_completed;
-                let last_assistant = thread
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "assistant")
+                // The message the stream follows is read from a tail of the thread rather
+                // than from the whole of it, which is what a backend over a store answers
+                // without the conversation being held.
+                let last_msg = last_assistant(&agent_stream, &tid).await;
+                let last_assistant = last_msg
+                    .as_ref()
                     .map(|m| (m.content.len(), m.entry_type.as_deref().unwrap_or("")));
 
                 if poll_count.is_multiple_of(100) || msg_count > 1 {
@@ -456,16 +510,10 @@ async fn chat_stream(
                     );
                 }
 
-                // Find the most recent assistant message (with tool metadata).
-                let last_msg = thread
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "assistant");
-                let assistant_content = last_msg.map(|m| m.content.as_str()).unwrap_or("");
-                let entry_type = last_msg.and_then(|m| m.entry_type.as_deref());
-                let tool_name = last_msg.and_then(|m| m.tool_name.as_deref());
-                let tool_status = last_msg.and_then(|m| m.tool_status.as_deref());
+                let assistant_content = last_msg.as_ref().map(|m| m.content.as_str()).unwrap_or("");
+                let entry_type = last_msg.as_ref().and_then(|m| m.entry_type.as_deref());
+                let tool_name = last_msg.as_ref().and_then(|m| m.tool_name.as_deref());
+                let tool_status = last_msg.as_ref().and_then(|m| m.tool_status.as_deref());
 
                 // Yield delta. Robust to model edits: when the message
                 // content does not extend the previously emitted content
@@ -569,12 +617,15 @@ async fn list_threads(
             // message is the default for one that does not, which is every chat
             // adapter, and `created_at` covers a thread nobody has written in.
             let updated_at = thread.updated_at.or_else(|| thread.last_message_at());
+            // The count is the backend's, because the snapshot a listing holds is a
+            // thread's metadata and not the messages a count would be read off.
+            let message_count = backend.message_count(&thread.id).await;
             rows.push((
                 updated_at.unwrap_or(thread.created_at),
                 ThreadSummary {
                     id: thread.id,
                     title: thread.title,
-                    message_count: thread.messages.len(),
+                    message_count,
                     created_at: thread.created_at.to_rfc3339(),
                     updated_at: updated_at.map(|at| at.to_rfc3339()),
                     agent: agent.clone(),
@@ -598,7 +649,9 @@ async fn get_thread(
     let agent = agent_for(&state, q.agent.as_deref()).await?;
     match agent.thread(&thread_id).await {
         Some(thread) => {
-            let total = thread.messages.len();
+            // The end is the backend's count and the window is what is read, so a view is
+            // opened without the conversation being read into this process whole.
+            let total = agent.message_count(&thread_id).await;
             let limit = q
                 .limit
                 .unwrap_or(THREAD_WINDOW_DEFAULT)
@@ -606,8 +659,9 @@ async fn get_thread(
             // No `from` is the end of the thread rather than its start: a conversation is
             // read from where it is, and the tail is where a view opens.
             let from = q.from.unwrap_or(total.saturating_sub(limit)).min(total);
-            let end = (from + limit).min(total);
-            let messages: Vec<serde_json::Value> = thread.messages[from..end]
+            let messages: Vec<serde_json::Value> = agent
+                .messages_window(&thread_id, from, limit)
+                .await
                 .iter()
                 .map(|m| {
                     serde_json::json!({
@@ -723,7 +777,7 @@ async fn poll_thread(
     let known_turn = query.turn.unwrap_or(0);
     let completed = thread.turn_completed > known_turn;
 
-    let turn = thread.turn_messages();
+    let turn = read_turn(&agent, &thread_id).await;
     let messages: Vec<PollMessage> = turn
         .iter()
         .map(|message| PollMessage {

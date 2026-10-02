@@ -111,7 +111,7 @@ fn thread(n: usize) -> ThreadSession {
         parent: None,
         messages,
         created_at: chrono::Utc::now(),
-        updated_at: None,
+        updated_at: Some(chrono::Utc::now()),
         completed: true,
         acp_thread_id: Some("acp-1".to_string()),
         turn_completed: 1,
@@ -182,6 +182,34 @@ fn contract(store: &dyn RecordStore) {
         .load_messages("t1", 9, 3)
         .expect("past the end")
         .is_empty());
+
+    // A snapshot that carries a thread's metadata and not its messages is what a caller
+    // holding only the threads it touched sends. A store that does not need the whole state
+    // keeps what it has, which is what keeps a host's memory off the volume's size.
+    if !store.needs_whole_state() {
+        let before = store.message_count("t1").expect("count");
+        let mut touched = store.load_index().expect("index");
+        let thread = touched.get_mut("t1").expect("the thread is in the index");
+        thread.messages.clear();
+        thread.title = Some("a new title".to_string());
+        store.persist(touched).expect("persist a metadata-only snapshot");
+        assert_eq!(
+            store.message_count("t1").expect("count"),
+            before,
+            "the count of a thread the caller does not hold survives"
+        );
+        let read = store.load().expect("load");
+        assert_eq!(
+            read["t1"].messages.len(),
+            before,
+            "and so do the messages"
+        );
+        assert_eq!(
+            read["t1"].title.as_deref(),
+            Some("a new title"),
+            "a metadata change the caller does hold lands"
+        );
+    }
 }
 
 /// A head written before the counts existed is migrated, not read as an empty one.
