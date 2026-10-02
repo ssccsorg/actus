@@ -47,14 +47,39 @@ struct TitleState {
     text: Option<String>,
 }
 
+/// The head shape this build writes. A head that does not carry it is from another shape,
+/// and reading one as this one would answer an empty thread list rather than fail.
+const HEAD_VERSION: u32 = 1;
+
+/// What the head file can hold: this build's shape, or the shape before the counts existed.
+///
+/// The bare shape is recognized rather than refused, because the volume is the authority
+/// for the counts and the migration is derivable: a thread's count is one read per name
+/// until the names run out, which is what the index did before the head carried them. An
+/// unknown version is refused, since nothing derives it.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum HeadFile {
+    Versioned(Head),
+    Bare(HashMap<String, ThreadSession>),
+}
+
 /// Actus's own document for a volume.
 ///
 /// It carries the thread list and the routing fields, as it always did, and two things the
 /// record cannot supply cheaply: how many messages a thread holds, and how many title
 /// versions it has. Both are derived from the records and are rebuilt from the volume by
 /// the migration path, so losing the head loses the list and not the records.
+///
+/// The version names this shape and is required, so a head of a version this build does not
+/// read is refused rather than parsed with defaulted fields: read as this one it would
+/// answer no threads, the first persist would write that back, and the list would be gone
+/// while the records stayed, which is the kind of loss that looks like an empty account
+/// rather than an error. The shape before the counts carried no version at all, which
+/// [`HeadFile`] recognizes and migrates.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Head {
+    version: u32,
     #[serde(default)]
     threads: HashMap<String, ThreadSession>,
     #[serde(default)]
@@ -159,15 +184,66 @@ impl<V: Volume> VolumeStore<V> {
     }
 
     /// Read actus's head, or nothing when it is not there.
+    ///
+    /// The shape before the counts existed is recognized and migrated: its counts are read
+    /// out of the volume, which is the authority for them, so a host that upgrades keeps its
+    /// list and its counts. An unknown version is refused, because nothing derives it, and a
+    /// head read as an empty one is the loss this refusal exists for.
     fn read_head(&self) -> Result<Option<Head>, String> {
         if !self.head.exists() {
             return Ok(None);
         }
         let content = std::fs::read_to_string(&self.head)
             .map_err(|e| format!("read {}: {e}", self.head.display()))?;
-        let head: Head = serde_json::from_str(&content)
-            .map_err(|e| format!("{} is not a head document: {e}", self.head.display()))?;
-        Ok(Some(head))
+        let file: HeadFile = serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "the head at {} is not one this build reads ({e}). Delete it to seed from the document, which is not written here: rm {}",
+                self.head.display(),
+                self.head.display(),
+            )
+        })?;
+        match file {
+            HeadFile::Versioned(head) => {
+                if head.version != HEAD_VERSION {
+                    return Err(format!(
+                        "the head at {} is version {}, and this build reads version {}. Delete it to seed from the document, which is not written here: rm {}",
+                        self.head.display(),
+                        head.version,
+                        HEAD_VERSION,
+                        self.head.display(),
+                    ));
+                }
+                Ok(Some(head))
+            }
+            HeadFile::Bare(threads) => {
+                tracing::info!(
+                    "the head at {} is the shape before the counts; reading them out of {}",
+                    self.head.display(),
+                    self.volume.place()
+                );
+                let mut counts = HashMap::new();
+                let mut title_versions = HashMap::new();
+                let mut indexed = HashMap::new();
+                for (id, thread) in threads {
+                    let (messages, _) = self.read_messages(&id)?;
+                    counts.insert(id.clone(), messages.len());
+                    let title = self.read_titles(&id)?;
+                    title_versions.insert(id.clone(), title.versions);
+                    let mut thread = thread;
+                    thread.messages.clear();
+                    if title.text.is_some() {
+                        thread.title = title.text;
+                    }
+                    indexed.insert(id, thread);
+                }
+                Ok(Some(Head {
+                    version: HEAD_VERSION,
+                    threads: indexed,
+                    counts,
+                    title_versions,
+                }))
+            }
+        }
     }
 
     /// Read a thread document, or nothing when it is not there.
@@ -444,7 +520,10 @@ impl<V: Volume> RecordStore for VolumeStore<V> {
         // cache, and the counts a window needs. It carries no messages, which is what keeps
         // a persist small, and the snapshot this call was given is taken apart rather than
         // copied to write it.
-        let mut head = Head::default();
+        let mut head = Head {
+            version: HEAD_VERSION,
+            ..Default::default()
+        };
         {
             let mut counts = self.counts.lock().unwrap();
             counts.clear();

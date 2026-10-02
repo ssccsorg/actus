@@ -176,6 +176,83 @@ fn contract(store: &dyn RecordStore) {
         .is_empty());
 }
 
+/// A head written before the counts existed is migrated, not read as an empty one.
+///
+/// This is the loss the shape change could hide: the head before the counts existed was a
+/// bare map of threads, and read as this build's it would answer no threads at all. The
+/// next persist would write that emptiness back, the records would stay in the volume, and
+/// the account would look empty instead of broken. The counts and title versions live in
+/// the volume, which is the authority for them, so the migration derives them and the host
+/// keeps its list.
+#[test]
+fn a_head_before_the_counts_is_migrated() {
+    let dir = tempfile::tempdir().expect("dir");
+    let volume = MemVolume::default();
+
+    // A store writes the records and its own head; the head is then replaced by the older
+    // bare shape, which is what a host that upgrades has on disk.
+    VolumeStore::new(volume.clone(), dir.path())
+        .persist(state(3))
+        .expect("persist");
+    let mut older = HashMap::new();
+    older.insert("t1".to_string(), thread(0));
+    std::fs::write(
+        dir.path().join("heads.json"),
+        serde_json::to_string(&older).expect("serialize"),
+    )
+    .expect("write the older head");
+
+    // A store opened over it keeps the list and derives the counts from the volume.
+    let reopened = VolumeStore::new(volume, dir.path());
+    let index = reopened.load_index().expect("the older head migrates");
+    assert_eq!(index.len(), 1, "the thread list survives");
+    assert_eq!(
+        index["t1"].messages.len(),
+        0,
+        "the index holds no messages"
+    );
+    assert_eq!(index["t1"].title.as_deref(), Some("a title"));
+    assert_eq!(reopened.message_count("t1").expect("count"), 3);
+    assert_eq!(
+        reopened.load().expect("load")["t1"].messages.len(),
+        3,
+        "and the record is intact"
+    );
+}
+
+/// A head of a version this build does not read is refused, and the refusal names the file.
+///
+/// The version is what tells a head of another shape from this one, and nothing derives an
+/// unknown version, so it is refused rather than read as an empty list.
+#[test]
+fn a_head_of_an_unknown_version_is_refused() {
+    let dir = tempfile::tempdir().expect("dir");
+    let volume = MemVolume::default();
+
+    std::fs::write(
+        dir.path().join("heads.json"),
+        serde_json::json!({
+            "version": 99,
+            "threads": {},
+            "counts": {},
+            "title_versions": {},
+        })
+        .to_string(),
+    )
+    .expect("write a head of another version");
+
+    let store = VolumeStore::new(volume, dir.path());
+    let error = store
+        .load_index()
+        .expect_err("a version this build does not read is refused");
+    assert!(error.contains("heads.json"), "the file is named: {error}");
+    assert!(error.contains("version 99"), "the version is named: {error}");
+
+    // The refusal is in the load path the server takes, not only the index.
+    let error = store.load().expect_err("and in load too");
+    assert!(error.contains("heads.json"), "{error}");
+}
+
 /// The contract above, run against every store a deployment can select.
 ///
 /// The list is the selector's own, so a store added there without an entry here fails this
