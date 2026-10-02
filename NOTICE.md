@@ -5,7 +5,7 @@
 The actus source code (`src/`, `*.py`, `run.sh`, `Cargo.toml`) is licensed
 under the Apache License 2.0 (see `LICENSE`).
 
-Copyright (c) 2026 SSCCS Foundation.
+Copyright (c) 2026 SSCCS Initiative.
 
 ## Agent processes
 
