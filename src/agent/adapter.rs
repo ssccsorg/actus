@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use crate::agent::config::AgentSpec;
 use crate::agent::AgentBackend;
+use crate::store::StoreFactory;
 
 /// What a factory needs from actus to launch an agent. Everything here is
 /// fabric state, not platform state: the server's own directories, port,
-/// and token.
+/// token, and the store an agent's record goes to.
 pub struct LaunchContext {
     /// The server working directory. A spec that names no workdir inherits
     /// this one.
@@ -25,6 +26,9 @@ pub struct LaunchContext {
     pub http_port: u16,
     /// The bearer token such an agent presents.
     pub api_token: String,
+    /// Where this agent's record lives. The composition root decides, so a
+    /// build that links an engine of its own reaches it.
+    pub store: StoreFactory,
 }
 
 /// One running agent and the process hands actus holds for it.

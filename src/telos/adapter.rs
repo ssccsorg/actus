@@ -3,8 +3,8 @@
 // Everything telos-specific about running an agent lives here: the option
 // table the kind reads, the WebSocket server the agent connects back to,
 // the settings and credentials it starts from, the reconnect monitor, and
-// the flush on shutdown. `main.rs` registers this factory and never sees a
-// telos field.
+// the flush on shutdown. The composition root registers this factory and
+// never sees a telos field.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -103,11 +103,14 @@ impl AgentFactory for TelosFactory {
             spec.name,
             &uuid::Uuid::new_v4().to_string()[..8]
         );
-        let manager = Arc::new(RwLock::new(TelosManager::new(
-            session_id.clone(),
-            ws_host.clone(),
-            &threads_dir,
-        )));
+        // The record goes to the store the composition root supplied for this
+        // agent's own directory, so a deployment that links an engine of its
+        // own reaches it and the plain binary keeps the document it had.
+        let store = (ctx.store)(&threads_dir).map_err(anyhow::Error::msg)?;
+        let manager = Arc::new(RwLock::new(
+            TelosManager::with_store(session_id.clone(), ws_host.clone(), store)
+                .map_err(anyhow::Error::msg)?,
+        ));
         let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
 
         // Per-agent WebSocket server (the agent connects back here).

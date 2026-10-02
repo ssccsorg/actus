@@ -224,6 +224,7 @@ fn launch_context(dir: &std::path::Path) -> LaunchContext {
         threads_root: dir.to_path_buf(),
         http_port: 0,
         api_token: "test-token".to_string(),
+        store: Arc::new(|dir: &std::path::Path| actus::store::open(dir)),
     }
 }
 
