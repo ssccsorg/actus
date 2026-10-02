@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::agent::ThreadSession;
+use crate::agent::{ThreadMessage, ThreadSession};
 
 /// The store a deployment selected. Absent means the document.
 pub const STORE_ENV: &str = "ACTUS_RECORD_STORE";
@@ -42,6 +42,14 @@ const DOCUMENT_FILE: &str = "threads.json";
 
 /// The store a host gets when it names none. Overridable, and that is why it is allowed.
 const DEFAULT_STORE: &str = "document";
+
+/// Every store name a deployment can select, in one place.
+///
+/// The selector below resolves these, and the integrity suite asserts it covers every one:
+/// a name added here without a suite entry fails the suite rather than reaching a
+/// deployment unexercised. A name a build composes in rather than names, which is what the
+/// product does with the engine, is covered on that side.
+pub const STORES: &[&str] = &["document", "socket"];
 
 /// The socket a `socket` store uses when the environment names none.
 const DEFAULT_SOCKET_FILE: &str = "store.sock";
@@ -62,6 +70,57 @@ pub trait RecordStore: Send + Sync {
     /// own state passes a copy, and an implementation may take the snapshot apart rather
     /// than copy it a second time.
     fn persist(&self, threads: HashMap<String, ThreadSession>) -> Result<(), String>;
+
+    /// Every thread the store holds, without its messages.
+    ///
+    /// A caller that only needs what a thread says about itself, its identifier, its title,
+    /// its routing fields, and how many messages it holds, asks this rather than [`load`]
+    /// and holds a listing's worth of state rather than the record's.
+    ///
+    /// The default strips the messages from [`load`], which is what a store that keeps one
+    /// document can do and no better. A store that can answer from an index overrides it.
+    fn load_index(&self) -> Result<HashMap<String, ThreadSession>, String> {
+        let mut threads = self.load()?;
+        for thread in threads.values_mut() {
+            thread.messages.clear();
+        }
+        Ok(threads)
+    }
+
+    /// How many messages a thread holds.
+    ///
+    /// A window needs a thread's end, and the end is this. The default answers from
+    /// [`load`]; a store whose index carries the count answers without reading the volume.
+    fn message_count(&self, id: &str) -> Result<usize, String> {
+        Ok(self
+            .load()?
+            .get(id)
+            .map(|thread| thread.messages.len())
+            .unwrap_or(0))
+    }
+
+    /// A window of a thread's messages, by position.
+    ///
+    /// `from` is a message's position in the thread and `limit` bounds how many are
+    /// returned, so what a caller holds is the window rather than the thread. The default
+    /// loads the whole store and slices, which is what a store that cannot do better
+    /// answers; a store that addresses a record by name reads the window alone.
+    fn load_messages(
+        &self,
+        id: &str,
+        from: usize,
+        limit: usize,
+    ) -> Result<Vec<ThreadMessage>, String> {
+        let threads = self.load()?;
+        let Some(thread) = threads.get(id) else {
+            return Ok(Vec::new());
+        };
+        let end = from.saturating_add(limit).min(thread.messages.len());
+        if from >= end {
+            return Ok(Vec::new());
+        }
+        Ok(thread.messages[from..end].to_vec())
+    }
 }
 
 /// Open the store this deployment selected. `dir` is the agent's own directory, and an
@@ -80,7 +139,8 @@ pub fn open(dir: &Path) -> Result<Arc<dyn RecordStore>, String> {
             Ok(Arc::new(VolumeStore::new(SocketVolume::new(socket), dir)))
         }
         other => Err(format!(
-            "{STORE_ENV}={other} names no store: the stores are {DEFAULT_STORE} and socket"
+            "{STORE_ENV}={other} names no store: the stores are {}",
+            STORES.join(", ")
         )),
     }
 }

@@ -154,11 +154,24 @@ fn a_thread_round_trips_through_record_names() {
     }
 
     // The head is actus's own document, and it carries no messages: it is what keeps a
-    // persist small.
-    let head: HashMap<String, ThreadSession> =
-        serde_json::from_str(&std::fs::read_to_string(dir.path().join("heads.json")).expect("head"))
-            .expect("a thread document");
-    assert!(head["t1"].messages.is_empty(), "the head holds a thread list, not a log");
+    // persist small. It also carries the counts a windowed read needs, which is what lets
+    // a reader find a thread's tail without reading the volume.
+    let head: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("heads.json")).expect("head"),
+    )
+    .expect("a head document");
+    assert!(
+        head["threads"]["t1"]["messages"]
+            .as_array()
+            .expect("the thread list")
+            .is_empty(),
+        "the head holds a thread list, not a log"
+    );
+    assert_eq!(
+        head["counts"]["t1"].as_u64(),
+        Some(2),
+        "the count a window needs"
+    );
 
     // A store that has just started reads the same thread back.
     let restarted = SocketStore::new(SocketVolume::new(socket.clone()), dir.path());

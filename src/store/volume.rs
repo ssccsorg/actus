@@ -3,14 +3,18 @@
 //! A name resolves to a record's address, so a record never changes and a growing value
 //! cannot live under one name. That fixes the shapes: one message is one record at a
 //! position, a title is one record per change, and the thread list comes from a document
-//! this store owns, because a name is not enumerable and the list is the one thing a name
-//! cannot supply.
+//! this store owns, because a name is not enumerable.
 //!
 //! The mapping is separable from what carries it. [`Volume`] is the three verbs a store
 //! needs and [`VolumeStore`] is the mapping over any of them. Two implementations exist: a
 //! socket that reaches an engine in another process, and, for a build that links the
 //! engine, the engine itself in this one. The names and the record are the same either
 //! way, which is what lets a deployment move between them.
+//!
+//! The head carries what a windowed reader needs and the volume cannot cheaply answer: the
+//! thread list, the routing fields, the title, and each thread's message count. With the
+//! count in the head, a reader asks for a window of a thread by position and holds the
+//! window, and the index costs one small read rather than the volume.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,9 +42,25 @@ const HEAD_FILE: &str = "heads.json";
 
 /// What the volume holds for one thread's title.
 #[derive(Clone, Default)]
-pub struct TitleState {
+struct TitleState {
     versions: u64,
     text: Option<String>,
+}
+
+/// Actus's own document for a volume.
+///
+/// It carries the thread list and the routing fields, as it always did, and two things the
+/// record cannot supply cheaply: how many messages a thread holds, and how many title
+/// versions it has. Both are derived from the records and are rebuilt from the volume by
+/// the migration path, so losing the head loses the list and not the records.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Head {
+    #[serde(default)]
+    threads: HashMap<String, ThreadSession>,
+    #[serde(default)]
+    counts: HashMap<String, usize>,
+    #[serde(default)]
+    title_versions: HashMap<String, u64>,
 }
 
 /// The verbs a volume answers, whatever carries them.
@@ -68,7 +88,8 @@ pub trait Volume: Send + Sync {
 
 pub struct VolumeStore<V: Volume> {
     volume: V,
-    /// Actus's own document for this volume: the thread list and what a listing reads.
+    /// Actus's own document for this volume: the thread list, the counts, and what a
+    /// listing reads.
     head: PathBuf,
     /// The document this store seeds from when it has no head of its own, which is the
     /// record the host was serving until the store took over. It is read and never written.
@@ -77,6 +98,9 @@ pub struct VolumeStore<V: Volume> {
     /// whole thread. Zero for a thread seeded from the document.
     deposited: Mutex<HashMap<String, u64>>,
     titled: Mutex<HashMap<String, TitleState>>,
+    /// Messages per thread, from the head. A window needs a thread's end, and this is what
+    /// supplies it without reading the volume.
+    counts: Mutex<HashMap<String, usize>>,
 }
 
 impl<V: Volume> VolumeStore<V> {
@@ -87,6 +111,7 @@ impl<V: Volume> VolumeStore<V> {
             seed: dir.join(super::DOCUMENT_FILE),
             deposited: Mutex::new(HashMap::new()),
             titled: Mutex::new(HashMap::new()),
+            counts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -133,6 +158,18 @@ impl<V: Volume> VolumeStore<V> {
         Ok(state)
     }
 
+    /// Read actus's head, or nothing when it is not there.
+    fn read_head(&self) -> Result<Option<Head>, String> {
+        if !self.head.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&self.head)
+            .map_err(|e| format!("read {}: {e}", self.head.display()))?;
+        let head: Head = serde_json::from_str(&content)
+            .map_err(|e| format!("{} is not a head document: {e}", self.head.display()))?;
+        Ok(Some(head))
+    }
+
     /// Read a thread document, or nothing when it is not there.
     fn read_document(path: &Path) -> Result<Option<HashMap<String, ThreadSession>>, String> {
         if !path.exists() {
@@ -143,6 +180,49 @@ impl<V: Volume> VolumeStore<V> {
         let threads: HashMap<String, ThreadSession> = serde_json::from_str(&content)
             .map_err(|e| format!("{} is not a thread document: {e}", path.display()))?;
         Ok(Some(threads))
+    }
+
+    /// Take a thread set as the index: keep the metadata, remember the counts, and let the
+    /// messages go.
+    fn index_of(&self, threads: HashMap<String, ThreadSession>) -> HashMap<String, ThreadSession> {
+        {
+            let mut counts = self.counts.lock().unwrap();
+            counts.clear();
+            for (id, thread) in &threads {
+                counts.insert(id.clone(), thread.messages.len());
+            }
+        }
+        {
+            let mut titled = self.titled.lock().unwrap();
+            titled.clear();
+            for (id, thread) in &threads {
+                // A seed has a title and no title record, so its version count starts at
+                // zero and the first change deposits the first version.
+                titled.insert(
+                    id.clone(),
+                    TitleState {
+                        versions: 0,
+                        text: thread.title.clone(),
+                    },
+                );
+            }
+        }
+        let mut threads = threads;
+        for thread in threads.values_mut() {
+            thread.messages.clear();
+        }
+        threads
+    }
+
+    /// Messages per thread, from the head. One small read, and the cache the load paths fill.
+    fn head_counts(&self, id: &str) -> Result<usize, String> {
+        if let Some(n) = self.counts.lock().unwrap().get(id) {
+            return Ok(*n);
+        }
+        Ok(self
+            .read_head()?
+            .and_then(|head| head.counts.get(id).copied())
+            .unwrap_or(0))
     }
 
     /// Refuse to seed onto a volume that already holds another writer's records.
@@ -183,8 +263,23 @@ impl<V: Volume> VolumeStore<V> {
 
 impl<V: Volume> RecordStore for VolumeStore<V> {
     fn load(&self) -> Result<HashMap<String, ThreadSession>, String> {
-        let mut threads = match Self::read_document(&self.head)? {
-            Some(threads) => threads,
+        let mut threads = match self.read_head()? {
+            Some(head) => {
+                *self.counts.lock().unwrap() = head.counts.clone();
+                {
+                    let mut titled = self.titled.lock().unwrap();
+                    for (id, thread) in &head.threads {
+                        titled.insert(
+                            id.clone(),
+                            TitleState {
+                                versions: head.title_versions.get(id).copied().unwrap_or(0),
+                                text: thread.title.clone(),
+                            },
+                        );
+                    }
+                }
+                head.threads
+            }
             None => match Self::read_document(&self.seed)? {
                 Some(threads) => {
                     self.ensure_a_fresh_volume(&threads)?;
@@ -220,6 +315,83 @@ impl<V: Volume> RecordStore for VolumeStore<V> {
             self.volume.place()
         );
         Ok(threads)
+    }
+
+    /// The thread list without its messages.
+    ///
+    /// A head that exists answers this without reading the volume: it carries the list, the
+    /// counts, and the titles. A first run has no head and reads the seed, which is the
+    /// document this host was serving.
+    fn load_index(&self) -> Result<HashMap<String, ThreadSession>, String> {
+        let head = match self.read_head()? {
+            Some(head) => head,
+            None => {
+                let Some(seed) = Self::read_document(&self.seed)? else {
+                    return Ok(HashMap::new());
+                };
+                self.ensure_a_fresh_volume(&seed)?;
+                tracing::info!(
+                    "the record store has no head of its own; the index is {}",
+                    self.seed.display()
+                );
+                return Ok(self.index_of(seed));
+            }
+        };
+        *self.counts.lock().unwrap() = head.counts.clone();
+        {
+            let mut titled = self.titled.lock().unwrap();
+            titled.clear();
+            for (id, thread) in &head.threads {
+                titled.insert(
+                    id.clone(),
+                    TitleState {
+                        versions: head.title_versions.get(id).copied().unwrap_or(0),
+                        text: thread.title.clone(),
+                    },
+                );
+            }
+        }
+        {
+            let mut deposited = self.deposited.lock().unwrap();
+            deposited.clear();
+            for (id, count) in &head.counts {
+                deposited.insert(id.clone(), *count as u64);
+            }
+        }
+        Ok(head.threads)
+    }
+
+    fn message_count(&self, id: &str) -> Result<usize, String> {
+        self.head_counts(id)
+    }
+
+    /// A window of a thread's messages.
+    ///
+    /// The read is bounded by `limit`: a name per position, and one miss to end it. What it
+    /// holds is the window, whatever the thread's length, which is the property the
+    /// document cannot offer.
+    fn load_messages(
+        &self,
+        id: &str,
+        from: usize,
+        limit: usize,
+    ) -> Result<Vec<ThreadMessage>, String> {
+        let mut messages = Vec::new();
+        if limit == 0 {
+            return Ok(messages);
+        }
+        for position in from..from.saturating_add(limit) {
+            let name = message_name(id, position as u64);
+            match self.payload(&name)? {
+                Some(bytes) => {
+                    let message: ThreadMessage = serde_json::from_slice(&bytes)
+                        .map_err(|e| format!("{name} is not a message: {e}"))?;
+                    messages.push(message);
+                }
+                None => break,
+            }
+        }
+        Ok(messages)
     }
 
     fn persist(&self, mut threads: HashMap<String, ThreadSession>) -> Result<(), String> {
@@ -268,13 +440,30 @@ impl<V: Volume> RecordStore for VolumeStore<V> {
             }
         }
 
-        // The head is actus's own: the thread list, the routing fields, and the title text
-        // as a cache. It carries no messages, which is what keeps a persist small, and the
-        // snapshot this call was given is taken apart rather than copied to write it.
-        for thread in threads.values_mut() {
-            thread.messages.clear();
+        // The head is actus's own: the thread list, the routing fields, the title as a
+        // cache, and the counts a window needs. It carries no messages, which is what keeps
+        // a persist small, and the snapshot this call was given is taken apart rather than
+        // copied to write it.
+        let mut head = Head::default();
+        {
+            let mut counts = self.counts.lock().unwrap();
+            counts.clear();
+            for (id, thread) in &threads {
+                counts.insert(id.clone(), thread.messages.len());
+            }
+            head.counts = counts.clone();
         }
-        let json = serde_json::to_string(&threads).map_err(|e| format!("serialize heads: {e}"))?;
+        {
+            let titled = self.titled.lock().unwrap();
+            for (id, state) in titled.iter() {
+                head.title_versions.insert(id.clone(), state.versions);
+            }
+        }
+        for (id, thread) in threads.iter_mut() {
+            thread.messages.clear();
+            head.threads.insert(id.clone(), thread.clone());
+        }
+        let json = serde_json::to_string(&head).map_err(|e| format!("serialize heads: {e}"))?;
         std::fs::write(&self.head, json).map_err(|e| format!("write {}: {e}", self.head.display()))
     }
 }
