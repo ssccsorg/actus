@@ -60,8 +60,12 @@ agent.
   maps kind names to factories, and an unknown kind is refused at config
   load with the registered kinds named.
 - `agent::AgentBackend`: uniform async trait (`status`, `submit`,
-  `cancel`, `cancel_request`, `thread`, `threads`, `subscribe`,
-  `capabilities`, `shutdown`) implemented by every platform adapter.
+  `submit_with_options`, `cancel`, `cancel_request`, `thread`, `threads`,
+  `subscribe`, `capabilities`, `shutdown`) implemented by every platform
+  adapter.
+- `agent::session`: one definition of a thread and a turn. An adapter
+  supplies only what its platform does; the store owns the title, the
+  dispatch a turn came from, and the outcome a reply carries.
 - `agent::AgentRegistry`: name to running adapter map with a default
   agent.
 - `telos::adapter::TelosFactory`: the default kind, a sessionful agent over
@@ -76,12 +80,19 @@ agent.
   a plan of operations the adapter implements; there is no click, press,
   eval, or submit, so a person submits the form.
 - Direct acts: the server performs file, git, rules, fetch, and symbol
-  services in-process; they are acts with no agent attached.
+  services in-process. Every one of them is a lookup that changes nothing,
+  so it carries no turn, no record, and no gate: the line this fabric draws
+  is that an act is recorded and gated when it changes state.
 
 HTTP handlers talk only to the `AgentBackend` trait. A new platform is an
-`AgentFactory` plus one registration in `main.rs`; the fabric itself names
+`AgentFactory` plus one registration in `run.rs`; the fabric itself names
 no platform (issue #36). `/v1/health` reports per-agent status in the
 `agents` map.
+
+What a kind declares is a contract: an agent whose capabilities exclude the
+route a request names is refused in words rather than answered with an empty
+success. The dispatch of a turn and its outcome are fields on the record, so
+a consumer reads them instead of parsing a reply.
 
 ## Kinds of Acts
 
@@ -101,7 +112,10 @@ controller, which supervises every executor type under one contract.
 
 Each kind stays an act behind the same runtime surface: actus routes it,
 holds its state, and reports its outcome, whether the executor is a
-process, a transducer, or a human interface.
+process, a transducer, or a human interface. The implemented kind that does
+not meet that claim yet is the direct act: it is a lookup with no record and
+no gate, and it joins the surface when the fabric has an act record to write
+into, which waits on neXus.
 
 ## Configuration
 
@@ -428,15 +442,15 @@ The workflow in `.github/workflows/ci.yml` runs two tiers:
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | GET | Server status, per-agent state with capabilities and launch errors |
-| `/v1/chat` | POST | Send message, SSE stream response |
+| `/v1/chat` | POST | Send message, SSE stream response; refused for an agent that declares `streaming: false`, naming `/v1/chat/async` |
 | `/v1/chat/async` | POST | Send message, return task id and thread id |
 | `/v1/cancel` | POST | Cancel a turn; optional body `{ agent?, request_id? }` scopes the cancel (no body cancels the default agent's whole turn) |
 | `/v1/threads` | GET | List conversation threads of one agent |
 | `/v1/threads` | POST | Create a fresh thread without a message |
-| `/v1/threads/{id}` | GET | Thread messages and metadata (includes the dispatch `parent` when a meta agent created it) |
+| `/v1/threads/{id}` | GET | Thread messages and metadata; each message carries the dispatch of its turn, and a reply carries its outcome |
 | `/v1/threads/{id}/poll` | GET | Poll the turn in flight, whole, until completion |
-| `/v1/agents/tool-calls/pending` | GET | Tool-call authorizations awaiting a human decision (ask mode) |
-| `/v1/agents/tool-calls/resolve` | POST | Approve or reject a pending tool call |
+| `/v1/agents/tool-calls/pending` | GET | Tool-call authorizations awaiting a human decision (ask mode); refused for an agent that declares `approval: false` |
+| `/v1/agents/tool-calls/resolve` | POST | Approve or reject a pending tool call; refused for an agent that declares `approval: false` |
 | `/v1/files` | GET | Search workspace files (direct act) |
 | `/v1/files/mention` | GET | File mention for prompt injection |
 | `/v1/symbols` | GET | Symbol search (direct act) |
@@ -450,7 +464,10 @@ Chat and thread endpoints accept an `agent` field (query or body) to
 route to a specific agent; without it they use the first configured
 agent. Requests that carry an `X-Actus-Controller` identity header come
 from the `actus control` MCP proxy and are gated by the
-`[agent-control]` policy.
+`[agent-control]` policy. The gate covers every route that names an agent,
+including thread creation and the tool-call endpoints; the routes that name
+none (the direct acts) stay ungated, because the policy is keyed by the pair
+of a controller and an agent.
 
 ### API Authentication
 

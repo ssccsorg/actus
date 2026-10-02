@@ -307,9 +307,32 @@ and the rest have not:
   a live measurement showed a SIGTERM inside that window killing the server and
   leaving the child running.
 
-Still open from the list: the capability declaration as a contract, the direct
-acts in the record, per-turn provenance, the adapter test kit, and the record
- type that waits on nexus.
+Still open from the list: the direct acts in the record, the adapter test kit,
+and the record type that waits on nexus. The other two landed after this review
+was written.
+
+- The capability declaration became a contract, the end of a turn became a
+  field, and the dispatch of a turn became one too (`feat #39`). A route that
+  an agent's declaration excludes is refused in words, `ActOutcome` is written
+  on the reply by every kind, and the messages a turn produced carry the
+  controller and the thread on the controller that asked. The gate also
+  reaches the agent-named routes a controller can call. What this does not
+  change: nothing here was run against a live controller pair, so the contract
+  is a property of the code and of the route tests in `tests/server_test.rs`,
+  not a measurement of a deployment.
+- The direct acts stay outside the record, deliberately. The line this review
+  called the real decision is drawn where the change is: an act is recorded
+  and gated when it changes state, and every handler in that family is a
+  lookup. There is nothing to record yet, which is also why the record type
+  still waits on nexus.
+- The adapter test kit is not built. The counterargument in the recommendation
+  above is the reason: the genuinely shared part (a stub binary writer, a log
+  waiter) is smaller than the per-kind contracts that differ, and lifting it
+  would flatten them. It stays open as a decision rather than as work.
+- The read path names the fields of a record by hand (`get_thread`), so a new
+  field on `ThreadMessage` does not reach a client until that projection names
+  it. The tests caught it here; a projection derived from the type would remove
+  the trap.
 
 ## What this review did not cover
 
