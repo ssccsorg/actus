@@ -48,6 +48,16 @@ jobs:
             --entrypoint ./run.sh \
             actus:ci --test
 
+      # The store's integrity, named rather than left to the suite above: it is the one
+      # check that fails when a store a deployment can select stops being covered, or when a
+      # window read starts costing the thread instead of the window.
+      - name: The store's integrity, named
+        run: |
+          docker run --rm \
+            -e CI \
+            --entrypoint cargo \
+            actus:ci test --test store_integrity_test
+
   # Agent-binary tier: runs the suite against the actual headless agent
   # binary from the public prebuilt telos image (ghcr.io/ssccsorg/telos).
   # The image is never built here and is pulled anonymously; no registry
