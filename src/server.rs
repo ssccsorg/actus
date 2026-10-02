@@ -159,6 +159,9 @@ pub struct HealthResponse {
     pub telos_connected: bool,
     pub agent_ready: bool,
     pub active_threads: usize,
+    /// Which store holds the default agent's record. A client shows it, because the same
+    /// app serves whichever store a deployment chose.
+    pub record_store: String,
     /// Per-agent runtime state from the execution fabric.
     pub agents: Vec<AgentStatus>,
 }
@@ -273,27 +276,29 @@ pub struct ThreadListQuery {
 
 async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
     let agents = state.agents.statuses().await;
-    let (telos_connected, agent_ready, active_threads) = match state.agents.default_agent() {
-        Some(agent) => {
-            let status = agent.status().await;
-            // Threads whose last turn has not completed, which is what the field name
-            // says. The count of the default agent's threads is not that, and it read
-            // as work in flight in the client's own listing of it.
-            let threads = agent
-                .threads()
-                .await
-                .iter()
-                .filter(|thread| !thread.completed)
-                .count();
-            (status.connected, status.ready, threads)
-        }
-        None => (false, false, 0),
-    };
+    let (telos_connected, agent_ready, active_threads, record_store) =
+        match state.agents.default_agent() {
+            Some(agent) => {
+                let status = agent.status().await;
+                // Threads whose last turn has not completed, which is what the field name
+                // says. The count of the default agent's threads is not that, and it read
+                // as work in flight in the client's own listing of it.
+                let threads = agent
+                    .threads()
+                    .await
+                    .iter()
+                    .filter(|thread| !thread.completed)
+                    .count();
+                (status.connected, status.ready, threads, agent.record_store().await)
+            }
+            None => (false, false, 0, String::new()),
+        };
     Json(HealthResponse {
         status: "ok".to_string(),
         telos_connected,
         agent_ready,
         active_threads,
+        record_store,
         agents,
     })
 }

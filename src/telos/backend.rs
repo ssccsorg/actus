@@ -71,6 +71,10 @@ impl AgentBackend for TelosBackend {
         self.scope.clone()
     }
 
+    async fn record_store(&self) -> String {
+        self.manager.read().await.store.describe()
+    }
+
     async fn status(&self) -> AgentStatus {
         let mgr = self.manager.read().await;
         AgentStatus {

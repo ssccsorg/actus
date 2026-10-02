@@ -115,6 +115,10 @@ impl SocketVolume {
 }
 
 impl Volume for SocketVolume {
+    fn kind(&self) -> &'static str {
+        "socket"
+    }
+
     fn count(&self) -> Result<u64, String> {
         let described = self.call(&serde_json::json!({ "verb": "describe" }))?;
         Ok(described["count"].as_u64().unwrap_or(0))

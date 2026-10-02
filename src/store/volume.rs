@@ -107,6 +107,15 @@ pub trait Volume: Send + Sync {
     /// The payload under a name, or nothing when no record carries it.
     fn read_payload(&self, name: &str) -> Result<Option<Vec<u8>>, String>;
 
+    /// What kind of volume this is, as the short noun a person reads.
+    ///
+    /// It names the shape rather than the instance, so a store's description reads as
+    /// `ktema volume at /path` and a reader can tell the engine from a socket or a double.
+    /// The default is for a volume that is only ever a double.
+    fn kind(&self) -> &'static str {
+        "unnamed"
+    }
+
     /// Where the volume is, for a message a person reads.
     fn place(&self) -> String;
 }
@@ -338,6 +347,10 @@ impl<V: Volume> VolumeStore<V> {
 }
 
 impl<V: Volume> RecordStore for VolumeStore<V> {
+    fn describe(&self) -> String {
+        format!("{} volume at {}", self.volume.kind(), self.volume.place())
+    }
+
     fn load(&self) -> Result<HashMap<String, ThreadSession>, String> {
         let mut threads = match self.read_head()? {
             Some(head) => {

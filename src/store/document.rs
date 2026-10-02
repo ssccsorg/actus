@@ -26,6 +26,10 @@ impl DocumentStore {
 }
 
 impl RecordStore for DocumentStore {
+    fn describe(&self) -> String {
+        format!("document at {}", self.path.display())
+    }
+
     fn load(&self) -> Result<HashMap<String, ThreadSession>, String> {
         if !self.path.exists() {
             return Ok(HashMap::new());

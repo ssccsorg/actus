@@ -138,6 +138,14 @@ fn document_store(dir: &Path) -> Arc<dyn RecordStore> {
 
 /// Everything the contract promises, run against one store.
 fn contract(store: &dyn RecordStore) {
+    // The store names itself and where it is, which is what a client shows a person. The
+    // default says it did not, so a store that leaves it is a client showing nothing.
+    let described = store.describe();
+    assert!(
+        !described.is_empty() && described != "unreported",
+        "the store names itself: {described}"
+    );
+
     // A round trip is exact, field for field and message for message.
     store.persist(state(5)).expect("persist");
     let read = store.load().expect("load");

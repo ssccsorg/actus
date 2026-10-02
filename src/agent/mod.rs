@@ -255,6 +255,15 @@ pub trait AgentBackend: Send + Sync {
         None
     }
 
+    /// Which store holds this agent's record, for a client that shows it.
+    ///
+    /// A backend that keeps its threads in its own memory has no store to name, and
+    /// saying so is what lets a client tell a stack serving a volume from one holding
+    /// the conversation for as long as the process lives.
+    async fn record_store(&self) -> String {
+        "in memory".to_string()
+    }
+
     /// Current connection and readiness state.
     async fn status(&self) -> AgentStatus;
 

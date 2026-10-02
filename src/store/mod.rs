@@ -60,6 +60,16 @@ const DEFAULT_SOCKET_FILE: &str = "store.sock";
 /// else a thread carries is actus's own state and stays with actus, so an implementation
 /// is free to keep the record anywhere it can read it back.
 pub trait RecordStore: Send + Sync {
+    /// Which store holds the record, for a client that shows it.
+    ///
+    /// A client's question is which store is serving, and a place answers that only for a
+    /// reader who already knows the shape it belongs to, so an implementation names both.
+    /// The default says only that the store did not say, because a store named as one thing
+    /// while being another is worse than a store that names nothing.
+    fn describe(&self) -> String {
+        "unreported".to_string()
+    }
+
     /// Every thread the store holds, with its messages.
     fn load(&self) -> Result<HashMap<String, ThreadSession>, String>;
 
