@@ -12,7 +12,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
 use actus::agent::{ThreadMessage, ThreadSession};
-use actus::store::{RecordStore, SocketStore};
+use actus::store::{RecordStore, SocketStore, SocketVolume};
 
 /// A stand-in for the volume: names to payloads, with the engine's conflict rule.
 #[derive(Default)]
@@ -127,7 +127,7 @@ fn from_hex(text: &str) -> Vec<u8> {
 fn a_thread_round_trips_through_record_names() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (volume, socket) = bind(dir.path(), "volume.sock");
-    let store = SocketStore::new(socket.clone(), dir.path());
+    let store = SocketStore::new(SocketVolume::new(socket.clone()), dir.path());
 
     assert_eq!(store.load().expect("load an empty volume").len(), 0);
 
@@ -161,7 +161,7 @@ fn a_thread_round_trips_through_record_names() {
     assert!(head["t1"].messages.is_empty(), "the head holds a thread list, not a log");
 
     // A store that has just started reads the same thread back.
-    let restarted = SocketStore::new(socket.clone(), dir.path());
+    let restarted = SocketStore::new(SocketVolume::new(socket.clone()), dir.path());
     let read = restarted.load().expect("load");
     assert_eq!(read["t1"].messages.len(), 2);
     assert_eq!(read["t1"].messages[0].content, "hi");
@@ -183,7 +183,7 @@ fn a_thread_round_trips_through_record_names() {
 fn an_extension_appends_only_what_is_new() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (volume, socket) = bind(dir.path(), "volume.sock");
-    let store = SocketStore::new(socket.clone(), dir.path());
+    let store = SocketStore::new(SocketVolume::new(socket.clone()), dir.path());
 
     let mut threads = HashMap::new();
     threads.insert(
@@ -207,7 +207,9 @@ fn an_extension_appends_only_what_is_new() {
         assert_eq!(volume.refused, 0);
     }
 
-    let read = SocketStore::new(socket, dir.path()).load().expect("load");
+    let read = SocketStore::new(SocketVolume::new(socket), dir.path())
+        .load()
+        .expect("load");
     assert_eq!(read["t1"].messages.len(), 2);
     assert_eq!(read["t1"].title.as_deref(), Some("hi again"), "the last version wins");
 }
@@ -230,7 +232,7 @@ fn a_first_start_seeds_from_the_document() {
     )
     .expect("write the document");
 
-    let store = SocketStore::new(socket.clone(), dir.path());
+    let store = SocketStore::new(SocketVolume::new(socket.clone()), dir.path());
     let loaded = store.load().expect("load");
     assert_eq!(loaded["t1"].messages.len(), 1, "the document is the seed");
     assert_eq!(volume.lock().unwrap().records.len(), 0, "nothing was deposited yet");
@@ -268,7 +270,7 @@ fn a_volume_another_writer_filled_is_refused() {
     )
     .expect("the document");
 
-    let store = SocketStore::new(socket, dir.path());
+    let store = SocketStore::new(SocketVolume::new(socket), dir.path());
     let error = match store.load() {
         Ok(_) => panic!("a volume another writer filled must be refused"),
         Err(error) => error,

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use actus::agent::{ThreadMessage, ThreadSession};
-use actus::store::{RecordStore, SocketStore};
+use actus::store::{RecordStore, SocketStore, SocketVolume};
 
 fn message(role: &str, content: &str) -> ThreadMessage {
     ThreadMessage {
@@ -86,7 +86,7 @@ fn a_volume_that_cannot_be_reached_fails_at_startup() {
 
     // Nothing serves this socket, so the store fails where it is opened rather than
     // answering from the document and calling it a volume.
-    let socket = SocketStore::new(dir.path().join("store.sock"), dir.path());
+    let socket = SocketStore::new(SocketVolume::new(dir.path().join("store.sock")), dir.path());
     let error = match socket.load() {
         Ok(_) => panic!("a volume nobody serves must fail at startup"),
         Err(error) => error,

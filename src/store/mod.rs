@@ -13,9 +13,14 @@
 
 mod document;
 mod socket;
+mod volume;
 
 pub use document::DocumentStore;
-pub use socket::SocketStore;
+pub use socket::SocketVolume;
+pub use volume::{Volume, VolumeStore};
+
+/// The store that reaches an engine in another process, over a socket.
+pub type SocketStore = VolumeStore<SocketVolume>;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -72,7 +77,7 @@ pub fn open(dir: &Path) -> Result<Arc<dyn RecordStore>, String> {
             let socket = std::env::var(STORE_SOCKET_ENV)
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| dir.join(DEFAULT_SOCKET_FILE));
-            Ok(Arc::new(SocketStore::new(socket, dir)))
+            Ok(Arc::new(VolumeStore::new(SocketVolume::new(socket), dir)))
         }
         other => Err(format!(
             "{STORE_ENV}={other} names no store: the stores are {DEFAULT_STORE} and socket"
