@@ -10,6 +10,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use actus::agent::config::{ControlPolicy, ControlRule};
+use actus::agent::native::NativeAgent;
 use actus::agent::{AgentBackend, AgentRegistry, ThreadMessage};
 use actus::server::{build_router, AppState, SharedState};
 use actus::telos::backend::TelosBackend;
@@ -87,6 +89,155 @@ fn client() -> reqwest::Client {
         .expect("client")
 }
 
+/// State whose default agent is the in-process reference adapter, plus a policy
+/// that lets the controller named `meta` reach it. The native kind declares no
+/// stream and no approval surface, so the routes that ask for them can be asked
+/// what they answer.
+fn native_state() -> (SharedState, tempfile::TempDir) {
+    let workdir = tempfile::tempdir().expect("tempdir");
+    let mut registry = AgentRegistry::new();
+    registry.register(Arc::new(NativeAgent::new("native".to_string())), true);
+    let state = AppState::new_with_policy(
+        registry,
+        workdir.path().to_path_buf(),
+        Some("test-token".to_string()),
+        ControlPolicy {
+            allow: vec![ControlRule {
+                controller: "meta".to_string(),
+                targets: vec!["native".to_string()],
+            }],
+        },
+    );
+    (Arc::new(state), workdir)
+}
+
+/// A declaration is a contract: a route that asks for a capability the agent
+/// does not declare is refused in words, and the refusal names the route that
+/// serves the request instead.
+#[tokio::test]
+async fn a_declaration_is_a_contract_on_the_routes_that_ask_for_it() {
+    let (state, _workdir) = native_state();
+    let (url, _handle) = spawn_server(state).await;
+    let client = client();
+
+    let stream = client
+        .post(format!("{url}/v1/chat"))
+        .json(&serde_json::json!({"message": "hello"}))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(stream.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = stream.json().await.expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("streaming: false"),
+        "the refusal names the declaration: {body}"
+    );
+    assert_eq!(
+        body["use"], "/v1/chat/async",
+        "the refusal names the route that serves it"
+    );
+
+    let pending = client
+        .get(format!("{url}/v1/agents/tool-calls/pending"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(
+        pending.status(),
+        reqwest::StatusCode::CONFLICT,
+        "an agent with no approval surface has no empty list to report"
+    );
+    let body: serde_json::Value = pending.json().await.expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("approval: false"),
+        "the refusal names the declaration: {body}"
+    );
+
+    let resolve = client
+        .post(format!("{url}/v1/agents/tool-calls/resolve"))
+        .json(&serde_json::json!({
+            "platform_thread_id": "acp-1",
+            "tool_call_id": "call-1",
+            "allow": true,
+        }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resolve.status(), reqwest::StatusCode::CONFLICT);
+
+    // The route the declaration does serve still answers.
+    let served = client
+        .post(format!("{url}/v1/chat/async"))
+        .json(&serde_json::json!({"message": "hello"}))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(served.status(), reqwest::StatusCode::OK);
+}
+
+/// A controller's dispatch is recorded on the turn it asked for, not only on
+/// the thread, and the gate reaches the routes that name an agent.
+#[tokio::test]
+async fn a_controller_dispatch_is_recorded_on_the_turn_it_asked_for() {
+    let (state, _workdir) = native_state();
+    let (url, _handle) = spawn_server(state).await;
+    let client = client();
+
+    let dispatched = client
+        .post(format!("{url}/v1/chat/async"))
+        .header("x-actus-controller", "meta")
+        .json(&serde_json::json!({
+            "message": "do the thing",
+            "parent_thread_id": "meta-thread-7",
+        }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(dispatched.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = dispatched.json().await.expect("json");
+    let thread_id = body["thread_id"].as_str().expect("thread id").to_string();
+
+    let thread: serde_json::Value = client
+        .get(format!("{url}/v1/threads/{thread_id}"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let messages = thread["messages"].as_array().expect("messages");
+    for message in messages {
+        assert_eq!(
+            message["parent"]["agent"], "meta",
+            "the dispatch is on every message of the turn: {message}"
+        );
+        assert_eq!(message["parent"]["thread_id"], "meta-thread-7");
+    }
+    let reply = messages.last().expect("a reply");
+    assert_eq!(reply["outcome"], "ok", "a finished turn reports its status");
+
+    // A controller the policy does not name is refused on a route that names
+    // an agent, which is where the gate now reaches beyond a dispatch.
+    let refused = client
+        .post(format!("{url}/v1/threads"))
+        .header("x-actus-controller", "other")
+        .send()
+        .await
+        .expect("post");
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert_eq!(body["status"], "error");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("forbidden"),
+        "a controller the policy does not allow is refused: {body}"
+    );
+}
+
 /// State with two telos agents, each launched for its own project, so a listing that
 /// folds over the host can be told from one that answers for a single agent. Each
 /// agent gets its own threads file, because two managers sharing one would overwrite
@@ -145,6 +296,8 @@ async fn seed_thread(manager: &Manager, title: &str, at: &str) -> String {
         entry_type: Some("text".to_string()),
         tool_name: None,
         tool_status: None,
+        parent: None,
+        outcome: Some(actus::agent::ActOutcome::Ok),
         timestamp: chrono::DateTime::parse_from_rfc3339(at)
             .expect("a timestamp")
             .with_timezone(&chrono::Utc),

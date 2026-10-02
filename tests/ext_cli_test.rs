@@ -248,6 +248,19 @@ async fn ext_cli_failure_records_exit_diagnostics() {
         "unexpected: {content}"
     );
     assert!(content.contains("boom"), "stderr missing: {content}");
+
+    let session = agent.thread(&receipt.thread_id).await.unwrap();
+    let reply = session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .expect("a reply");
+    assert_eq!(
+        reply.outcome,
+        Some(actus::agent::ActOutcome::Failed),
+        "a turn that exits non-zero says so in a field rather than only in prose"
+    );
 }
 
 #[tokio::test]
@@ -402,8 +415,23 @@ async fn ext_cli_cancel_request_on_same_thread_keeps_second_turn() {
         .collect();
     assert_eq!(assistants.len(), 2, "messages: {assistants:?}");
     assert!(
-        assistants.iter().any(|c| *c == "[ext-cli] cancelled"),
+        assistants.contains(&"[ext-cli] cancelled"),
         "messages: {assistants:?}"
+    );
+
+    let outcomes: Vec<Option<actus::agent::ActOutcome>> = session
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .map(|message| message.outcome)
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![
+            Some(actus::agent::ActOutcome::Cancelled),
+            Some(actus::agent::ActOutcome::Ok),
+        ],
+        "the cancelled turn and the turn that ran report different statuses"
     );
 }
 

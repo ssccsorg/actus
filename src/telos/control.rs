@@ -447,6 +447,19 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 // Snapshot this turn's entries so a follow-up turn's replay
                 // of them is recognized and dropped.
                 mgr.record_prior_entries(&local_id);
+                // Stamp the turn: its outcome on the reply, and the dispatch it
+                // came from on every message the turn produced. An empty reply
+                // is a failure, because the turn ended without the agent
+                // saying anything.
+                mgr.stamp_turn(
+                    &local_id,
+                    &request_id,
+                    if last_is_user {
+                        crate::agent::ActOutcome::Failed
+                    } else {
+                        crate::agent::ActOutcome::Ok
+                    },
+                );
             } else {
                 // A completion with no thread to land on is a turn the caller can never
                 // see end, so every poll waits out its whole ceiling. It is said loudly
@@ -508,6 +521,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 }
                 // Snapshot the error entry so a follow-up replay is dropped.
                 mgr.record_prior_entries(&local_id);
+                mgr.stamp_turn(&local_id, &request_id, crate::agent::ActOutcome::Failed);
             }
             mgr.notify_thread_change();
             tracing::error!("Chat response error (req {}): {}", &request_id[..request_id.len().min(12)], error);
@@ -557,6 +571,11 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 // Snapshot the cancellation entry so a follow-up replay is
                 // dropped.
                 mgr.record_prior_entries(&local_id);
+                mgr.stamp_turn(
+                    &local_id,
+                    &request_id,
+                    crate::agent::ActOutcome::Cancelled,
+                );
             }
             mgr.notify_thread_change();
             tracing::info!("Turn cancelled (req {}, status {})", &request_id[..request_id.len().min(12)], status);

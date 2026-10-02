@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use tokio::sync::{watch, RwLock};
 
-use crate::agent::{truncate_title, ThreadMessage, ThreadParent, ThreadSession};
+use crate::agent::{truncate_title, ActOutcome, ThreadMessage, ThreadParent, ThreadSession};
 
 /// One thread map, one change notification, and the bookkeeping of a turn.
 pub struct ThreadStore {
@@ -32,15 +32,36 @@ pub struct TurnReply {
     pub content: String,
     /// The request id the turn ran under, when the adapter mints one.
     pub message_id: Option<String>,
+    /// How the turn ended.
+    pub outcome: ActOutcome,
+    /// The dispatch the turn came from, when a meta agent started it. The
+    /// reply carries it so a turn's origin survives in the record rather
+    /// than only on the session that opened it.
+    pub parent: Option<ThreadParent>,
 }
 
 impl TurnReply {
-    /// A reply as the auxiliary kinds record it: an agent message.
+    /// A reply as the auxiliary kinds record it: an agent message that
+    /// finished normally.
     pub fn message(content: impl Into<String>, message_id: Option<String>) -> Self {
         Self {
             content: content.into(),
             message_id,
+            outcome: ActOutcome::Ok,
+            parent: None,
         }
+    }
+
+    /// The same, carrying the dispatch the turn came from.
+    pub fn dispatched(mut self, parent: Option<ThreadParent>) -> Self {
+        self.parent = parent;
+        self
+    }
+
+    /// The same, carrying the status the turn ended in.
+    pub fn ended(mut self, outcome: ActOutcome) -> Self {
+        self.outcome = outcome;
+        self
     }
 }
 
@@ -126,7 +147,7 @@ impl ThreadStore {
             session.title = Some(truncate_title(message));
         }
         if session.parent.is_none() {
-            session.parent = parent;
+            session.parent = parent.clone();
         }
         session.messages.push(ThreadMessage {
             role: "user".to_string(),
@@ -135,6 +156,8 @@ impl ThreadStore {
             entry_type: None,
             tool_name: None,
             tool_status: None,
+            parent,
+            outcome: None,
             timestamp: now,
         });
         session.completed = false;
@@ -178,7 +201,7 @@ impl ThreadStore {
                 session.title = Some(truncate_title(message));
             }
             if session.parent.is_none() {
-                session.parent = parent;
+                session.parent = parent.clone();
             }
             session.messages.push(ThreadMessage {
                 role: "user".to_string(),
@@ -187,6 +210,8 @@ impl ThreadStore {
                 entry_type: None,
                 tool_name: None,
                 tool_status: None,
+                parent,
+                outcome: None,
                 timestamp: now,
             });
             session.messages.push(reply_message(reply, now));
@@ -239,6 +264,8 @@ fn reply_message(reply: TurnReply, now: chrono::DateTime<chrono::Utc>) -> Thread
         entry_type: Some("agent_message".to_string()),
         tool_name: None,
         tool_status: None,
+        parent: reply.parent,
+        outcome: Some(reply.outcome),
         timestamp: now,
     }
 }

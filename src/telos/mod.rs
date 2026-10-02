@@ -6,7 +6,7 @@ pub mod control;
 pub mod options;
 pub mod types;
 
-use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
+use crate::agent::{ActOutcome, PendingAuthorization, ThreadMessage, ThreadParent, ThreadSession};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Channel sender for WebSocket commands to Telos. Shared between
@@ -94,6 +94,10 @@ pub struct TelosManager {
     /// kept for duplicate detection. Bounded so the map cannot grow without
     /// limit on a long-running process.
     pub sentinel_cap: usize,
+    /// The dispatch origin of each turn in flight, by request id. Written when
+    /// the turn is submitted and read when it ends, so the origin reaches the
+    /// messages the turn produced instead of stopping at the session.
+    pub turn_parents: HashMap<String, ThreadParent>,
 }
 
 impl TelosManager {
@@ -143,6 +147,7 @@ impl TelosManager {
             pending_chat_queue: Vec::new(),
             pending_authorizations: HashMap::new(),
             prior_message_content: HashMap::new(),
+            turn_parents: HashMap::new(),
             sentinel_cap: 512,
             threads_dirty: AtomicBool::new(false),
         })
@@ -244,6 +249,55 @@ impl TelosManager {
         message_id: Option<String>,
     ) {
         self.add_message_full(thread_id, role, content, message_id, None, None, None)
+    }
+
+    /// Record the user message that opens a turn, with the dispatch it came
+    /// from. Written at submit, so a turn's origin is on the record even when
+    /// the turn never reaches a completion event.
+    pub fn add_user_message(&mut self, thread_id: &str, content: &str, parent: Option<ThreadParent>) {
+        let now = chrono::Utc::now();
+        if let Some(thread) = self.threads.get_mut(thread_id) {
+            thread.messages.push(ThreadMessage {
+                role: "user".to_string(),
+                content: content.to_string(),
+                message_id: None,
+                entry_type: None,
+                tool_name: None,
+                tool_status: None,
+                parent,
+                outcome: None,
+                timestamp: now,
+            });
+        }
+        self.notify_thread_change();
+        self.save_threads();
+    }
+
+    /// Stamp the turn that just ended: its outcome on every reply it produced,
+    /// and the dispatch it came from on every message of the turn. Called by
+    /// the terminal event handlers, which are the only places that know a turn
+    /// ended and how.
+    pub fn stamp_turn(&mut self, thread_id: &str, request_id: &str, outcome: ActOutcome) {
+        let parent = self.turn_parents.remove(request_id);
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            return;
+        };
+        // The turn is what the agent wrote after the person's last message,
+        // which is the boundary the rest of the record already reads by.
+        let start = thread
+            .messages
+            .iter()
+            .rposition(|message| message.role == "user")
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        for message in &mut thread.messages[start..] {
+            if message.parent.is_none() {
+                message.parent = parent.clone();
+            }
+            if message.role == "assistant" {
+                message.outcome = Some(outcome);
+            }
+        }
     }
 
     /// Record the (scoped message id → content) snapshot of the most
@@ -373,6 +427,8 @@ impl TelosManager {
                 entry_type,
                 tool_name,
                 tool_status,
+                parent: None,
+                outcome: None,
                 timestamp: chrono::Utc::now(),
             });
         }

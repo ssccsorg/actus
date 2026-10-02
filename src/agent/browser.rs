@@ -42,7 +42,7 @@ use crate::agent::config::AgentSpec;
 use crate::agent::process::kill_child_group;
 use crate::agent::session::{ThreadStore, TurnReply};
 use crate::agent::{
-    AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization, SubmitReceipt,
+    ActOutcome, AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization, SubmitReceipt,
     ThreadParent, ThreadSession,
 };
 
@@ -1088,7 +1088,7 @@ impl AgentBackend for BrowserAgent {
         // The thread's title, its dispatch origin, the user message, and the
         // incomplete mark are the session layer's; this adapter supplies only
         // where the turn came from.
-        self.store.begin_turn(&tid, message, parent).await?;
+        self.store.begin_turn(&tid, message, parent.clone()).await?;
         {
             let mut running = self.runner.running.lock().await;
             running.insert(
@@ -1111,6 +1111,7 @@ impl AgentBackend for BrowserAgent {
         let store = self.store.clone();
         let task_request_id = request_id.clone();
         let task_thread_id = tid.clone();
+        let task_parent = parent;
         let plan = message.to_string();
         tokio::spawn(async move {
             // One browser, one turn at a time.
@@ -1132,6 +1133,11 @@ impl AgentBackend for BrowserAgent {
             };
             runner.running.lock().await.remove(&task_request_id);
 
+            let outcome = if record.ok {
+                ActOutcome::Ok
+            } else {
+                ActOutcome::Failed
+            };
             let reply = serde_json::to_string_pretty(&record).unwrap_or_else(|error| {
                 // A record that cannot be serialized is a bug in the record,
                 // and the thread still has to carry an answer.
@@ -1142,7 +1148,9 @@ impl AgentBackend for BrowserAgent {
                 })
                 .to_string()
             });
-            let reply = TurnReply::message(reply, Some(task_request_id));
+            let reply = TurnReply::message(reply, Some(task_request_id))
+                .dispatched(task_parent)
+                .ended(outcome);
             if let Err(e) = store.finish_turn(&task_thread_id, reply).await {
                 tracing::warn!(
                     "the record for thread '{}' was not written: {}",

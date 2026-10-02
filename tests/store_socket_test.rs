@@ -92,6 +92,8 @@ fn message(role: &str, content: &str) -> ThreadMessage {
         entry_type: Some("text".to_string()),
         tool_name: None,
         tool_status: None,
+        parent: None,
+        outcome: None,
         timestamp: chrono::Utc::now(),
     }
 }

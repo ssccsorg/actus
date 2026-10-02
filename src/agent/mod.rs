@@ -95,6 +95,22 @@ pub struct ThreadParent {
     pub thread_id: String,
 }
 
+/// How a turn ended, as a field rather than prose. The reply keeps the
+/// platform's own words in `content`; this is what a consumer branches on
+/// without parsing them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActOutcome {
+    /// The turn finished and produced its reply.
+    Ok,
+    /// The turn ended by failing.
+    Failed,
+    /// The turn was cancelled before it finished.
+    Cancelled,
+    /// The turn ran past the bound its kind declares.
+    TimedOut,
+}
+
 /// One conversation thread, shared across all platform adapters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ThreadSession {
@@ -131,6 +147,14 @@ pub struct ThreadMessage {
     pub entry_type: Option<String>,
     pub tool_name: Option<String>,
     pub tool_status: Option<String>,
+    /// The dispatch this turn came from, when a meta agent started it.
+    /// Recorded per turn: one thread carries turns from different
+    /// controllers, and from a person between them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ThreadParent>,
+    /// How the turn ended. `None` on a message that is not a turn's reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ActOutcome>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 

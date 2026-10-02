@@ -130,7 +130,7 @@ impl AgentBackend for TelosBackend {
         &self,
         thread_id: Option<&str>,
         message: &str,
-        _parent: Option<ThreadParent>,
+        parent: Option<ThreadParent>,
         thinking_effort: Option<&str>,
     ) -> Result<SubmitReceipt, String> {
         // Prepare thread state under the write lock, then release before
@@ -147,8 +147,14 @@ impl AgentBackend for TelosBackend {
             };
             mgr.set_title(&tid, message);
             let enriched = mgr.prepare_message(&tid, message);
-            mgr.add_message(&tid, "user", message, None);
+            mgr.add_user_message(&tid, message, parent.clone());
             let rid = uuid::Uuid::new_v4().to_string();
+            // Remember, by request id, where this turn came from. The
+            // terminal event handlers read it when they stamp the turn, so a
+            // dispatch recorded here reaches the reply as well.
+            if let Some(parent) = &parent {
+                mgr.turn_parents.insert(rid.clone(), parent.clone());
+            }
             let acp_id = mgr.get_acp_thread_id(&tid);
             let cmd = serde_json::json!({
                 "type": "chat_message",

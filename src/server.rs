@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
-    response::{Json, Response, Sse},
+    response::{IntoResponse, Json, Response, Sse},
     routing::{get, post},
     Router,
 };
@@ -20,7 +20,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 
 use crate::agent::config::ControlPolicy;
-use crate::agent::{AgentBackend, AgentRegistry, AgentStatus, ThreadParent};
+use crate::agent::{ActOutcome, AgentBackend, AgentRegistry, AgentStatus, ThreadParent};
 use crate::context;
 use crate::files;
 use crate::git;
@@ -136,6 +136,21 @@ fn control_gate(state: &AppState, headers: &HeaderMap, target: &str) -> Result<(
     } else {
         Err(StatusCode::FORBIDDEN)
     }
+}
+
+/// The refusal a route returns when the agent's declaration excludes the
+/// request. A declaration is a contract, so a route asking for a capability
+/// the agent does not declare is refused in words rather than answered with an
+/// empty success. When another route serves the request, the body names it.
+fn capability_refusal(agent: &str, reason: &str, alternative: Option<&str>) -> Response {
+    let mut body = serde_json::json!({
+        "status": "error",
+        "error": format!("agent '{agent}' {reason}"),
+    });
+    if let Some(alternative) = alternative {
+        body["use"] = serde_json::json!(alternative);
+    }
+    (StatusCode::CONFLICT, Json(body)).into_response()
 }
 
 /// Resolve the requested agent, falling back to the default when no name
@@ -345,23 +360,43 @@ async fn chat_stream(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Json(req): Json<ChatRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    let agent = agent_for(&state, req.agent.as_deref()).await?;
-    control_gate(&state, &headers, agent.name())?;
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Response> {
+    let agent = agent_for(&state, req.agent.as_deref())
+        .await
+        .map_err(|status| status.into_response())?;
+    control_gate(&state, &headers, agent.name()).map_err(|status| status.into_response())?;
+
+    // The declaration is the contract: an agent that declares no streaming
+    // events is served by the async route, and the refusal says so rather than
+    // opening a stream that would report one event and end.
+    if !agent.capabilities().streaming {
+        return Err(capability_refusal(
+            agent.name(),
+            "declares streaming: false; it has no stream to serve",
+            Some("/v1/chat/async"),
+        ));
+    }
 
     // Submit through the fabric: thread creation, context injection,
-    // command send, and the resume wait happen inside the adapter. A
-    // streaming submit names no dispatch origin, and carries the effort
-    // the caller asked for the same way the async one does.
+    // command send, and the resume wait happen inside the adapter. The
+    // dispatch origin is built the way the async route builds it, so a
+    // controller's dispatch is recorded on the turn either way.
+    let parent = match (&req.parent_thread_id, controller_from_headers(&headers)) {
+        (Some(thread_id), Some(controller)) => Some(ThreadParent {
+            agent: controller,
+            thread_id: thread_id.clone(),
+        }),
+        _ => None,
+    };
     let receipt = agent
         .submit_with_options(
             req.thread_id.as_deref(),
             &req.message,
-            None,
+            parent,
             req.thinking_effort.as_deref(),
         )
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
 
     let tid = receipt.thread_id.clone();
     let is_new = receipt.is_new;
@@ -495,10 +530,15 @@ async fn chat_stream(
                 // Check completion: wait for the turn we started
                 if thread.turn_completed > turn_id {
                     tracing::debug!("SSE stream {}: turn completed ({} > {})", tid, thread.turn_completed, turn_id);
+                    // The turn's outcome travels with its completion, so a
+                    // streaming client learns how it ended instead of polling
+                    // the thread for the reply's field.
+                    let outcome = last_msg.and_then(|message| message.outcome);
                     yield Ok(Event::default()
                         .event("message_completed")
                         .data(serde_json::to_string(&serde_json::json!({
                             "thread_id": tid.clone(),
+                            "outcome": outcome,
                         })).unwrap()));
                     done = true;
                 }
@@ -530,14 +570,26 @@ async fn chat_stream(
 /// POST /v1/threads — create a fresh thread immediately (no message).
 async fn create_thread_handler(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Query(q): Query<AgentQuery>,
 ) -> Json<serde_json::Value> {
-    match agent_for(&state, q.agent.as_deref()).await {
-        Ok(agent) => match agent.create_thread().await {
-            Ok(tid) => Json(serde_json::json!({"status": "created", "thread_id": tid})),
-            Err(e) => Json(serde_json::json!({"status": "error", "error": e})),
-        },
-        Err(_) => Json(serde_json::json!({"status": "error", "error": "agent not found"})),
+    let agent = match agent_for(&state, q.agent.as_deref()).await {
+        Ok(agent) => agent,
+        Err(_) => return Json(serde_json::json!({"status": "error", "error": "agent not found"})),
+    };
+    // A route that names an agent is one a controller reaches through the gate
+    // a dispatch passes: the policy is what says which agents it may touch. A
+    // request with no controller identity is a human client and stays ungated,
+    // as it does everywhere else.
+    if let Err(status) = control_gate(&state, &headers, agent.name()) {
+        return Json(serde_json::json!({
+            "status": "error",
+            "error": format!("forbidden: {}", status.as_str()),
+        }));
+    }
+    match agent.create_thread().await {
+        Ok(tid) => Json(serde_json::json!({"status": "created", "thread_id": tid})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": e})),
     }
 }
 
@@ -614,6 +666,11 @@ async fn get_thread(
                         "entry_type": m.entry_type,
                         "tool_name": m.tool_name,
                         "tool_status": m.tool_status,
+                        // The turn's origin and status are part of the record,
+                        // so the read path carries them too: a field the record
+                        // holds but the projection omits never reaches a client.
+                        "parent": m.parent,
+                        "outcome": m.outcome,
                         "timestamp": m.timestamp.to_rfc3339(),
                     })
                 })
@@ -663,6 +720,9 @@ pub struct PollResponse {
     pub entry_type: Option<String>,
     pub tool_name: Option<String>,
     pub tool_status: Option<String>,
+    /// How the turn ended, once it has. A field rather than prose, so a client
+    /// branches on the status instead of reading the reply's words.
+    pub outcome: Option<ActOutcome>,
     /// Every message of the turn in flight, oldest first, each with its current
     /// content. A turn writes several messages and one poll served one of them, so a
     /// client could only ever hold the middle of the stream of the message the agent
@@ -679,6 +739,8 @@ pub struct PollMessage {
     pub entry_type: Option<String>,
     pub tool_name: Option<String>,
     pub tool_status: Option<String>,
+    /// How the turn ended, for a message that is a turn's reply.
+    pub outcome: Option<ActOutcome>,
     pub content: String,
     /// When the message was written, in the form the thread read reports it. A view that
     /// draws a time per message reads both paths, and a poll serves the turn a client has
@@ -729,6 +791,7 @@ async fn poll_thread(
             entry_type: message.entry_type.clone(),
             tool_name: message.tool_name.clone(),
             tool_status: message.tool_status.clone(),
+            outcome: message.outcome,
             content: message.content.clone(),
             timestamp: message.timestamp.to_rfc3339(),
         })
@@ -748,6 +811,7 @@ async fn poll_thread(
         entry_type: current.and_then(|message| message.entry_type.clone()),
         tool_name: current.and_then(|message| message.tool_name.clone()),
         tool_status: current.and_then(|message| message.tool_status.clone()),
+        outcome: current.and_then(|message| message.outcome),
         messages,
     }))
 }
@@ -1079,14 +1143,33 @@ pub struct AgentRouteQuery {
 async fn pending_tool_calls_handler(
     State(state): State<SharedState>,
     Query(q): Query<AgentRouteQuery>,
-) -> Json<serde_json::Value> {
-    match agent_for(&state, q.agent.as_deref()).await {
-        Ok(agent) => {
-            let pending = agent.pending_tool_calls().await;
-            Json(serde_json::json!({"pending": pending, "count": pending.len()}))
-        }
-        Err(_) => Json(serde_json::json!({"pending": [], "count": 0})),
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Ok(agent) = agent_for(&state, q.agent.as_deref()).await else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"pending": [], "count": 0})),
+        );
+    };
+    // An agent that declares no approval surface has no pending tool calls,
+    // and an empty list reads as "nothing waiting" rather than "this agent has
+    // no such surface". The refusal is what tells them apart.
+    if !agent.capabilities().approval {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!(
+                    "agent '{}' declares approval: false; it has no pending tool calls",
+                    agent.name()
+                ),
+            })),
+        );
     }
+    let pending = agent.pending_tool_calls().await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"pending": pending, "count": pending.len()})),
+    )
 }
 
 #[derive(Deserialize)]
@@ -1101,16 +1184,40 @@ pub struct ResolveToolCallRequest {
 async fn resolve_tool_call_handler(
     State(state): State<SharedState>,
     Json(req): Json<ResolveToolCallRequest>,
-) -> Json<serde_json::Value> {
-    match agent_for(&state, req.agent.as_deref()).await {
-        Ok(agent) => match agent
-            .resolve_tool_call(&req.platform_thread_id, &req.tool_call_id, req.allow)
-            .await
-        {
-            Ok(()) => Json(serde_json::json!({"status": "resolved", "allow": req.allow})),
-            Err(e) => Json(serde_json::json!({"status": "error", "error": e})),
-        },
-        Err(_) => Json(serde_json::json!({"status": "error", "error": "agent not found"})),
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Ok(agent) = agent_for(&state, req.agent.as_deref()).await else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "error", "error": "agent not found"})),
+        );
+    };
+    // Resolving is the approval surface itself: an agent that declares none
+    // has nothing to resolve, and answering with an empty success would report
+    // work that never happened.
+    if !agent.capabilities().approval {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!(
+                    "agent '{}' declares approval: false; it has no tool call to resolve",
+                    agent.name()
+                ),
+            })),
+        );
+    }
+    match agent
+        .resolve_tool_call(&req.platform_thread_id, &req.tool_call_id, req.allow)
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "resolved", "allow": req.allow})),
+        ),
+        Err(e) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "error", "error": e})),
+        ),
     }
 }
 

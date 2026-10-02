@@ -30,7 +30,7 @@ use crate::agent::config::AgentSpec;
 use crate::agent::process::kill_child_group;
 use crate::agent::session::{ThreadStore, TurnReply};
 use crate::agent::{
-    AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization, SubmitReceipt,
+    ActOutcome, AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization, SubmitReceipt,
     ThreadParent, ThreadSession,
 };
 
@@ -292,7 +292,7 @@ impl AgentBackend for ExtCliAgent {
         // The thread's title, its dispatch origin, the user message, and the
         // incomplete mark are the session layer's; this adapter supplies only
         // where the turn came from.
-        self.store.begin_turn(&tid, message, parent).await?;
+        self.store.begin_turn(&tid, message, parent.clone()).await?;
 
         // Resolve the argument template for this turn.
         let mut cmd_args: Vec<String> = Vec::with_capacity(self.args.len() + 1);
@@ -362,6 +362,7 @@ impl AgentBackend for ExtCliAgent {
         let timeout = self.timeout;
         let task_thread_id = tid.clone();
         let task_request_id = request_id.clone();
+        let task_parent = parent;
 
         tokio::spawn(async move {
             // Drain stdout and stderr concurrently while the child runs.
@@ -413,25 +414,29 @@ impl AgentBackend for ExtCliAgent {
                 out_task.abort();
                 err_task.abort();
             }
-            let content = match outcome {
-                ChildOutcome::Cancelled => "[ext-cli] cancelled".to_string(),
-                ChildOutcome::TimedOut => {
-                    format!("[ext-cli] timed out after {}s", timeout.as_secs())
+            let (content, outcome) = match outcome {
+                ChildOutcome::Cancelled => {
+                    ("[ext-cli] cancelled".to_string(), ActOutcome::Cancelled)
                 }
+                ChildOutcome::TimedOut => (
+                    format!("[ext-cli] timed out after {}s", timeout.as_secs()),
+                    ActOutcome::TimedOut,
+                ),
                 ChildOutcome::Exited(result) => match result {
                     Ok(status) if status.success() => {
                         let text = String::from_utf8_lossy(&stdout);
                         let text = text.trim();
-                        if text.is_empty() {
+                        let content = if text.is_empty() {
                             "[ext-cli] finished with no output".to_string()
                         } else {
                             text.chars().take(MAX_REPLY_CHARS).collect()
-                        }
+                        };
+                        (content, ActOutcome::Ok)
                     }
                     Ok(status) => {
                         let stderr = String::from_utf8_lossy(&stderr);
                         let stderr = stderr.trim();
-                        if stderr.is_empty() {
+                        let content = if stderr.is_empty() {
                             format!("[ext-cli] exited with {}", status)
                         } else {
                             format!(
@@ -439,13 +444,16 @@ impl AgentBackend for ExtCliAgent {
                                 status,
                                 stderr.chars().take(MAX_REPLY_CHARS).collect::<String>()
                             )
-                        }
+                        };
+                        (content, ActOutcome::Failed)
                     }
-                    Err(e) => format!("[ext-cli] failed: {}", e),
+                    Err(e) => (format!("[ext-cli] failed: {}", e), ActOutcome::Failed),
                 },
             };
 
-            let reply = TurnReply::message(content, Some(task_request_id));
+            let reply = TurnReply::message(content, Some(task_request_id))
+                .dispatched(task_parent)
+                .ended(outcome);
             if let Err(e) = store.finish_turn(&task_thread_id, reply).await {
                 tracing::warn!(
                     "the reply for thread '{}' was not recorded: {}",

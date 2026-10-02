@@ -201,6 +201,8 @@ fn prepare_message_clears_stale_acp_mapping() {
             entry_type: None,
             tool_name: None,
             tool_status: None,
+            parent: None,
+            outcome: None,
             timestamp: chrono::Utc::now(),
         });
         thread.messages.push(actus::agent::ThreadMessage {
@@ -210,6 +212,8 @@ fn prepare_message_clears_stale_acp_mapping() {
             entry_type: Some("text".to_string()),
             tool_name: None,
             tool_status: None,
+            parent: None,
+            outcome: None,
             timestamp: chrono::Utc::now(),
         });
     }
@@ -254,6 +258,8 @@ fn load_threads_repairs_turn_counter_drift() {
                 entry_type: None,
                 tool_name: None,
                 tool_status: None,
+                parent: None,
+                outcome: None,
                 timestamp: chrono::Utc::now(),
             },
             ThreadMessage {
@@ -263,6 +269,8 @@ fn load_threads_repairs_turn_counter_drift() {
                 entry_type: Some("text".to_string()),
                 tool_name: None,
                 tool_status: None,
+                parent: None,
+                outcome: None,
                 timestamp: chrono::Utc::now(),
             },
             ThreadMessage {
@@ -272,6 +280,8 @@ fn load_threads_repairs_turn_counter_drift() {
                 entry_type: None,
                 tool_name: None,
                 tool_status: None,
+                parent: None,
+                outcome: None,
                 timestamp: chrono::Utc::now(),
             },
             ThreadMessage {
@@ -281,6 +291,8 @@ fn load_threads_repairs_turn_counter_drift() {
                 entry_type: Some("text".to_string()),
                 tool_name: None,
                 tool_status: None,
+                parent: None,
+                outcome: None,
                 timestamp: chrono::Utc::now(),
             },
         ],
@@ -310,6 +322,8 @@ fn load_threads_repairs_turn_counter_drift() {
         entry_type: Some("tool_call".to_string()),
         tool_name: Some("search".to_string()),
         tool_status: None,
+        parent: None,
+        outcome: None,
         timestamp: chrono::Utc::now(),
     });
     let mut f = std::fs::File::create(&threads_file).unwrap();

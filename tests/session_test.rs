@@ -9,13 +9,69 @@
 use std::time::Duration;
 
 use actus::agent::session::{ThreadStore, TurnReply};
-use actus::agent::ThreadParent;
+use actus::agent::{ActOutcome, ThreadParent};
 
 fn parent(agent: &str) -> ThreadParent {
     ThreadParent {
         agent: agent.to_string(),
         thread_id: format!("{agent}-thread"),
     }
+}
+
+#[tokio::test]
+async fn a_turn_records_its_outcome_and_the_dispatch_it_came_from() {
+    let store = ThreadStore::new("probe");
+    let (tid, _) = store.get_or_create(None).await;
+    let dispatch = parent("meta");
+
+    store
+        .begin_turn(&tid, "do the thing", Some(dispatch.clone()))
+        .await
+        .unwrap();
+    store
+        .finish_turn(
+            &tid,
+            TurnReply::message("it broke", Some("req-1".to_string()))
+                .dispatched(Some(dispatch.clone()))
+                .ended(ActOutcome::Failed),
+        )
+        .await
+        .unwrap();
+
+    let thread = store.thread(&tid).await.expect("the thread");
+    let user = &thread.messages[0];
+    assert_eq!(
+        user.parent.as_ref().map(|p| p.agent.as_str()),
+        Some("meta"),
+        "the dispatch is on the message that opened the turn, so it survives a turn \
+         that never reaches a reply"
+    );
+    assert_eq!(user.outcome, None, "a user message is not a reply");
+
+    let reply = &thread.messages[1];
+    assert_eq!(
+        reply.parent.as_ref().map(|p| p.thread_id.as_str()),
+        Some("meta-thread")
+    );
+    assert_eq!(
+        reply.outcome,
+        Some(ActOutcome::Failed),
+        "how the turn ended is a field rather than prose"
+    );
+
+    // A turn nobody dispatched carries no parent of its own, and leaves the
+    // first turn's dispatch where it was.
+    store
+        .run_turn(&tid, "again", None, TurnReply::message("done", None))
+        .await
+        .unwrap();
+    let thread = store.thread(&tid).await.expect("the thread");
+    let last = thread.messages.last().expect("a reply");
+    assert_eq!(last.outcome, Some(ActOutcome::Ok));
+    assert!(
+        last.parent.is_none(),
+        "a turn nobody dispatched carries no parent"
+    );
 }
 
 #[tokio::test]

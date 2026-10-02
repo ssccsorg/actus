@@ -9,7 +9,7 @@ use std::sync::Arc;
 use actus::agent::adapter::{AgentFactory, FactoryRegistry, LaunchContext, LaunchedAgent};
 use actus::agent::config::{load_config, AgentSpec};
 use actus::agent::{
-    truncate_title, AgentBackend, AgentCapabilities, AgentRegistry, AgentStatus,
+    truncate_title, ActOutcome, AgentBackend, AgentCapabilities, AgentRegistry, AgentStatus,
     PendingAuthorization, SubmitReceipt, ThreadMessage, ThreadSession,
 };
 use serde::Deserialize;
@@ -149,6 +149,8 @@ impl AgentBackend for StubAgent {
             entry_type: None,
             tool_name: None,
             tool_status: None,
+            parent: None,
+            outcome: None,
             timestamp: now,
         });
         session.messages.push(ThreadMessage {
@@ -158,6 +160,8 @@ impl AgentBackend for StubAgent {
             entry_type: Some("agent_message".to_string()),
             tool_name: None,
             tool_status: None,
+            parent: None,
+            outcome: Some(ActOutcome::Ok),
             timestamp: now,
         });
         session.completed = true;

@@ -21,7 +21,7 @@ use crate::agent::config::AgentSpec;
 use crate::agent::session::{ThreadStore, TurnReply};
 use crate::agent::{
     AgentBackend, AgentCapabilities, AgentStatus, PendingAuthorization, SubmitReceipt,
-    ThreadSession,
+    ThreadParent, ThreadSession,
 };
 
 /// Deterministic in-process agent instance.
@@ -78,13 +78,26 @@ impl AgentBackend for NativeAgent {
         thread_id: Option<&str>,
         message: &str,
     ) -> Result<SubmitReceipt, String> {
+        self.submit_with_options(thread_id, message, None, None).await
+    }
+
+    /// The reference adapter carries the dispatch origin like the others, so a
+    /// controller that drives the native kind sees its dispatch in the record.
+    async fn submit_with_options(
+        &self,
+        thread_id: Option<&str>,
+        message: &str,
+        parent: Option<ThreadParent>,
+        _thinking_effort: Option<&str>,
+    ) -> Result<SubmitReceipt, String> {
         let (tid, is_new) = self.store.get_or_create(thread_id).await;
         let request_id = uuid::Uuid::new_v4().to_string();
         let reply = TurnReply::message(
             format!("[native reference agent] received: {message}"),
             Some(request_id.clone()),
-        );
-        self.store.run_turn(&tid, message, None, reply).await?;
+        )
+        .dispatched(parent.clone());
+        self.store.run_turn(&tid, message, parent, reply).await?;
         Ok(SubmitReceipt {
             thread_id: tid,
             request_id,
