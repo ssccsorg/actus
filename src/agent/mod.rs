@@ -132,6 +132,10 @@ pub struct AgentStatus {
     /// readiness through their own connection state).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// A counter that moves whenever this agent's threads change. A viewer compares
+    /// it to learn that something arrived without reading the thread, which is how an
+    /// open conversation stays live while another participant writes to it.
+    pub thread_version: u64,
 }
 
 /// A tool-call authorization awaiting a human decision (ask mode).

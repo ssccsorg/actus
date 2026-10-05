@@ -198,6 +198,7 @@ impl AgentBackend for ExtCliAgent {
             ready: last_error.is_none(),
             capabilities: AgentKind::ExtCli.capabilities(),
             last_error,
+            thread_version: *self.notify.borrow(),
         }
     }
 
@@ -417,7 +418,7 @@ impl AgentBackend for ExtCliAgent {
                 session.turn_completed += 1;
             }
             drop(threads);
-            let _ = notify.send(now.timestamp_millis() as u64);
+            notify.send_modify(|v| *v = v.wrapping_add(1));
         });
 
         Ok(SubmitReceipt {

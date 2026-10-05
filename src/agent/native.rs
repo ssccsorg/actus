@@ -91,6 +91,7 @@ impl AgentBackend for NativeAgent {
             ready: true,
             capabilities: AgentKind::Native.capabilities(),
             last_error: None,
+            thread_version: *self.notify.borrow(),
         }
     }
 
@@ -147,7 +148,7 @@ impl AgentBackend for NativeAgent {
             session.turn_completed += 1;
         }
 
-        let _ = self.notify.send(now.timestamp_millis() as u64);
+        self.notify.send_modify(|v| *v = v.wrapping_add(1));
         Ok(SubmitReceipt {
             thread_id: tid,
             request_id,
@@ -215,11 +216,11 @@ impl AgentBackend for NativeAgent {
                 author: author.map(str::to_string),
                 timestamp: now,
             });
-            // No turn ran, so the counter is not touched: a consumer waiting on it is waiting
-            // for the agent, and a note is not the agent.
+            // No turn ran, so `turn_completed` is not touched: a consumer waiting on a turn is
+            // waiting for the agent, and a note is not the agent.
             session.updated_at = Some(now);
         }
-        let _ = self.notify.send(now.timestamp_millis() as u64);
+        self.notify.send_modify(|v| *v = v.wrapping_add(1));
         Ok(tid)
     }
 }

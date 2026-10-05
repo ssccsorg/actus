@@ -77,6 +77,9 @@ impl AgentBackend for TelosBackend {
 
     async fn status(&self) -> AgentStatus {
         let mgr = self.manager.read().await;
+        // Read before the struct literal, because the borrow's temporary has to be dropped
+        // while `mgr` is still alive.
+        let thread_version = *mgr.thread_notify.borrow();
         AgentStatus {
             name: self.name().to_string(),
             kind: self.kind(),
@@ -84,6 +87,7 @@ impl AgentBackend for TelosBackend {
             ready: mgr.agent_ready,
             capabilities: self.kind().capabilities(),
             last_error: None,
+            thread_version,
         }
     }
 

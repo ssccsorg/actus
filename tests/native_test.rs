@@ -98,6 +98,37 @@ async fn a_message_keeps_who_said_it_and_the_agent_names_nobody() {
     assert_eq!(session.messages[2].author.as_deref(), Some("spider"));
 }
 
+/// A viewer learns that a thread changed by comparing its version rather than by reading the
+/// thread, so the version moves on every write and holds across a read.
+#[tokio::test]
+async fn thread_version_moves_on_a_write_and_holds_on_a_read() {
+    let backend = Arc::new(NativeAgent::new("native".to_string()));
+    let start = backend.status().await.thread_version;
+
+    let receipt = backend.submit(None, "go").await.unwrap();
+    let after_turn = backend.status().await.thread_version;
+    assert!(after_turn > start, "a turn moved it");
+
+    // A read is not a change: it returns what is there without writing anything.
+    backend.thread(&receipt.thread_id).await.unwrap();
+    backend.messages_window(&receipt.thread_id, 0, 10).await;
+    assert_eq!(
+        backend.status().await.thread_version,
+        after_turn,
+        "a read left it where it was"
+    );
+
+    // A note is a change too: it is what another participant said while a viewer watched.
+    backend
+        .append_note(Some(&receipt.thread_id), "a word to the room", None)
+        .await
+        .unwrap();
+    assert!(
+        backend.status().await.thread_version > after_turn,
+        "a note moved it"
+    );
+}
+
 #[tokio::test]
 async fn native_agent_registers_as_fabric_default() {
     let backend = Arc::new(NativeAgent::new("native".to_string()));

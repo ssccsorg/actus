@@ -181,6 +181,9 @@ async fn health_reports_disconnected_agent() {
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0]["name"], "telos");
     assert_eq!(agents[0]["kind"], "telos");
+    // The version is reported from the start, so a viewer that connected before a write has
+    // a number to compare the next answer against.
+    assert_eq!(agents[0]["thread_version"], 0);
 
     server.abort();
 }
