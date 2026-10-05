@@ -208,6 +208,13 @@ pub struct ThreadSession {
 /// it out of the model cannot disagree about it.
 pub const NOTE_ROLE: &str = "note";
 
+/// One message in a thread's record.
+///
+/// `author` is who wrote it, as the client that recorded it named them. A message the agent
+/// wrote has none, because the agent is the thread's own voice. A shared thread holds what
+/// several people said, so the name is what tells them apart in the record, and actus carries
+/// it without reading it: which id a client speaks as is the client's to decide, the same way
+/// the prefix a person types is.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ThreadMessage {
     pub role: String,
@@ -216,6 +223,8 @@ pub struct ThreadMessage {
     pub entry_type: Option<String>,
     pub tool_name: Option<String>,
     pub tool_status: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -262,15 +271,20 @@ pub trait AgentBackend: Send + Sync {
         -> Result<SubmitReceipt, String>;
 
     /// Submit with dispatch origin metadata (which meta agent and which
-    /// of its threads started this turn) and the reasoning effort the turn
-    /// runs at. Backends that cannot record or carry either fall back to
-    /// the plain submit.
+    /// of its threads started this turn), the reasoning effort the turn
+    /// runs at, and the author of the message. Backends that cannot record
+    /// or carry any of them fall back to the plain submit.
+    ///
+    /// `author` is who the client says is speaking. A shared thread holds several people, so
+    /// the name is what the record keeps of who said what. actus does not resolve it: the client
+    /// the request came from is what knows, and a client that names nobody records no author.
     async fn submit_with_options(
         &self,
         thread_id: Option<&str>,
         message: &str,
         _parent: Option<ThreadParent>,
         _thinking_effort: Option<&str>,
+        _author: Option<&str>,
     ) -> Result<SubmitReceipt, String> {
         self.submit(thread_id, message).await
     }
@@ -352,10 +366,14 @@ pub trait AgentBackend: Send + Sync {
     /// because the first thing said in a thread is what the thread is called.
     ///
     /// A backend that has no record to append to reports that it does not record notes.
+    ///
+    /// `author` names who said the note, the same way
+    /// [`submit_with_options`](Self::submit_with_options) names who said a message.
     async fn append_note(
         &self,
         _thread_id: Option<&str>,
         _content: &str,
+        _author: Option<&str>,
     ) -> Result<String, String> {
         Err("this backend does not record notes".to_string())
     }

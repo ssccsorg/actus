@@ -218,6 +218,7 @@ fn a_turn_context_leaves_the_notes_out() {
         None,
         None,
         None,
+        None,
     );
     mgr.add_message(&tid, "user", "what changed?", None);
     mgr.add_message_full(
@@ -226,6 +227,7 @@ fn a_turn_context_leaves_the_notes_out() {
         "the port",
         Some("a-1".to_string()),
         Some("text".to_string()),
+        None,
         None,
         None,
     );
@@ -261,6 +263,7 @@ fn prepare_message_clears_stale_acp_mapping() {
             entry_type: None,
             tool_name: None,
             tool_status: None,
+            author: None,
             timestamp: chrono::Utc::now(),
         });
         thread.messages.push(actus::agent::ThreadMessage {
@@ -270,6 +273,7 @@ fn prepare_message_clears_stale_acp_mapping() {
             entry_type: Some("text".to_string()),
             tool_name: None,
             tool_status: None,
+            author: None,
             timestamp: chrono::Utc::now(),
         });
     }
@@ -314,6 +318,7 @@ fn load_threads_repairs_turn_counter_drift() {
                 entry_type: None,
                 tool_name: None,
                 tool_status: None,
+                author: None,
                 timestamp: chrono::Utc::now(),
             },
             ThreadMessage {
@@ -323,6 +328,7 @@ fn load_threads_repairs_turn_counter_drift() {
                 entry_type: Some("text".to_string()),
                 tool_name: None,
                 tool_status: None,
+                author: None,
                 timestamp: chrono::Utc::now(),
             },
             ThreadMessage {
@@ -332,6 +338,7 @@ fn load_threads_repairs_turn_counter_drift() {
                 entry_type: None,
                 tool_name: None,
                 tool_status: None,
+                author: None,
                 timestamp: chrono::Utc::now(),
             },
             ThreadMessage {
@@ -341,6 +348,7 @@ fn load_threads_repairs_turn_counter_drift() {
                 entry_type: Some("text".to_string()),
                 tool_name: None,
                 tool_status: None,
+                author: None,
                 timestamp: chrono::Utc::now(),
             },
         ],
@@ -370,6 +378,7 @@ fn load_threads_repairs_turn_counter_drift() {
         entry_type: Some("tool_call".to_string()),
         tool_name: Some("search".to_string()),
         tool_status: None,
+        author: None,
         timestamp: chrono::Utc::now(),
     });
     let mut f = std::fs::File::create(&threads_file).unwrap();
@@ -399,6 +408,7 @@ fn add_message_full_replaces_by_id_anywhere() {
         Some("text".to_string()),
         None,
         None,
+        None,
     );
     mgr.add_message_full(
         &tid,
@@ -408,6 +418,7 @@ fn add_message_full_replaces_by_id_anywhere() {
         Some("tool_call".to_string()),
         Some("list".to_string()),
         Some("Pending".to_string()),
+        None,
     );
     // Re-emission of the earlier id must update in place, not append.
     mgr.add_message_full(
@@ -416,6 +427,7 @@ fn add_message_full_replaces_by_id_anywhere() {
         "thinking v2",
         Some("acp:1".to_string()),
         Some("text".to_string()),
+        None,
         None,
         None,
     );
@@ -427,6 +439,7 @@ fn add_message_full_replaces_by_id_anywhere() {
         Some("tool_call".to_string()),
         Some("list".to_string()),
         Some("Completed".to_string()),
+        None,
     );
     mgr.add_message_full(
         &tid,
@@ -434,6 +447,7 @@ fn add_message_full_replaces_by_id_anywhere() {
         "answer",
         Some("acp:3".to_string()),
         Some("text".to_string()),
+        None,
         None,
         None,
     );
@@ -465,6 +479,7 @@ fn scoped_message_ids_do_not_collide_across_acp_threads() {
         Some("text".to_string()),
         None,
         None,
+        None,
     );
     // A new ACP thread reuses the numeric id 1; the scoped ids differ.
     mgr.add_message_full(
@@ -473,6 +488,7 @@ fn scoped_message_ids_do_not_collide_across_acp_threads() {
         "second thread answer",
         Some("acp-thread-b:1".to_string()),
         Some("text".to_string()),
+        None,
         None,
         None,
     );
@@ -500,6 +516,7 @@ fn scoped_id_update_targets_only_its_acp_thread() {
         Some("text".to_string()),
         None,
         None,
+        None,
     );
     mgr.add_message_full(
         &tid,
@@ -509,6 +526,7 @@ fn scoped_id_update_targets_only_its_acp_thread() {
         Some("text".to_string()),
         None,
         None,
+        None,
     );
     mgr.add_message_full(
         &tid,
@@ -516,6 +534,7 @@ fn scoped_id_update_targets_only_its_acp_thread() {
         "new thread thinking v2",
         Some("acp-new:1".to_string()),
         Some("text".to_string()),
+        None,
         None,
         None,
     );

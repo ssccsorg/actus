@@ -183,6 +183,11 @@ pub struct ChatRequest {
     /// the provider's API takes. Absent leaves the thread's own setting alone.
     #[serde(default)]
     pub thinking_effort: Option<String>,
+    /// Who is speaking, as the client names them. A shared thread holds what several people
+    /// said, and this is what the record keeps of which of them said it. actus does not
+    /// resolve the name against anything: a client that names nobody records no author.
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -200,6 +205,9 @@ pub struct NoteRequest {
     /// Agent name to route to; defaults to the fabric default agent.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Who is speaking, as the client names them, the same field a chat carries.
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -404,6 +412,7 @@ async fn chat_async(
             &req.message,
             parent,
             req.thinking_effort.as_deref(),
+            req.author.as_deref(),
         )
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
@@ -435,7 +444,11 @@ async fn note_thread(
     let agent = agent_for(&state, req.agent.as_deref()).await?;
     control_gate(&state, &headers, agent.name())?;
     let thread_id = agent
-        .append_note(req.thread_id.as_deref(), &req.message)
+        .append_note(
+            req.thread_id.as_deref(),
+            &req.message,
+            req.author.as_deref(),
+        )
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Ok(Json(NoteResponse {
@@ -463,6 +476,7 @@ async fn chat_stream(
             &req.message,
             None,
             req.thinking_effort.as_deref(),
+            req.author.as_deref(),
         )
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
@@ -711,6 +725,7 @@ async fn get_thread(
                         "entry_type": m.entry_type,
                         "tool_name": m.tool_name,
                         "tool_status": m.tool_status,
+                        "author": m.author,
                         "timestamp": m.timestamp.to_rfc3339(),
                     })
                 })
@@ -776,6 +791,8 @@ pub struct PollMessage {
     pub entry_type: Option<String>,
     pub tool_name: Option<String>,
     pub tool_status: Option<String>,
+    /// Who wrote it, for the messages a person wrote. Absent on the agent's own.
+    pub author: Option<String>,
     pub content: String,
     /// When the message was written, in the form the thread read reports it. A view that
     /// draws a time per message reads both paths, and a poll serves the turn a client has
@@ -826,6 +843,7 @@ async fn poll_thread(
             entry_type: message.entry_type.clone(),
             tool_name: message.tool_name.clone(),
             tool_status: message.tool_status.clone(),
+            author: message.author.clone(),
             content: message.content.clone(),
             timestamp: message.timestamp.to_rfc3339(),
         })

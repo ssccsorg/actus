@@ -141,6 +141,7 @@ async fn seed_thread(manager: &Manager, title: &str, at: &str) -> String {
         entry_type: Some("text".to_string()),
         tool_name: None,
         tool_status: None,
+        author: None,
         timestamp: chrono::DateTime::parse_from_rfc3339(at)
             .expect("a timestamp")
             .with_timezone(&chrono::Utc),
@@ -342,6 +343,56 @@ async fn a_note_is_stored_without_running_a_turn() {
     assert_eq!(detail["title"], "anyone about?");
     assert_eq!(detail["total"], 1);
     assert_eq!(detail["messages"][0]["role"], actus::agent::NOTE_ROLE);
+
+    server.abort();
+}
+
+/// A shared thread holds what several people said, and one of them is a device. What a client
+/// names as the speaker is what the record keeps, so a reader can tell them apart.
+#[tokio::test]
+async fn a_message_keeps_who_said_it() {
+    let (state, _workdir, _manager) = test_state_with_manager();
+    let (base, server) = spawn_server(state).await;
+
+    let resp = client()
+        .post(format!("{base}/v1/notes"))
+        .json(&serde_json::json!({"message": "floor is clear", "author": "admin"}))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let tid = body["thread_id"].as_str().expect("thread_id").to_string();
+
+    let resp = client()
+        .post(format!("{base}/v1/notes"))
+        .json(&serde_json::json!({"thread_id": tid, "message": "moving", "author": "spider"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // A message runs the agent, and this state's agent is not connected, so the turn it would
+    // start is refused. That the route carries the author into `submit_with_options` is the
+    // same mapping the note route below exercises; what a message records once one runs is
+    // covered where an agent can answer, by the adapter tests.
+    let resp = client()
+        .post(format!("{base}/v1/chat/async"))
+        .json(&serde_json::json!({"thread_id": tid, "message": "go", "author": "admin"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+    let resp = client()
+        .get(format!("{base}/v1/threads/{tid}"))
+        .send()
+        .await
+        .unwrap();
+    let detail: serde_json::Value = resp.json().await.unwrap();
+    let messages = detail["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 2, "the refused turn wrote nothing");
+    assert_eq!(messages[0]["author"], "admin", "a note keeps who said it");
+    assert_eq!(messages[1]["author"], "spider", "and so does a device's");
 
     server.abort();
 }
@@ -915,6 +966,7 @@ async fn poll_serves_the_turn_whole() {
             Some("text".to_string()),
             None,
             None,
+            None,
         );
         // The turn in flight: a thought the agent has finished, and one it is writing.
         mgr.add_message(&tid, "user", "second question", None);
@@ -926,6 +978,7 @@ async fn poll_serves_the_turn_whole() {
             Some("text".to_string()),
             None,
             None,
+            None,
         );
         mgr.add_message_full(
             &tid,
@@ -933,6 +986,7 @@ async fn poll_serves_the_turn_whole() {
             "<thinking>second, half",
             Some("acp:3".to_string()),
             Some("text".to_string()),
+            None,
             None,
             None,
         );

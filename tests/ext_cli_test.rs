@@ -64,7 +64,7 @@ async fn an_adapter_with_no_record_reports_no_notes() {
     );
 
     let error = agent
-        .append_note(None, "a note this adapter has nowhere to keep")
+        .append_note(None, "a note this adapter has nowhere to keep", None)
         .await
         .expect_err("an adapter with no record cannot keep a note");
     assert!(error.contains("does not record notes"), "{error}");

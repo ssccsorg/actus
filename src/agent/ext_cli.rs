@@ -206,7 +206,8 @@ impl AgentBackend for ExtCliAgent {
         thread_id: Option<&str>,
         message: &str,
     ) -> Result<SubmitReceipt, String> {
-        self.submit_with_options(thread_id, message, None, None).await
+        self.submit_with_options(thread_id, message, None, None, None)
+            .await
     }
 
     async fn submit_with_options(
@@ -215,6 +216,7 @@ impl AgentBackend for ExtCliAgent {
         message: &str,
         parent: Option<ThreadParent>,
         _thinking_effort: Option<&str>,
+        author: Option<&str>,
     ) -> Result<SubmitReceipt, String> {
         let (tid, is_new) = self.get_or_create(thread_id).await;
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -240,6 +242,7 @@ impl AgentBackend for ExtCliAgent {
                 entry_type: None,
                 tool_name: None,
                 tool_status: None,
+                author: author.map(str::to_string),
                 timestamp: now,
             });
             session.completed = false;
@@ -407,6 +410,7 @@ impl AgentBackend for ExtCliAgent {
                     entry_type: Some("agent_message".to_string()),
                     tool_name: None,
                     tool_status: None,
+                    author: None,
                     timestamp: now,
                 });
                 session.completed = true;

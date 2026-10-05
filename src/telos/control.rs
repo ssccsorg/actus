@@ -356,6 +356,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 mgr.add_message_full(
                     &local_id, &role, &content, msg_id,
                     entry_type, tool_name, tool_status,
+                    None,
                 );
             } else {
                 tracing::warn!(
@@ -437,6 +438,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                         Some("error".to_string()),
                         None,
                         None,
+                        None,
                     );
                 }
                 if let Some(thread) = mgr.threads.get_mut(&local_id) {
@@ -500,6 +502,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                     Some("error".to_string()),
                     None,
                     None,
+                    None,
                 );
                 if let Some(thread) = mgr.threads.get_mut(&local_id) {
                     thread.completed = true;
@@ -546,6 +549,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                     &format!("[cancelled] {}", status),
                     None,
                     Some("cancelled".to_string()),
+                    None,
                     None,
                     None,
                 );

@@ -331,7 +331,7 @@ impl TelosManager {
         content: &str,
         message_id: Option<String>,
     ) {
-        self.add_message_full(thread_id, role, content, message_id, None, None, None)
+        self.add_message_full(thread_id, role, content, message_id, None, None, None, None)
     }
 
     /// Record the (scoped message id → content) snapshot of the most
@@ -415,6 +415,7 @@ impl TelosManager {
         entry_type: Option<String>,
         tool_name: Option<String>,
         tool_status: Option<String>,
+        author: Option<&str>,
     ) {
         // What a message is compared against is the thread, so a thread the index holds is
         // read before the compare: without it an id already in the record would be appended
@@ -471,6 +472,7 @@ impl TelosManager {
                 entry_type,
                 tool_name,
                 tool_status,
+                author: author.map(str::to_string),
                 timestamp: chrono::Utc::now(),
             });
             // A listing orders by this and never reads the messages, so it is carried in the

@@ -92,7 +92,8 @@ impl AgentBackend for TelosBackend {
         thread_id: Option<&str>,
         message: &str,
     ) -> Result<SubmitReceipt, String> {
-        self.submit_with_options(thread_id, message, None, None).await
+        self.submit_with_options(thread_id, message, None, None, None)
+            .await
     }
 
     async fn submit_with_options(
@@ -101,6 +102,7 @@ impl AgentBackend for TelosBackend {
         message: &str,
         _parent: Option<ThreadParent>,
         thinking_effort: Option<&str>,
+        author: Option<&str>,
     ) -> Result<SubmitReceipt, String> {
         // Prepare thread state under the write lock, then release before
         // sending so the command channel is not blocked by thread work.
@@ -122,7 +124,16 @@ impl AgentBackend for TelosBackend {
             };
             mgr.set_title(&tid, message);
             let enriched = mgr.prepare_message(&tid, message);
-            mgr.add_message(&tid, "user", message, None);
+            mgr.add_message_full(
+                &tid,
+                "user",
+                message,
+                None,
+                None,
+                None,
+                None,
+                author,
+            );
             let rid = uuid::Uuid::new_v4().to_string();
             let acp_id = mgr.get_acp_thread_id(&tid);
             let cmd = serde_json::json!({
@@ -304,7 +315,12 @@ impl AgentBackend for TelosBackend {
         Ok(tid)
     }
 
-    async fn append_note(&self, thread_id: Option<&str>, content: &str) -> Result<String, String> {
+    async fn append_note(
+        &self,
+        thread_id: Option<&str>,
+        content: &str,
+        author: Option<&str>,
+    ) -> Result<String, String> {
         // The record is the only thing this touches: no command goes to the agent, so an agent
         // that is not connected is not in the way, and what is pending afterwards is what was
         // pending before. A note opens a thread the way a message does, and names it, because
@@ -320,6 +336,7 @@ impl AgentBackend for TelosBackend {
             None,
             None,
             None,
+            author,
         );
         Ok(tid)
     }

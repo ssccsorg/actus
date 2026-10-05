@@ -45,7 +45,7 @@ async fn native_agent_resumes_existing_thread() {
 async fn native_agent_records_a_note_without_running_a_turn() {
     let backend = Arc::new(NativeAgent::new("native".to_string()));
     let tid = backend
-        .append_note(None, "brb, restarting the server")
+        .append_note(None, "brb, restarting the server", None)
         .await
         .unwrap();
 
@@ -68,6 +68,34 @@ async fn native_agent_records_a_note_without_running_a_turn() {
     let receipt = backend.submit(Some(&tid), "go").await.unwrap();
     assert_eq!(receipt.thread_id, tid);
     assert_eq!(backend.thread(&tid).await.unwrap().turn_completed, 1);
+}
+
+/// A shared thread holds what several people said, and one of them is a device. What the client
+/// names as the speaker is what the record keeps, and the agent's own words name nobody.
+#[tokio::test]
+async fn a_message_keeps_who_said_it_and_the_agent_names_nobody() {
+    let backend = Arc::new(NativeAgent::new("native".to_string()));
+
+    let first = backend
+        .submit_with_options(None, "go", None, None, Some("admin"))
+        .await
+        .unwrap();
+    let session = backend.thread(&first.thread_id).await.unwrap();
+    assert_eq!(session.messages[0].role, "user");
+    assert_eq!(session.messages[0].author.as_deref(), Some("admin"));
+    assert_eq!(
+        session.messages[1].author, None,
+        "the agent's own words name nobody"
+    );
+
+    // A note from another participant keeps their name in the same record.
+    let tid = backend
+        .append_note(Some(&first.thread_id), "moving", Some("spider"))
+        .await
+        .unwrap();
+    let session = backend.thread(&tid).await.unwrap();
+    assert_eq!(session.messages[2].role, actus::agent::NOTE_ROLE);
+    assert_eq!(session.messages[2].author.as_deref(), Some("spider"));
 }
 
 #[tokio::test]
