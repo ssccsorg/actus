@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 
 use crate::agent::{
     truncate_title, AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt,
-    ThreadMessage, ThreadSession,
+    ThreadMessage, ThreadSession, NOTE_ROLE,
 };
 
 /// Deterministic in-process agent instance.
@@ -172,6 +172,34 @@ impl AgentBackend for NativeAgent {
 
     async fn create_thread(&self) -> Result<String, String> {
         let (tid, _) = self.get_or_create(None).await;
+        Ok(tid)
+    }
+
+    async fn append_note(&self, thread_id: Option<&str>, content: &str) -> Result<String, String> {
+        let (tid, _) = self.get_or_create(thread_id).await;
+        let now = chrono::Utc::now();
+        {
+            let mut threads = self.threads.write().await;
+            let session = threads
+                .get_mut(&tid)
+                .ok_or_else(|| format!("thread '{}' vanished", tid))?;
+            if session.title.is_none() {
+                session.title = Some(truncate_title(content));
+            }
+            session.messages.push(ThreadMessage {
+                role: NOTE_ROLE.to_string(),
+                content: content.to_string(),
+                message_id: Some(uuid::Uuid::new_v4().to_string()),
+                entry_type: None,
+                tool_name: None,
+                tool_status: None,
+                timestamp: now,
+            });
+            // No turn ran, so the counter is not touched: a consumer waiting on it is waiting
+            // for the agent, and a note is not the agent.
+            session.updated_at = Some(now);
+        }
+        let _ = self.notify.send(now.timestamp_millis() as u64);
         Ok(tid)
     }
 }

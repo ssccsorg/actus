@@ -200,6 +200,47 @@ fn truncation_never_splits_multibyte_chars() {
     assert!(ctx.is_char_boundary(ctx.len()));
 }
 
+/// A note is kept in the thread and never reaches the model, because the context a turn is given
+/// is built from the messages addressed to the agent and the role is what says which those are.
+#[test]
+fn a_turn_context_leaves_the_notes_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mgr = telos_manager(dir.path());
+    let tid = mgr.get_or_create_thread(None);
+
+    // A note first, as one would be said before anyone turns to the agent, then a turn's worth
+    // of conversation: what the person asked and what the agent answered.
+    mgr.add_message_full(
+        &tid,
+        actus::agent::NOTE_ROLE,
+        "brb, restarting the server",
+        Some("n-1".to_string()),
+        None,
+        None,
+        None,
+    );
+    mgr.add_message(&tid, "user", "what changed?", None);
+    mgr.add_message_full(
+        &tid,
+        "assistant",
+        "the port",
+        Some("a-1".to_string()),
+        Some("text".to_string()),
+        None,
+        None,
+    );
+
+    let ctx = mgr.format_conversation_context(&tid).unwrap();
+    assert!(
+        ctx.contains("what changed?"),
+        "the turn still carries its context"
+    );
+    assert!(
+        !ctx.contains("brb, restarting the server"),
+        "a note is what one person said to another: {ctx}"
+    );
+}
+
 /// A stale acp_thread_id from a previous session must be cleared when
 /// the thread is prepared again, and the reverse map entry dropped, so a
 /// resumed thread does not resume the wrong Telos thread.

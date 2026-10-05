@@ -52,6 +52,24 @@ fn agent_with(dir: &Path, bin: std::path::PathBuf, args: Vec<String>) -> ExtCliA
     )
 }
 
+/// An adapter with no record says so rather than answering a note nobody kept, which is how a
+/// client tells a note that was stored from one that was not.
+#[tokio::test]
+async fn an_adapter_with_no_record_reports_no_notes() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = agent_with(
+        dir.path(),
+        stub_bin(dir.path(), "cli.sh", "echo hi"),
+        vec![],
+    );
+
+    let error = agent
+        .append_note(None, "a note this adapter has nowhere to keep")
+        .await
+        .expect_err("an adapter with no record cannot keep a note");
+    assert!(error.contains("does not record notes"), "{error}");
+}
+
 async fn wait_for_assistant(agent: &ExtCliAgent, thread_id: &str) -> String {
     for _ in 0..200 {
         if let Some(session) = agent.thread(thread_id).await {

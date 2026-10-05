@@ -201,6 +201,13 @@ pub struct ThreadSession {
     pub parent: Option<ThreadParent>,
 }
 
+/// The role a note carries: something a person said in a thread that is not addressed to the
+/// agent. No turn runs for it, and no turn's context is built from it, because
+/// `format_conversation_context` takes a `user` message and an `assistant` message whose entry
+/// type is `text`. The string lives here so the adapters that record one and the filter that keeps
+/// it out of the model cannot disagree about it.
+pub const NOTE_ROLE: &str = "note";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ThreadMessage {
     pub role: String,
@@ -333,6 +340,25 @@ pub trait AgentBackend: Send + Sync {
 
     /// Create a fresh thread immediately (without sending a message).
     async fn create_thread(&self) -> Result<String, String>;
+
+    /// Append a note to a thread's record and return the thread it landed in, creating the
+    /// thread when the caller names none.
+    ///
+    /// A note is something a person said in the thread that is not addressed to the agent. It is
+    /// kept like any other message, in order, so a reader sees it where it was said, and the role
+    /// it carries ([`NOTE_ROLE`]) keeps it out of every turn's context. The agent is not involved,
+    /// so unlike [`submit`](Self::submit) neither the backend's connection nor its readiness is a
+    /// precondition, and no turn is pending afterwards. A note opens a thread, and names it,
+    /// because the first thing said in a thread is what the thread is called.
+    ///
+    /// A backend that has no record to append to reports that it does not record notes.
+    async fn append_note(
+        &self,
+        _thread_id: Option<&str>,
+        _content: &str,
+    ) -> Result<String, String> {
+        Err("this backend does not record notes".to_string())
+    }
 }
 
 /// Registry of running agent backends. The default agent serves the

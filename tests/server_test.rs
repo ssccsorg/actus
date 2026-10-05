@@ -266,6 +266,86 @@ async fn thread_lifecycle_over_http() {
     server.abort();
 }
 
+/// A note is a message stored in a thread without a turn being run for it, which is what lets
+/// people sharing a thread say something to each other while the agent is present. What the
+/// route has to get right is that it stores and stops: the record holds the message, and the
+/// agent is where it was.
+#[tokio::test]
+async fn a_note_is_stored_without_running_a_turn() {
+    let (state, _workdir, manager) = test_state_with_manager();
+    let (base, server) = spawn_server(state).await;
+
+    // A thread with a turn already behind it, and a counter that would show a new one.
+    let tid = {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.set_title(&tid, "first");
+        mgr.add_message(&tid, "user", "first", None);
+        mgr.add_message(&tid, "assistant", "ok", None);
+        let thread = mgr.threads.get_mut(&tid).expect("the thread just made");
+        thread.turn_completed = 3;
+        tid
+    };
+
+    let resp = client()
+        .post(format!("{base}/v1/notes"))
+        .json(&serde_json::json!({"thread_id": tid, "message": "brb, restarting"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "noted");
+    assert_eq!(body["thread_id"], tid, "on the thread the caller named");
+
+    // The record holds it, after what was already said, where a reader of the thread sees it.
+    let resp = client()
+        .get(format!("{base}/v1/threads/{tid}"))
+        .send()
+        .await
+        .unwrap();
+    let detail: serde_json::Value = resp.json().await.unwrap();
+    let messages = detail["messages"].as_array().expect("messages");
+    let last = messages.last().expect("the note");
+    assert_eq!(last["role"], actus::agent::NOTE_ROLE);
+    assert_eq!(last["content"], "brb, restarting");
+    assert_eq!(detail["total"], 3, "what was said, and the note");
+
+    // And no turn ran: nothing is pending and the counter the agent moves is where it was. The
+    // guard is scoped because the handler takes the manager's write lock, so a read held across
+    // the next request is a deadlock rather than a check.
+    {
+        let mgr = manager.read().await;
+        assert_eq!(mgr.threads[&tid].turn_completed, 3);
+        assert!(
+            mgr.pending_requests.is_empty(),
+            "nothing was sent to the agent"
+        );
+    }
+
+    // A note with no thread opens one, and names it, the way a message does.
+    let resp = client()
+        .post(format!("{base}/v1/notes"))
+        .json(&serde_json::json!({"message": "anyone about?"}))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let opened = body["thread_id"].as_str().expect("thread_id").to_string();
+    assert_ne!(opened, tid, "a thread of its own");
+    let resp = client()
+        .get(format!("{base}/v1/threads/{opened}"))
+        .send()
+        .await
+        .unwrap();
+    let detail: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(detail["title"], "anyone about?");
+    assert_eq!(detail["total"], 1);
+    assert_eq!(detail["messages"][0]["role"], actus::agent::NOTE_ROLE);
+
+    server.abort();
+}
+
 /// A thread is read as a range of its log rather than as all of it, so a conversation that
 /// grew to hundreds of messages is not one response of megabytes. The window is what a phone
 /// can parse and draw; the coordinates are what let it ask for the part before it.

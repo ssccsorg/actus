@@ -13,7 +13,7 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
-    ThreadParent, ThreadSession,
+    ThreadParent, ThreadSession, NOTE_ROLE,
 };
 use crate::telos::{TelosManager, WsCommandTx};
 
@@ -301,6 +301,26 @@ impl AgentBackend for TelosBackend {
     async fn create_thread(&self) -> Result<String, String> {
         let mut mgr = self.manager.write().await;
         let tid = mgr.get_or_create_thread(None);
+        Ok(tid)
+    }
+
+    async fn append_note(&self, thread_id: Option<&str>, content: &str) -> Result<String, String> {
+        // The record is the only thing this touches: no command goes to the agent, so an agent
+        // that is not connected is not in the way, and what is pending afterwards is what was
+        // pending before. A note opens a thread the way a message does, and names it, because
+        // the first thing said in a thread is what the thread is called.
+        let mut mgr = self.manager.write().await;
+        let tid = mgr.get_or_create_thread(thread_id);
+        mgr.set_title(&tid, content);
+        mgr.add_message_full(
+            &tid,
+            NOTE_ROLE,
+            content,
+            Some(uuid::Uuid::new_v4().to_string()),
+            None,
+            None,
+            None,
+        );
         Ok(tid)
     }
 

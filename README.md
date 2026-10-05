@@ -332,6 +332,7 @@ The workflow in `.github/workflows/ci.yml` runs two tiers:
 | `/health` | GET | Server status, per-agent state with capabilities and launch errors |
 | `/v1/chat` | POST | Send message, SSE stream response |
 | `/v1/chat/async` | POST | Send message, return task id and thread id |
+| `/v1/notes` | POST | Store a message in a thread without running a turn: what one person in a shared thread says to the others |
 | `/v1/cancel` | POST | Cancel a turn; optional body `{ agent?, request_id? }` scopes the cancel (no body cancels the default agent's whole turn) |
 | `/v1/threads` | GET | List conversation threads of one agent |
 | `/v1/threads` | POST | Create a fresh thread without a message |

@@ -192,6 +192,22 @@ pub struct ChatResponse {
     pub thread_id: String,
 }
 
+/// A note: a message stored in a thread, in order, without a turn being run for it.
+#[derive(Serialize, Deserialize)]
+pub struct NoteRequest {
+    pub message: String,
+    pub thread_id: Option<String>,
+    /// Agent name to route to; defaults to the fabric default agent.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct NoteResponse {
+    pub status: String,
+    pub thread_id: String,
+}
+
 #[derive(Serialize)]
 pub struct ThreadListResponse {
     pub threads: Vec<ThreadSummary>,
@@ -401,6 +417,30 @@ async fn chat_async(
         // misleading because approval only applies in ask mode.
         status: "submitted".to_string(),
         thread_id: receipt.thread_id,
+    }))
+}
+
+/// Store a note: a message kept in a thread, in order, without a turn being run for it.
+///
+/// This route stands beside `/v1/chat/async` because the two differ in exactly what the caller
+/// is saying: a chat runs the agent, and a note does not. Which messages a person addresses to
+/// the agent rather than to the room they share is the client's convention and not actus's, so
+/// what is done here is what the caller asked for: append the message and answer with the thread
+/// it landed in.
+async fn note_thread(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<NoteRequest>,
+) -> Result<Json<NoteResponse>, StatusCode> {
+    let agent = agent_for(&state, req.agent.as_deref()).await?;
+    control_gate(&state, &headers, agent.name())?;
+    let thread_id = agent
+        .append_note(req.thread_id.as_deref(), &req.message)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(Json(NoteResponse {
+        status: "noted".to_string(),
+        thread_id,
     }))
 }
 
@@ -1241,6 +1281,7 @@ pub fn build_router(state: SharedState, cors_origins: &[String]) -> Router {
         .route("/health", get(health))
         .route("/v1/chat", post(chat_stream))
         .route("/v1/chat/async", post(chat_async))
+        .route("/v1/notes", post(note_thread))
         .route("/v1/cancel", post(cancel_turn))
         .route(
             "/v1/agents/tool-calls/pending",
