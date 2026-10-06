@@ -30,7 +30,7 @@ pub enum AgentKind {
     /// LangGraph Server over REST/SSE. Future adapter.
     LangGraph,
     /// In-process Rust agent loop. Reference adapter (deterministic,
-    /// no LLM); proves the fabric seam and lets actus run without Telos.
+    /// no LLM); proves the fabric seam and lets actus run without an external executor.
     Native,
     /// Any external CLI binary as an auxiliary agent. Raw transport: per
     /// turn, actus spawns `bin <args...> <prompt>` and records the output.
@@ -66,7 +66,7 @@ impl AgentKind {
         AgentKind::ALL.iter().find(|k| k.as_str() == s).copied()
     }
 
-    /// Declared capabilities for this kind. A full ACP agent (Telos) is
+    /// Declared capabilities for this kind. A full ACP agent is
     /// sessionful; a raw-CLI agent is a one-shot, parallel act.
     pub fn capabilities(self) -> AgentCapabilities {
         match self {
@@ -111,7 +111,7 @@ impl AgentKind {
 /// situation instead of assuming every agent is a full session.
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentCapabilities {
-    /// Multi-turn conversation with resume (Telos, Native).
+    /// Multi-turn conversation with resume (acpws, native).
     pub sessionful: bool,
     /// Intermediate streaming events during a turn.
     pub streaming: bool,
@@ -199,7 +199,7 @@ pub struct ThreadSession {
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
     /// True when the last assistant response is complete.
     pub completed: bool,
-    /// Platform-side thread id (ACP thread id for Telos). Kept on the
+    /// Platform-side thread id (ACP thread id for an acpws agent). Kept on the
     /// session so persisted files stay backward compatible; a future
     /// platform adapter maps its own id into this field.
     pub acp_thread_id: Option<String>,

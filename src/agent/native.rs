@@ -1,11 +1,11 @@
 // NativeBackend — reference in-process adapter implementing the agent
 // fabric trait.
 //
-// The adapter is deterministic and needs no LLM, no Telos binary, and no
+// The adapter is deterministic and needs no LLM, no executor binary, and no
 // network. It answers every submission with a canned reply so that the
 // fabric seam (AgentBackend, AgentRegistry, HTTP handlers) can be
 // exercised end to end without any external agent. It exists to prove
-// that Telos is one adapter among several: adding a real platform is a
+// that an executor is one adapter among several: adding a real platform is a
 // new `AgentBackend` implementation plus one registry entry, with no
 // change to the server.
 

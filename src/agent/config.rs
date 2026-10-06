@@ -49,7 +49,7 @@ impl ToolApproval {
 }
 
 /// One MCP (Model Context Protocol) server attached to an agent. Matches
-/// Telos's `context_servers` settings entries: either a local stdio process
+/// The executor.s `context_servers` settings entries: either a local stdio process
 /// (`command`/`args`/`env`) or a remote HTTP endpoint (`url`/`headers`).
 #[derive(Clone, Debug, Deserialize)]
 pub struct McpServer {
@@ -103,7 +103,7 @@ pub struct AgentSpec {
     pub bin: PathBuf,
     /// WebSocket port the agent process connects back to.
     pub ws_port: u16,
-    /// Tool call approval policy; drives the fork's TELOS_TOOL_APPROVAL env.
+    /// Tool call approval policy, handed to the executor when it is launched.
     pub tool_approval: ToolApproval,
     /// Reasoning effort this agent's model is asked for. Normalized to one of
     /// `REASONING_EFFORT_LEVELS`.

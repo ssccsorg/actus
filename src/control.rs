@@ -1,7 +1,7 @@
 // Meta-agent control MCP proxy.
 //
 // `actus control` is a stdio MCP server that a sessionful agent such as
-// telos runs as one of its context servers (a `[[agents.mcp]]` entry).
+// the agent runs as one of its context servers (a `[[agents.mcp]]` entry).
 // Each MCP tool call is translated into an actus HTTP API call on the
 // loopback port, carrying the bearer token and an identity header, so
 // the actus server can apply the `[agent-control]` allowlist policy.

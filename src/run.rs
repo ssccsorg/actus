@@ -50,7 +50,7 @@ pub fn environment_store() -> StoreFactory {
 }
 
 /// The `actus control` stdio MCP proxy is a subcommand so the same binary
-/// can serve as a context server of a sessionful agent such as telos.
+/// can serve as a context server of a sessionful agent such as an acpws agent.
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum Command {
     /// Run the meta-agent control MCP proxy over stdio.
@@ -63,7 +63,7 @@ pub struct Args {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Telos binary path
+    /// Executor binary path
     #[arg(long)]
     pub bin: Option<PathBuf>,
 
@@ -285,9 +285,9 @@ pub async fn run_with(
         .or_else(|| std::env::var("LLM_API_KEY").ok())
         .map(|k| unquote_env_value(&k));
 
-    // Resolve the Telos binary path: --bin, TELOS_BIN, or the sibling
-    // build. Used by the Telos adapter only; existence is checked at
-    // launch so non-Telos agents do not require it.
+    // Resolve the executor binary path: --bin, TELOS_BIN, or the sibling
+    // build. Used by the acpws adapter only; existence is checked at
+    // launch so agents of other kinds do not require it.
     let bin_path = if let Some(p) = args.bin {
         p
     } else if let Ok(p) = std::env::var("TELOS_BIN") {
@@ -328,7 +328,7 @@ pub async fn run_with(
     let reasoning_effort = llm.reasoning_effort;
 
     // Resolve agent config: ACTUS_CONFIG overrides ~/.actus/config.toml.
-    // Missing file (or no override) means a single default telos agent.
+    // Missing file (or no override) means a single default agent.
     let config_path = std::env::var("ACTUS_CONFIG")
         .ok()
         .map(PathBuf::from)
@@ -371,7 +371,7 @@ pub async fn run_with(
     let mut children = AgentChildren::new();
     // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
     let mut monitors: Vec<(Arc<RwLock<AcpwsManager>>, WsCommandTx)> = Vec::new();
-    // Per-agent user data dirs stay alive for the process lifetime; Telos
+    // Per-agent user data dirs stay alive for the process lifetime; the executor
     // reads settings at startup and watches them while running.
     let mut _user_data_dirs: Vec<tempfile::TempDir> = Vec::new();
 
@@ -393,7 +393,7 @@ pub async fn run_with(
             AgentKind::Acpws => {
                 if !spec.bin.exists() {
                     return Err(anyhow::anyhow!(
-                        "agent '{}': telos binary not found at {}",
+                        "agent '{}': executor binary not found at {}",
                         spec.name,
                         spec.bin.display()
                     ));
@@ -401,7 +401,7 @@ pub async fn run_with(
                 // A per-agent workdir scopes this agent to one project. Without
                 // one the agent opens the fabric-wide workdir, which is what
                 // every agent did before per-agent scoping existed. A missing
-                // directory is an error rather than a silent fallback: telos
+                // directory is an error rather than a silent fallback: the executor
                 // only opens a worktree for a path that exists, so a typo would
                 // otherwise yield an agent with no project at all.
                 let agent_workdir = match &spec.workdir {
@@ -438,7 +438,7 @@ pub async fn run_with(
                 let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
                 monitors.push((manager.clone(), ws_tx.clone()));
 
-                // Per-agent WebSocket server (Telos connects back here).
+                // Per-agent WebSocket server (the executor connects back here).
                 tokio::spawn({
                     let host = ws_host.clone();
                     let mgr = manager.clone();
@@ -466,7 +466,7 @@ pub async fn run_with(
                     http_port: args.http_port,
                     tool_approval: spec.tool_approval,
                 };
-                let child = launch_agent(&launch, &threads_dir.join("telos.log")).await?;
+                let child = launch_agent(&launch, &threads_dir.join("executor.log")).await?;
                 _user_data_dirs.push(user_data_dir);
                 tracing::info!(
                     "Agent '{}' launched (PID {:?}, WS ws://{}, threads {})",

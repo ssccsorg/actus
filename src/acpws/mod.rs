@@ -48,12 +48,12 @@ pub struct AcpwsManager {
     pub held: HashSet<String>,
     /// Mapping from request_id to acp_thread_id (for correlating responses)
     pub pending_requests: HashMap<String, String>,
-    /// Mapping from telos_thread_id to local_thread_id (for reverse lookup)
+    /// Mapping from the platform thread id to the local thread id (for reverse lookup)
     pub thread_id_map: HashMap<String, String>,
     /// Where this agent's thread record lives. The store owns its shape; the
     /// manager only asks it to load and to persist.
     pub store: Arc<dyn crate::store::RecordStore>,
-    /// Threads that have been activated (context sent) in the current Telos session
+    /// Threads that have been activated (context sent) in the current executor session
     pub threads_activated: HashSet<String>,
     /// Notifier for thread state changes (SSE consumers)
     pub thread_notify: watch::Sender<u64>,
@@ -62,7 +62,7 @@ pub struct AcpwsManager {
     /// Monotonically increasing reconnect counter. Incremented each time
     /// a new WS connection is established (for SSE consumers to detect).
     pub reconnect_count: u64,
-    /// Timestamp of the last PING received from Telos (for keepalive).
+    /// Timestamp of the last PING received from the executor (for keepalive).
     pub last_ping_time: Instant,
     /// Timestamp of the last meaningful SSE event (message_added,
     /// message_completed, thread_created, agent_ready).
@@ -77,7 +77,7 @@ pub struct AcpwsManager {
     /// tool_call_id (ask mode).
     pub pending_authorizations: HashMap<String, PendingAuthorization>,
     /// Snapshot of (scoped message id → content) from the most recent
-    /// completed turn of each thread. Telos's flush_streaming_throttle
+    /// completed turn of each thread. The executor.s flush_streaming_throttle
     /// resends ALL ACP thread entries on turn completion and replays prior
     /// turn entries on follow-up turns; a resend whose id and content both
     /// match this snapshot is a replay and is dropped instead of being
@@ -216,7 +216,7 @@ impl AcpwsManager {
     }
 
     /// Prepare the user message, injecting conversation context if this
-    /// thread has not been activated in the current Telos session yet.
+    /// thread has not been activated in the current executor session yet.
     pub fn prepare_message(&mut self, thread_id: &str, user_message: &str) -> String {
         if !self.threads_activated.contains(thread_id) {
             // Clear stale acp_thread_id from previous sessions
@@ -273,8 +273,8 @@ impl AcpwsManager {
     }
 
     /// Look up the ACP thread ID for a given local thread ID.
-    /// ACP threads are created by Telos and stored in thread_id_map.
-    /// Returns None for new threads (Telos will create a fresh ACP thread).
+    /// ACP threads are created by the executor and stored in thread_id_map.
+    /// Returns None for new threads (the executor will create a fresh ACP thread).
     pub fn get_acp_thread_id(&self, local_id: &str) -> Option<String> {
         for (acp_id, lid) in &self.thread_id_map {
             if lid == local_id {
@@ -385,7 +385,7 @@ impl AcpwsManager {
     /// signature is intentionally wide.
     ///
     /// Matching is by id anywhere in the thread, not just the last message:
-    /// Telos emits updates for several interleaved messages in one turn
+    /// The executor emits updates for several interleaved messages in one turn
     /// (thinking, tool call, then the answer), so the same id reappears
     /// non-consecutively. Comparing only against the tail used to append a
     /// duplicate every time, swelling a single turn into dozens of
@@ -553,7 +553,7 @@ impl AcpwsManager {
         });
     }
 
-    /// Send a JSON command to Telos via WebSocket. Returns error if not connected.
+    /// Send a JSON command to the executor over the WebSocket. Returns error if not connected.
     pub fn send_command(&self, cmd: &str) -> Result<(), String> {
         match &self.ws_tx {
             Some(tx) => tx.send(cmd.to_string()).map_err(|e| e.to_string()),
@@ -955,7 +955,7 @@ pub fn ensure_agent_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Resul
         }
     }
 
-    // MCP servers: map each declaration to Telos's `context_servers` entry.
+    // MCP servers: map each declaration to the executor.s `context_servers` entry.
     // Stdio servers become `{ command, args, env }`; HTTP servers become
     // `{ url, headers }`. The headless agent's context server registry
     // starts the enabled ones and exposes their tools to the model, and the
@@ -1024,7 +1024,7 @@ pub fn ensure_agent_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Resul
     let mut f = fs::File::create(&creds_file)?;
     f.write_all(serde_json::to_string_pretty(&creds)?.as_bytes())?;
 
-    tracing::info!("Telos settings written to {}", settings_file.display());
+    tracing::info!("Executor settings written to {}", settings_file.display());
     Ok(())
 }
 

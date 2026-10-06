@@ -156,7 +156,8 @@ async fn agent_for(
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
-    pub telos_connected: bool,
+    /// Whether the default agent's executor holds its WebSocket connection.
+    pub agent_connected: bool,
     pub agent_ready: bool,
     pub active_threads: usize,
     /// Which store holds the default agent's record. A client shows it, because the same
@@ -361,7 +362,7 @@ pub struct ThreadListQuery {
 
 async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
     let agents = state.agents.statuses().await;
-    let (telos_connected, agent_ready, active_threads, record_store) =
+    let (agent_connected, agent_ready, active_threads, record_store) =
         match state.agents.default_agent() {
             Some(agent) => {
                 let status = agent.status().await;
@@ -380,7 +381,7 @@ async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
         };
     Json(HealthResponse {
         status: "ok".to_string(),
-        telos_connected,
+        agent_connected,
         agent_ready,
         active_threads,
         record_store,
@@ -804,7 +805,7 @@ pub struct PollMessage {
 /// Poll for new thread state.
 ///
 /// Alternative to SSE for clients that cannot maintain a persistent connection
-/// or when WebSocket events from Telos are unreliable. The client calls this
+/// or when WebSocket events from the executor are unreliable. The client calls this
 /// endpoint at regular intervals (e.g., every 500ms).
 ///
 /// The response serves the turn in flight: every message the agent has written

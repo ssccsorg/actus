@@ -322,7 +322,7 @@ The workflow in `.github/workflows/ci.yml` runs two tiers:
   binary from the prebuilt telos image `ghcr.io/ssccsorg/telos`. The
   image is pulled anonymously (the package is public), never built here,
   and the agent runs with the stub backend so the tier stays LLM-free
-  while `telos_connected` and `agent_ready` reflect a real process. If
+  while `agent_connected` and `agent_ready` reflect a real process. If
   the published image is unavailable the tier skips with a notice.
 
 ### API Endpoints

@@ -136,7 +136,7 @@ test_health() {
     if echo "$h" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='ok' else 1)" 2>/dev/null; then
         pass "Server health: ok"
         local telos agent threads
-        telos=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('telos_connected',False))")
+        telos=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('agent_connected',False))")
         agent=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('agent_ready',False))")
         threads=$(echo "$h" | python3 -c "import sys,json; print(json.load(sys.stdin).get('active_threads',0))")
         pass "Telos connected: $telos"
@@ -363,7 +363,7 @@ start_server() {
         local health
         health=$(curl -s --max-time 2 http://127.0.0.1:$HTTP_PORT/health 2>/dev/null || echo '')
         local ready
-        ready=$(echo "$health" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('telos_connected') and d.get('agent_ready') else 1)" 2>/dev/null && echo 1 || echo 0)
+        ready=$(echo "$health" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('agent_connected') and d.get('agent_ready') else 1)" 2>/dev/null && echo 1 || echo 0)
         if [ "$ready" = "1" ]; then
             pass "Server and agent ready after ${i}s"
             return 0

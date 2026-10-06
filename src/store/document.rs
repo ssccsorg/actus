@@ -87,7 +87,7 @@ fn backfill_titles(threads: &mut HashMap<String, ThreadSession>) {
 }
 
 /// Repair a historical bug where streaming updates to the same message id were appended
-/// instead of replaced (Telos emits thinking, tool call, and answer messages with
+/// instead of replaced (the executor emits thinking, tool call, and answer messages with
 /// interleaved ids), swelling a turn into dozens of duplicate entries. Keep the last
 /// occurrence of each id and drop the earlier duplicates; user messages and id-less
 /// entries are kept as-is.

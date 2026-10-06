@@ -1,8 +1,8 @@
 // AcpwsBackend — ACP/WebSocket adapter implementing the agent fabric trait.
 //
-// Runs one Telos process behind the `AgentBackend` interface.
+// Runs one executor process behind the `AgentBackend` interface.
 // ACP-over-WebSocket details (connection loop, event dispatch, reconnect)
-// stay inside `telos::control`; this adapter owns thread state, context
+// stay inside `acpws::control`; this adapter owns thread state, context
 // injection, command submission, and the resume wait.
 
 use std::sync::Arc;
@@ -22,16 +22,16 @@ use crate::agent::{
 pub struct AcpwsBackend {
     /// Name this instance answers to. The registry keys on it and routing
     /// looks it up, so it has to be the configured agent name: a constant
-    /// would make every telos agent collide on one registry entry and leave
+    /// would make every agent of this kind collide on one registry entry and leave
     /// all but the last unreachable.
     pub name: String,
     pub manager: Arc<RwLock<AcpwsManager>>,
     /// Shared command channel, kept in sync with `AcpwsManager::ws_tx` by
-    /// `telos::control`. Sending through the shared channel means a stale
+    /// `acpws::control`. Sending through the shared channel means a stale
     /// manager-side sender after a reconnect cannot silently drop a
     /// message.
     pub ws_tx: WsCommandTx,
-    /// The project this agent was launched for. Telos is told one workdir at
+    /// The project this agent was launched for. The executor is told one workdir at
     /// launch and opens a worktree for it, so this is what its threads belong
     /// to; the backend answers with it rather than the listing deriving it
     /// from the configuration, which is what keeps the notion a backend's.
@@ -235,12 +235,12 @@ impl AgentBackend for AcpwsBackend {
     }
 
     async fn cancel(&self) -> Result<(), String> {
-        // Telos resolves the turn to cancel by request id, so an agent-wide cancel has
+        // The executor resolves the turn to cancel by request id, so an agent-wide cancel has
         // to name the turns this agent is running. One agent runs one turn at a time, so
         // that is normally one id.
         let live = self.live_requests().await;
         if live.is_empty() {
-            // Nothing is in flight, so there is no turn to name and Telos answers the
+            // Nothing is in flight, so there is no turn to name and the executor answers the
             // empty command as a noop. Sending it keeps the one thing a cancel always
             // does, submitting a command.
             return self.send_command(cancel_command(None)?).await;
@@ -363,7 +363,7 @@ impl AcpwsBackend {
     ///
     /// `pending_requests` holds a live mapping while a turn is in flight and a blank
     /// sentinel once it has been consumed, so a non-empty value is what "in flight"
-    /// means. A stale entry that was never consumed costs nothing: Telos answers a
+    /// means. A stale entry that was never consumed costs nothing: the executor answers a
     /// request id it does not know with a noop.
     async fn live_requests(&self) -> Vec<String> {
         let mgr = self.manager.read().await;

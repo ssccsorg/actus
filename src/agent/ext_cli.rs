@@ -176,7 +176,7 @@ impl AgentBackend for ExtCliAgent {
     }
 
     /// The directory this CLI runs in. A command-line agent is scoped to one
-    /// project the same way a telos agent is.
+    /// project the same way an acpws agent is.
     fn scope(&self) -> Option<String> {
         Some(self.workdir.display().to_string())
     }

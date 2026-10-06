@@ -1,6 +1,6 @@
 // Context mention sources for the `@` mention feature.
 //
-// Telos's mention picker offers files, symbols, threads, rules, and fetch as
+// The executor.s mention picker offers files, symbols, threads, rules, and fetch as
 // prompt-injection context. This module implements the server-side sources
 // that do not need a language server: definition-pattern symbol search and
 // project rule file discovery.

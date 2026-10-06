@@ -23,14 +23,14 @@ use crate::acpws::types::SyncEvent;
 use crate::acpws::AcpwsManager;
 use crate::server::WsCommandTx;
 
-/// Run the WebSocket server that accepts connections from the Telos process.
+/// Run the WebSocket server that accepts connections from the executor.
 ///
 /// Connection lifecycle:
 ///   1. Listen on ws_host
-///   2. Accept connection from Telos
+///   2. Accept a connection from the executor
 ///   3. Set up send/receive channels
 ///   4. Process events until disconnect
-///   5. On disconnect, accept the next connection (Telos auto-reconnects)
+///   5. On disconnect, accept the next connection (the executor auto-reconnects)
 pub async fn run_ws_server(
     ws_host: &str,
     agent_manager: Arc<RwLock<AcpwsManager>>,
@@ -48,7 +48,7 @@ pub async fn run_ws_server(
     // Connection loop: accept → read → disconnect → accept again
     loop {
         let (stream, peer) = listener.accept().await?;
-        tracing::info!("Telos connecting from {}", peer);
+        tracing::info!("Executor connecting from {}", peer);
 
         // The agent's tool results can be large (a broad find_path glob on a
         // big workspace produced a 28MB message). The tungstenite default
@@ -68,7 +68,7 @@ pub async fn run_ws_server(
             mgr.agent_connected = true;
             mgr.agent_ready = false;
             tracing::info!(
-                "Telos WebSocket connected (reconnect #{})",
+                "Executor WebSocket connected (reconnect #{})",
                 mgr.reconnect_count
             );
         }
@@ -87,7 +87,7 @@ pub async fn run_ws_server(
             let mut tx_guard = ws_tx.lock().await;
             *tx_guard = Some(tx_for_shared);
         }
-        tracing::info!("Telos WebSocket re-established");
+        tracing::info!("Executor WebSocket re-established");
 
         // Resend any pending messages from before the disconnect
         {
@@ -137,7 +137,7 @@ pub async fn run_ws_server(
                 // and stall every later reader forever.
                 let msg = tokio::select! {
                     m = read.next() => Some(m),
-                    // Health check: break if telos_connect was cleared by the
+                    // Health check: break if agent_connected was cleared by the
                     // health monitor (forces reconnection loop iteration).
                     _ = tokio::time::sleep(Duration::from_millis(500)) => None,
                 };
@@ -169,7 +169,7 @@ pub async fn run_ws_server(
     }
 }
 
-/// Process a single WebSocket message from Telos.
+/// Process a single WebSocket message from the executor.
 /// Returns false if the connection should be closed.
 async fn handle_ws_message(
     agent_manager: &Arc<RwLock<AcpwsManager>>,
@@ -191,7 +191,7 @@ async fn handle_ws_message(
         }
         Some(Ok(Message::Ping(_))) => true,
         Some(Ok(Message::Close(_))) => {
-            tracing::info!("Telos WebSocket closed");
+            tracing::info!("Executor WebSocket closed");
             agent_manager.write().await.agent_connected = false;
             false
         }

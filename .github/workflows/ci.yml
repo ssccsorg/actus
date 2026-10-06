@@ -77,7 +77,7 @@ jobs:
           fi
           # Stub backend keeps the tier LLM-free (TELOS_STUB_BACKEND=1,
           # LLM_API_KEY=ci-skip, and --test's LLM_CHAT gate) while the real
-          # binary connects, so health reflects telos_connected/agent_ready
+          # binary connects, so health reflects agent_connected/agent_ready
           # true and the full endpoint suite runs against a real agent
           # process.
           # Mount actus outside the telos image's /workspace root: the

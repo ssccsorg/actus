@@ -77,7 +77,7 @@ def check(name, ok, detail=""):
 def wait_ready(timeout=40):
     for _ in range(timeout):
         s, h = http("GET", "/health", timeout=3)
-        if s == 200 and h.get("telos_connected") and h.get("agent_ready"):
+        if s == 200 and h.get("agent_connected") and h.get("agent_ready"):
             return h
         time.sleep(1)
     return None
@@ -302,7 +302,7 @@ def scenario_reconnect():
     disconnected = None
     for _ in range(12):
         h = health()
-        if h and not h.get("telos_connected"):
+        if h and not h.get("agent_connected"):
             disconnected = h
             break
         time.sleep(1)
@@ -473,7 +473,7 @@ def scenario_soak():
     while time.time() < end:
         h = health()
         checks += 1
-        if not h or not h.get("telos_connected"):
+        if not h or not h.get("agent_connected"):
             drops += 1
         if time.time() - last_chat > 60:
             last_chat = time.time()

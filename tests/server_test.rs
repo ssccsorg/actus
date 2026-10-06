@@ -174,7 +174,7 @@ async fn health_reports_disconnected_agent() {
     let body: serde_json::Value = resp.json().await.unwrap();
 
     assert_eq!(body["status"], "ok");
-    assert_eq!(body["telos_connected"], false);
+    assert_eq!(body["agent_connected"], false);
     assert_eq!(body["agent_ready"], false);
     assert_eq!(body["active_threads"], 0);
     let agents = body["agents"].as_array().expect("agents array");

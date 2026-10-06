@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Outgoing WebSocket message from Telos to actus.
+/// Outgoing WebSocket message from the executor to actus.
 /// Matches the API's SyncMessage format: { event_type, data }.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutgoingMessage {
@@ -22,13 +22,13 @@ pub struct OutgoingMessage {
     pub data: serde_json::Value,
 }
 
-/// Events that Telos sends to actus via WebSocket.
-/// Per WEBSOCKET_PROTOCOL_SPEC — Telos is stateless and only knows
+/// Events the executor sends to actus over the WebSocket.
+/// Per WEBSOCKET_PROTOCOL_SPEC — the executor is stateless and only knows
 /// about acp_thread_id.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "data")]
 pub enum SyncEvent {
-    /// Sent when Telos creates a new ACP thread in response to a chat_message.
+    /// Sent when the executor creates a new ACP thread in response to a chat_message.
     #[serde(rename = "thread_created")]
     ThreadCreated {
         #[serde(default)]
@@ -36,7 +36,7 @@ pub enum SyncEvent {
         #[serde(default)]
         request_id: String,
     },
-    /// Sent when thread title changes in Telos.
+    /// Sent when the executor changes a thread title.
     #[serde(rename = "thread_title_changed")]
     ThreadTitleChanged {
         #[serde(default)]

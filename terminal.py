@@ -243,7 +243,7 @@ def print_banner(h: dict):
     print(f"{C.BOLD}{C.HEADER}╚══════════════════════════════════════╝{C.END}")
     ok = h and h.get("status") == "ok"
     if ok:
-        telos = h.get("telos_connected", False)
+        telos = h.get("agent_connected", False)
         agent = h.get("agent_ready", False)
         print(f"  {C.GREEN}✓{C.END} Server: {h.get('status', '?')}")
         print(f"  {C.GREEN}✓{C.END} Telos connected: {telos}")
@@ -1060,7 +1060,7 @@ def main():
             print(f"  {C.DIM}Server:{C.END} {base_url}")
             print(f"  {C.DIM}Workdir:{C.END} {workdir}")
             print()
-            if h.get("telos_connected") and h.get("agent_ready"):
+            if h.get("agent_connected") and h.get("agent_ready"):
                 print(f"{C.BOLD}Enter a message. /exit returns to thread selection.{C.END}")
                 print(f"{C.DIM}Example: \"What's in this directory?\"{C.END}")
 
