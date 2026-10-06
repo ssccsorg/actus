@@ -173,16 +173,42 @@ impl SyncEvent {
     }
 }
 
-/// Incoming command from actus to Telos.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IncomingChatMessage {
-    /// None = create new thread, Some(id) = use existing.
-    pub acp_thread_id: Option<String>,
-    pub message: String,
-    pub request_id: String,
-    #[serde(default)]
-    pub agent_name: Option<String>,
-    /// If true, cancel the current running turn before sending.
-    #[serde(default)]
-    pub interrupt: bool,
+/// A command actus sends to the executor.
+///
+/// The tag is `type` and the body is `data`, which is the shape the socket carries. A field
+/// is present when it is meaningful rather than always, and a null is a value rather than an
+/// absence: `thinking_effort: null` tells the executor to leave the thread's own level alone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum Command {
+    /// Ask for a turn. A thread id names an existing conversation; none opens a new one.
+    #[serde(rename = "chat_message")]
+    ChatMessage {
+        #[serde(default)]
+        acp_thread_id: Option<String>,
+        message: String,
+        request_id: String,
+        #[serde(default)]
+        thinking_effort: Option<String>,
+    },
+    /// Stop the turn the request id names. Without one, the command names no turn.
+    #[serde(rename = "cancel_current_turn")]
+    CancelCurrentTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Answer a tool call the executor is blocked on.
+    #[serde(rename = "resolve_tool_call_authorization")]
+    ResolveToolCallAuthorization {
+        acp_thread_id: String,
+        allow: bool,
+        tool_call_id: String,
+    },
+}
+
+impl Command {
+    /// The command as the string the socket carries.
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|error| format!("serialize a command: {error}"))
+    }
 }

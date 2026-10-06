@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::{Notify, RwLock};
 
+use crate::acpws::types::Command;
 use crate::acpws::{AcpwsManager, WsCommandTx};
 use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
@@ -39,22 +40,15 @@ pub struct AcpwsBackend {
 
 /// The wire command that cancels a turn.
 ///
-/// Telos resolves the turn from `request_id`: the command names no thread, so a body
+/// The executor resolves the turn from `request_id`: the command names no thread, so a body
 /// without one names no turn, which is why a cancel that sent an empty body could not
 /// stop anything and was answered as a noop. The empty form is kept for the case where
 /// no turn is in flight.
-fn cancel_command(request_id: Option<&str>) -> String {
-    match request_id {
-        Some(request_id) => serde_json::json!({
-            "type": "cancel_current_turn",
-            "data": { "request_id": request_id }
-        }),
-        None => serde_json::json!({
-            "type": "cancel_current_turn",
-            "data": {}
-        }),
+fn cancel_command(request_id: Option<&str>) -> Result<String, String> {
+    Command::CancelCurrentTurn {
+        request_id: request_id.map(str::to_string),
     }
-    .to_string()
+    .to_json()
 }
 
 #[async_trait::async_trait]
@@ -140,18 +134,15 @@ impl AgentBackend for AcpwsBackend {
             );
             let rid = uuid::Uuid::new_v4().to_string();
             let acp_id = mgr.get_acp_thread_id(&tid);
-            let cmd = serde_json::json!({
-                "type": "chat_message",
-                "data": {
-                    "message": enriched,
-                    "request_id": rid.clone(),
-                    "acp_thread_id": acp_id,
-                    // The reasoning effort for this turn. Telos maps it onto the
-                    // provider's own scale, and a null leaves the thread alone.
-                    "thinking_effort": thinking_effort,
-                }
-            })
-            .to_string();
+            let cmd = Command::ChatMessage {
+                acp_thread_id: acp_id,
+                message: enriched,
+                request_id: rid.clone(),
+                // The reasoning effort for this turn. The executor maps it onto the
+                // provider's own scale, and a null leaves the thread alone.
+                thinking_effort: thinking_effort.map(str::to_string),
+            }
+            .to_json()?;
             mgr.pending_requests.insert(rid.clone(), tid.clone());
             (tid, rid, is_new, cmd)
         };
@@ -252,16 +243,17 @@ impl AgentBackend for AcpwsBackend {
             // Nothing is in flight, so there is no turn to name and Telos answers the
             // empty command as a noop. Sending it keeps the one thing a cancel always
             // does, submitting a command.
-            return self.send_command(cancel_command(None)).await;
+            return self.send_command(cancel_command(None)?).await;
         }
         for request_id in live {
-            self.send_command(cancel_command(Some(&request_id))).await?;
+            self.send_command(cancel_command(Some(&request_id))?)
+                .await?;
         }
         Ok(())
     }
 
     async fn cancel_request(&self, request_id: &str) -> Result<(), String> {
-        self.send_command(cancel_command(Some(request_id))).await
+        self.send_command(cancel_command(Some(request_id))?).await
     }
 
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession> {
@@ -356,15 +348,12 @@ impl AgentBackend for AcpwsBackend {
             let mut mgr = self.manager.write().await;
             mgr.pending_authorizations.remove(tool_call_id);
         }
-        let cmd = serde_json::json!({
-            "type": "resolve_tool_call_authorization",
-            "data": {
-                "acp_thread_id": platform_thread_id,
-                "tool_call_id": tool_call_id,
-                "allow": allow,
-            }
-        })
-        .to_string();
+        let cmd = Command::ResolveToolCallAuthorization {
+            acp_thread_id: platform_thread_id.to_string(),
+            allow,
+            tool_call_id: tool_call_id.to_string(),
+        }
+        .to_json()?;
         self.send_command(cmd).await
     }
 }

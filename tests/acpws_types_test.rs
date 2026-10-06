@@ -5,7 +5,7 @@
 // format and prove every variant survives a JSON round trip, including
 // the defaulted fields of MessageAdded.
 
-use actus::acpws::types::{IncomingChatMessage, OutgoingMessage, SyncEvent};
+use actus::acpws::types::{Command, OutgoingMessage, SyncEvent};
 
 #[test]
 fn sync_event_roundtrip_all_variants() {
@@ -156,28 +156,59 @@ fn outgoing_message_roundtrip() {
     assert_eq!(back.data["message_id"], "msg-1");
 }
 
+/// A command is one of three, and each shape is what the socket carries. The cancel without a
+/// request id names no turn, so its body is empty rather than null.
 #[test]
-fn incoming_chat_message_roundtrip_and_defaults() {
-    let msg = IncomingChatMessage {
+fn a_command_carries_its_tag_and_body() {
+    let chat = Command::ChatMessage {
         acp_thread_id: Some("acp-1".to_string()),
         message: "hello".to_string(),
         request_id: "req-1".to_string(),
-        agent_name: Some("telos".to_string()),
-        interrupt: true,
-    };
-    let json = serde_json::to_string(&msg).unwrap();
-    let back: IncomingChatMessage = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.acp_thread_id.as_deref(), Some("acp-1"));
-    assert_eq!(back.message, "hello");
-    assert_eq!(back.agent_name.as_deref(), Some("telos"));
-    assert!(back.interrupt);
+        thinking_effort: None,
+    }
+    .to_json()
+    .unwrap();
+    assert_eq!(
+        chat,
+        r#"{"type":"chat_message","data":{"acp_thread_id":"acp-1","message":"hello","request_id":"req-1","thinking_effort":null}}"#
+    );
 
-    // Optional fields default when absent.
-    let raw = r#"{"acp_thread_id": null, "message": "hi", "request_id": "req-2"}"#;
-    let parsed: IncomingChatMessage = serde_json::from_str(raw).unwrap();
-    assert_eq!(parsed.acp_thread_id, None);
-    assert_eq!(parsed.agent_name, None);
-    assert!(!parsed.interrupt);
+    assert_eq!(
+        Command::CancelCurrentTurn { request_id: None }
+            .to_json()
+            .unwrap(),
+        r#"{"type":"cancel_current_turn","data":{}}"#
+    );
+    assert_eq!(
+        Command::CancelCurrentTurn {
+            request_id: Some("req-1".to_string()),
+        }
+        .to_json()
+        .unwrap(),
+        r#"{"type":"cancel_current_turn","data":{"request_id":"req-1"}}"#
+    );
+    assert_eq!(
+        Command::ResolveToolCallAuthorization {
+            acp_thread_id: "acp-1".to_string(),
+            allow: true,
+            tool_call_id: "call-1".to_string(),
+        }
+        .to_json()
+        .unwrap(),
+        r#"{"type":"resolve_tool_call_authorization","data":{"acp_thread_id":"acp-1","allow":true,"tool_call_id":"call-1"}}"#
+    );
+
+    // The wire is one shape in both directions, so a command reads back as the value it was.
+    let back: Command = serde_json::from_str(&chat).unwrap();
+    assert_eq!(
+        back,
+        Command::ChatMessage {
+            acp_thread_id: Some("acp-1".to_string()),
+            message: "hello".to_string(),
+            request_id: "req-1".to_string(),
+            thinking_effort: None,
+        }
+    );
 }
 
 /// The contract tolerates a field the executor left out: a peer that says less is speaking the

@@ -25,6 +25,7 @@ use serde_json;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 use uuid::Uuid;
 
+use crate::acpws::types::Command;
 use crate::util::truncate_utf8;
 
 /// Manages a single executor WebSocket connection and message dispatch.
@@ -496,13 +497,10 @@ impl AcpwsManager {
         self.thread_notify.send_modify(|v| *v = v.wrapping_add(1));
     }
 
-    /// Send a cancel_current_turn command to Telos via WebSocket.
+    /// Send a cancel_current_turn command to the executor over the WebSocket.
     pub fn cancel_current_turn(&self) -> Result<(), String> {
-        let cmd = serde_json::json!({
-            "type": "cancel_current_turn",
-            "data": {}
-        });
-        self.send_command(&cmd.to_string())
+        let cmd = Command::CancelCurrentTurn { request_id: None }.to_json()?;
+        self.send_command(&cmd)
     }
 
     /// Persist all threads to the JSON file.
