@@ -1,10 +1,10 @@
-// Telos management — process lifecycle, WebSocket bridge, and protocol types.
+// Agent management — process lifecycle, the WebSocket bridge, and protocol types.
 
 pub mod backend;
 pub mod control;
 pub mod types;
 
-use crate::agent::config::AgentSpec;
+use crate::agent::config::{AgentSpec, ToolApproval};
 use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -562,86 +562,222 @@ impl AcpwsManager {
     }
 }
 
-/// Build the telos launch command. Kept separate from spawning so the
-/// launch contract (argv and the `TELOS_*` env set) is unit-testable
-/// without a real telos binary.
-fn telos_command(
-    bin_path: &Path,
-    workdir: &Path,
-    user_data_dir: &Path,
-    session_id: &str,
-    ws_host: &str,
-    tool_approval: crate::agent::config::ToolApproval,
-    agent_name: &str,
-    http_port: u16,
-    api_token: &str,
-    stderr_log: std::fs::File,
-) -> std::process::Command {
-    let mut cmd = std::process::Command::new(bin_path);
-    cmd.args(["--headless", "--allow-multiple-instances"])
-        .arg("--user-data-dir")
-        .arg(user_data_dir)
-        .arg(workdir)
-        .env("TELOS_EXTERNAL_SYNC_ENABLED", "true")
-        .env("TELOS_WEBSOCKET_SYNC_ENABLED", "true")
-        .env("TELOS_WS_URL", ws_host)
-        // Telos presents this on the WebSocket handshake. Actus does not verify
-        // it yet, so it is the token generated for this process rather than a
-        // constant: a fixed value would be shared by every deployment, and
-        // adding verification later would then mean changing this contract.
-        .env("TELOS_WS_TOKEN", api_token)
-        .env("TELOS_STATELESS", "1")
-        .env("TELOS_SESSION_ID", session_id)
-        .env("TELOS_TOOL_APPROVAL", tool_approval.as_str())
-        // The control MCP proxy (`actus control`), spawned by the agent as
-        // a stdio MCP server, inherits these to reach the actus HTTP API
-        // and to identify itself as this agent.
-        .env("ACTUS_AGENT_NAME", agent_name)
-        .env("ACTUS_HTTP_PORT", http_port.to_string())
-        .env("ACTUS_API_TOKEN", api_token)
-        .env("RUST_LOG", "info")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(stderr_log));
-    cmd
+/// The markers a declared launch may carry. Each names a value actus owns and a
+/// deployment cannot know: a path it derived, a port it bound, a token it
+/// generated at startup.
+pub const LAUNCH_MARKERS: [&str; 8] = [
+    "workdir",
+    "user_data_dir",
+    "session_id",
+    "ws_url",
+    "token",
+    "agent_name",
+    "http_port",
+    "tool_approval",
+];
+
+/// The launch the executor this stack runs today reads, used when the
+/// configuration declares none. A deployment that declares its own replaces it,
+/// which is how a different executor runs on this fabric without actus naming
+/// it.
+const DEFAULT_LAUNCH_ARGS: [&str; 5] = [
+    "--headless",
+    "--allow-multiple-instances",
+    "--user-data-dir",
+    "{user_data_dir}",
+    "{workdir}",
+];
+
+const DEFAULT_LAUNCH_ENV: [(&str, &str); 8] = [
+    ("TELOS_EXTERNAL_SYNC_ENABLED", "true"),
+    ("TELOS_WEBSOCKET_SYNC_ENABLED", "true"),
+    ("TELOS_WS_URL", "{ws_url}"),
+    ("TELOS_WS_TOKEN", "{token}"),
+    ("TELOS_STATELESS", "1"),
+    ("TELOS_SESSION_ID", "{session_id}"),
+    ("TELOS_TOOL_APPROVAL", "{tool_approval}"),
+    ("RUST_LOG", "info"),
+];
+
+/// One process launch: what the configuration declared, and the values actus
+/// fills into it.
+pub struct Launch<'a> {
+    /// The agent this launch is for. Every error names it.
+    pub agent_name: &'a str,
+    /// The argv the configuration declared, empty to take the default.
+    pub args: &'a [String],
+    /// The environment the configuration declared, empty to take the default.
+    pub env: &'a HashMap<String, String>,
+    /// The binary to run.
+    pub bin: &'a Path,
+    pub workdir: &'a Path,
+    pub user_data_dir: &'a Path,
+    pub session_id: &'a str,
+    /// host:port the executor connects back to.
+    pub ws_url: &'a str,
+    /// The token generated for this process. The executor presents it on the
+    /// WebSocket handshake and it authorizes the actus API. Actus does not verify
+    /// the handshake yet, so it is a value rather than a constant: a fixed one
+    /// would be shared by every deployment, and adding verification later would
+    /// then mean changing this contract.
+    pub token: &'a str,
+    pub http_port: u16,
+    pub tool_approval: ToolApproval,
 }
 
+/// The argv and environment of one launch, with the markers resolved.
+struct LaunchPlan {
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
+impl Launch<'_> {
+    /// The value actus supplies for one marker.
+    fn value(&self, marker: &str) -> Option<String> {
+        Some(match marker {
+            "workdir" => self.workdir.display().to_string(),
+            "user_data_dir" => self.user_data_dir.display().to_string(),
+            "session_id" => self.session_id.to_string(),
+            "ws_url" => self.ws_url.to_string(),
+            "token" => self.token.to_string(),
+            "agent_name" => self.agent_name.to_string(),
+            "http_port" => self.http_port.to_string(),
+            "tool_approval" => self.tool_approval.as_str().to_string(),
+            _ => return None,
+        })
+    }
+
+    /// Replace every `{marker}` in one declared value.
+    ///
+    /// `{{` and `}}` are a literal brace. A marker actus does not supply fails
+    /// the launch rather than passing through as text: a declaration that reaches
+    /// the executor with its marker intact is a declaration that does nothing.
+    fn resolve(&self, value: &str) -> Result<String, String> {
+        let mut out = String::with_capacity(value.len());
+        let mut rest = value;
+        while let Some(at) = rest.find(['{', '}']) {
+            out.push_str(&rest[..at]);
+            let tail = &rest[at..];
+            if let Some(literal) = tail.strip_prefix("{{") {
+                out.push('{');
+                rest = literal;
+                continue;
+            }
+            if let Some(literal) = tail.strip_prefix("}}") {
+                out.push('}');
+                rest = literal;
+                continue;
+            }
+            if tail.starts_with('{') {
+                let close = tail.find('}').ok_or_else(|| {
+                    format!("a '{{' opens a marker that no '}}' closes in {value:?}")
+                })?;
+                let marker = &tail[1..close];
+                let resolved = self.value(marker).ok_or_else(|| {
+                    format!(
+                        "'{{{marker}}}' is not a marker actus supplies; it supplies {}",
+                        LAUNCH_MARKERS.join(", ")
+                    )
+                })?;
+                out.push_str(&resolved);
+                rest = &tail[close + 1..];
+                continue;
+            }
+            // A closing brace no opening one paired is ordinary text.
+            out.push('}');
+            rest = &tail[1..];
+        }
+        out.push_str(rest);
+        Ok(out)
+    }
+
+    /// The argv and environment of the launch, with the markers resolved.
+    fn declared(&self) -> Result<LaunchPlan, String> {
+        let args: Vec<String> = if self.args.is_empty() {
+            DEFAULT_LAUNCH_ARGS.map(str::to_string).to_vec()
+        } else {
+            self.args.to_vec()
+        };
+        let env: Vec<(String, String)> = if self.env.is_empty() {
+            DEFAULT_LAUNCH_ENV
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect()
+        } else {
+            self.env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        };
+
+        let mut resolved_args = Vec::with_capacity(args.len());
+        for arg in &args {
+            resolved_args.push(self.resolve(arg).map_err(|e| format!("launch_args: {e}"))?);
+        }
+        let mut resolved_env = Vec::with_capacity(env.len());
+        for (key, value) in &env {
+            resolved_env.push((
+                key.clone(),
+                self.resolve(value)
+                    .map_err(|e| format!("launch_env[{key}]: {e}"))?,
+            ));
+        }
+        Ok(LaunchPlan {
+            args: resolved_args,
+            env: resolved_env,
+        })
+    }
+}
+
+/// Build the process command for one launch, kept separate from spawning so the
+/// contract is unit-testable without a real executor.
+pub fn launch_command(
+    launch: &Launch<'_>,
+    stderr_log: std::fs::File,
+) -> Result<std::process::Command, String> {
+    let plan = launch
+        .declared()
+        .map_err(|e| format!("agent '{}': {e}", launch.agent_name))?;
+    let mut cmd = std::process::Command::new(launch.bin);
+    cmd.args(plan.args);
+    for (key, value) in plan.env {
+        cmd.env(key, value);
+    }
+    // The control MCP proxy is actus's own, spawned by the executor as a stdio
+    // server, and it reads these to reach this process and to name itself. They
+    // are actus's interface rather than the executor's, so a deployment does not
+    // restate them.
+    cmd.env("ACTUS_AGENT_NAME", launch.agent_name)
+        .env("ACTUS_HTTP_PORT", launch.http_port.to_string())
+        .env("ACTUS_API_TOKEN", launch.token)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_log));
+    Ok(cmd)
+}
+
+/// Spawn the agent process for one launch.
 pub async fn launch_agent(
-    bin_path: &Path,
-    workdir: &Path,
-    user_data_dir: &Path,
-    session_id: &str,
-    ws_host: &str,
-    tool_approval: crate::agent::config::ToolApproval,
-    agent_name: &str,
-    http_port: u16,
-    api_token: &str,
+    launch: &Launch<'_>,
     stderr_log: &Path,
 ) -> anyhow::Result<std::process::Child> {
-    tracing::info!("Launching telos...");
+    tracing::info!("Launching agent '{}'", launch.agent_name);
 
     let stderr_log = std::fs::File::create(stderr_log)
         .map_err(|e| anyhow::anyhow!("cannot create stderr log {}: {}", stderr_log.display(), e))?;
-    let mut cmd = telos_command(
-        bin_path,
-        workdir,
-        user_data_dir,
-        session_id,
-        ws_host,
-        tool_approval,
-        agent_name,
-        http_port,
-        api_token,
-        stderr_log,
-    );
+    let mut cmd = launch_command(launch, stderr_log).map_err(anyhow::Error::msg)?;
     let child = cmd
         .spawn()
-        .map_err(|e| anyhow::anyhow!("cannot spawn {}: {}", bin_path.display(), e))?;
+        .map_err(|e| anyhow::anyhow!("cannot spawn {}: {}", launch.bin.display(), e))?;
 
-    tracing::info!("telos started (PID: {:?})", child.id());
+    tracing::info!(
+        "Agent '{}' started (PID {:?})",
+        launch.agent_name,
+        child.id()
+    );
     Ok(child)
 }
 
-// ── Telos settings bootstrap ─────────────────────────────────────────────
+// ── Agent settings bootstrap ─────────────────────────────────────────────
 
 /// Resolve a declared value to the string the agent's settings carry.
 ///
@@ -894,36 +1030,69 @@ pub fn ensure_agent_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_variables, telos_command};
+    use super::{launch_command, resolve_variables, Launch};
+    use crate::agent::config::ToolApproval;
     use std::collections::HashMap;
+    use std::path::Path;
 
+    fn launch_with<'a>(
+        bin: &'a Path,
+        workdir: &'a Path,
+        user_data_dir: &'a Path,
+        args: &'a [String],
+        env: &'a HashMap<String, String>,
+    ) -> Launch<'a> {
+        Launch {
+            agent_name: "telos",
+            args,
+            env,
+            bin,
+            workdir,
+            user_data_dir,
+            session_id: "ses_actus-test",
+            ws_url: "127.0.0.1:8080",
+            token: "process-token-7f3a",
+            http_port: 9090,
+            tool_approval: ToolApproval::Always,
+        }
+    }
+
+    fn args_of(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn envs_of(cmd: &std::process::Command) -> HashMap<String, String> {
+        cmd.get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|value| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// A configuration that declares no launch still gets the executor this stack
+    /// runs today, both its argv and its environment.
     #[test]
-    fn launch_contract_sets_expected_args_and_env() {
+    fn the_built_in_launch_sets_expected_args_and_env() {
         let dir = tempfile::tempdir().unwrap();
         let workdir = dir.path().join("work");
         std::fs::create_dir_all(&workdir).unwrap();
         let user_data_dir = dir.path().join("user");
         std::fs::create_dir_all(&user_data_dir).unwrap();
-        let log = std::fs::File::create(dir.path().join("telos.log")).unwrap();
+        let log = std::fs::File::create(dir.path().join("agent.log")).unwrap();
         let bin = dir.path().join("tel");
 
-        let cmd = telos_command(
-            &bin,
-            &workdir,
-            &user_data_dir,
-            "ses_actus-test",
-            "127.0.0.1:8080",
-            crate::agent::config::ToolApproval::Always,
-            "telos",
-            9090,
-            "process-token-7f3a",
-            log,
-        );
+        let no_env = HashMap::new();
+        let launch = launch_with(&bin, &workdir, &user_data_dir, &[], &no_env);
+        let cmd = launch_command(&launch, log).unwrap();
 
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let args = args_of(&cmd);
         let pair = [
             "--user-data-dir".to_string(),
             user_data_dir.to_string_lossy().into_owned(),
@@ -933,17 +1102,7 @@ mod tests {
         assert!(args.iter().any(|a| a == "--headless"));
         assert!(args.iter().any(|a| a == "--allow-multiple-instances"));
 
-        let envs: HashMap<String, String> = cmd
-            .get_envs()
-            .filter_map(|(k, v)| {
-                v.map(|value| {
-                    (
-                        k.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect();
+        let envs = envs_of(&cmd);
         let expect = [
             ("TELOS_EXTERNAL_SYNC_ENABLED", "true"),
             ("TELOS_WEBSOCKET_SYNC_ENABLED", "true"),
@@ -952,14 +1111,84 @@ mod tests {
             ("TELOS_STATELESS", "1"),
             ("TELOS_SESSION_ID", "ses_actus-test"),
             ("TELOS_TOOL_APPROVAL", "always"),
-            ("ACTUS_AGENT_NAME", "telos"),
-            ("ACTUS_HTTP_PORT", "9090"),
-            ("ACTUS_API_TOKEN", "process-token-7f3a"),
             ("RUST_LOG", "info"),
         ];
         for (key, value) in expect {
             assert_eq!(envs.get(key).map(String::as_str), Some(value), "env {key}");
         }
+    }
+
+    /// The variables actus sets for its own control proxy are actus's interface,
+    /// so a deployment does not restate them and a declaration replaces the
+    /// executor's argv and environment only.
+    #[test]
+    fn actus_sets_its_own_proxy_env_whatever_the_declaration_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = std::fs::File::create(dir.path().join("agent.log")).unwrap();
+        let bin = dir.path().join("tel");
+        let args = vec!["--serve".to_string()];
+        let env = HashMap::from([("WS".to_string(), "wss://{ws_url}".to_string())]);
+
+        let launch = launch_with(&bin, dir.path(), dir.path(), &args, &env);
+        let cmd = launch_command(&launch, log).unwrap();
+
+        let envs = envs_of(&cmd);
+        assert_eq!(
+            envs.get("ACTUS_AGENT_NAME").map(String::as_str),
+            Some("telos")
+        );
+        assert_eq!(
+            envs.get("ACTUS_HTTP_PORT").map(String::as_str),
+            Some("9090")
+        );
+        assert_eq!(
+            envs.get("ACTUS_API_TOKEN").map(String::as_str),
+            Some("process-token-7f3a")
+        );
+        assert_eq!(args_of(&cmd), vec!["--serve"]);
+        assert_eq!(
+            envs.get("WS").map(String::as_str),
+            Some("wss://127.0.0.1:8080")
+        );
+    }
+
+    /// A declaration names the executor's own arguments and environment, and the
+    /// markers are the values actus owns. A marker actus does not supply fails
+    /// the launch rather than reaching the executor as text, and `{{`/`}}` are a
+    /// literal brace.
+    #[test]
+    fn a_declared_launch_resolves_its_markers_and_refuses_an_unknown_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("tel");
+        let args = vec!["--headless".to_string(), "{workdir}".to_string()];
+        let env = HashMap::from([
+            ("SESSION".to_string(), "{session_id}".to_string()),
+            ("POLICY".to_string(), "{tool_approval}".to_string()),
+            ("LITERAL".to_string(), "{{braces}}".to_string()),
+        ]);
+
+        let log = std::fs::File::create(dir.path().join("agent.log")).unwrap();
+        let launch = launch_with(&bin, dir.path(), dir.path(), &args, &env);
+        let cmd = launch_command(&launch, log).unwrap();
+        assert_eq!(
+            args_of(&cmd),
+            vec!["--headless".to_string(), dir.path().display().to_string()]
+        );
+        let envs = envs_of(&cmd);
+        assert_eq!(
+            envs.get("SESSION").map(String::as_str),
+            Some("ses_actus-test")
+        );
+        assert_eq!(envs.get("POLICY").map(String::as_str), Some("always"));
+        assert_eq!(envs.get("LITERAL").map(String::as_str), Some("{braces}"));
+        assert!(!envs.contains_key("TELOS_WS_URL"), "envs: {envs:?}");
+
+        let unknown = vec!["{ws_socket}".to_string()];
+        let log = std::fs::File::create(dir.path().join("second.log")).unwrap();
+        let launch = launch_with(&bin, dir.path(), dir.path(), &unknown, &env);
+        let error = launch_command(&launch, log).unwrap_err();
+        assert!(error.contains("agent 'telos'"), "{error}");
+        assert!(error.contains("ws_socket"), "{error}");
     }
 
     #[test]

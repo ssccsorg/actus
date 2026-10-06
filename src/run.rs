@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 
 use crate::acpws::backend::AcpwsBackend;
 use crate::acpws::control::run_ws_server;
-use crate::acpws::{ensure_agent_settings, launch_agent, AcpwsManager, WsCommandTx};
+use crate::acpws::{ensure_agent_settings, launch_agent, AcpwsManager, Launch, WsCommandTx};
 use crate::agent::config::{load_config, load_control_policy, AgentDefaults, AgentSpec};
 use crate::agent::config::{resolve_llm_settings, unquote_env_value};
 use crate::agent::ext_cli::ExtCliAgent;
@@ -453,19 +453,20 @@ pub async fn run_with(
                 AcpwsManager::spawn_thread_saver(manager.clone());
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-                let child = launch_agent(
-                    &spec.bin,
-                    &agent_workdir,
-                    user_data_dir.path(),
-                    &session_id,
-                    &ws_host,
-                    spec.tool_approval,
-                    &spec.name,
-                    args.http_port,
-                    &api_token,
-                    &threads_dir.join("telos.log"),
-                )
-                .await?;
+                let launch = Launch {
+                    agent_name: &spec.name,
+                    args: &spec.launch_args,
+                    env: &spec.launch_env,
+                    bin: &spec.bin,
+                    workdir: &agent_workdir,
+                    user_data_dir: user_data_dir.path(),
+                    session_id: &session_id,
+                    ws_url: &ws_host,
+                    token: &api_token,
+                    http_port: args.http_port,
+                    tool_approval: spec.tool_approval,
+                };
+                let child = launch_agent(&launch, &threads_dir.join("telos.log")).await?;
                 _user_data_dirs.push(user_data_dir);
                 tracing::info!(
                     "Agent '{}' launched (PID {:?}, WS ws://{}, threads {})",

@@ -124,6 +124,14 @@ pub struct AgentSpec {
     pub cli_prompt: PromptMode,
     /// Per-turn timeout in seconds for cli-kind agents.
     pub cli_timeout_secs: u64,
+    /// The argv actus launches this agent's process with. Empty takes the
+    /// built-in launch for the kind. A value may carry a `{marker}` that actus
+    /// fills in, so the declaration names the executor's own arguments and actus
+    /// supplies the wiring it owns.
+    pub launch_args: Vec<String>,
+    /// The environment actus launches this agent's process with, name to value,
+    /// resolved like `launch_args`. Empty takes the built-in launch for the kind.
+    pub launch_env: HashMap<String, String>,
 }
 
 /// One allow rule: `controller` may dispatch to every name in
@@ -323,6 +331,10 @@ struct AgentSpecFile {
     cli_prompt: PromptMode,
     #[serde(default = "default_cli_timeout")]
     cli_timeout_secs: u64,
+    #[serde(default)]
+    launch_args: Vec<String>,
+    #[serde(default)]
+    launch_env: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -335,7 +347,7 @@ struct ConfigFile {
 ///
 /// `file = None` yields a single default "telos" spec. When `file` is Some
 /// the TOML must parse and contain at least one agent. Resolved specs have
-/// unique names and unique WebSocket ports among `telos`-kind agents.
+/// unique names and unique WebSocket ports among acpws-kind agents.
 pub fn load_config(
     file: Option<&Path>,
     defaults: &AgentDefaults,
@@ -366,6 +378,8 @@ pub fn load_config(
             cli_env: HashMap::new(),
             cli_prompt: default_prompt_mode(),
             cli_timeout_secs: default_cli_timeout(),
+            launch_args: Vec::new(),
+            launch_env: HashMap::new(),
         }],
     };
 
@@ -419,6 +433,8 @@ pub fn load_config(
             cli_env: f.cli_env,
             cli_prompt: f.cli_prompt,
             cli_timeout_secs: f.cli_timeout_secs,
+            launch_args: f.launch_args,
+            launch_env: f.launch_env,
         });
     }
     Ok(specs)
