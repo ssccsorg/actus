@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::server::WsCommandTx;
-use crate::telos::TelosManager;
+use crate::acp_ws::AcpWsManager;
 
 /// Run the WebSocket server that accepts connections from the Telos process.
 ///
@@ -33,7 +33,7 @@ use crate::telos::TelosManager;
 ///   5. On disconnect, accept the next connection (Telos auto-reconnects)
 pub async fn run_ws_server(
     ws_host: &str,
-    telos_manager: Arc<RwLock<TelosManager>>,
+    agent_manager: Arc<RwLock<AcpWsManager>>,
     ws_tx: WsCommandTx,
 ) -> anyhow::Result<()> {
     // Bind the address the caller configured. Parsing the port back out and
@@ -63,9 +63,9 @@ pub async fn run_ws_server(
 
         // Increment reconnect counter and mark connected
         {
-            let mut mgr = telos_manager.write().await;
+            let mut mgr = agent_manager.write().await;
             mgr.reconnect_count += 1;
-            mgr.telos_connected = true;
+            mgr.agent_connected = true;
             mgr.agent_ready = false;
             tracing::info!(
                 "Telos WebSocket connected (reconnect #{})",
@@ -80,7 +80,7 @@ pub async fn run_ws_server(
 
         // Register command sender
         {
-            let mut mgr = telos_manager.write().await;
+            let mut mgr = agent_manager.write().await;
             mgr.set_ws_tx(tx);
         }
         {
@@ -91,7 +91,7 @@ pub async fn run_ws_server(
 
         // Resend any pending messages from before the disconnect
         {
-            let mgr = telos_manager.read().await;
+            let mgr = agent_manager.read().await;
             for (rid, tid, cmd) in &mgr.pending_chat_queue {
                 tracing::info!(
                     "Resending pending message request_id={}, thread_id={}",
@@ -103,7 +103,7 @@ pub async fn run_ws_server(
         }
 
         // Clone for spawned tasks
-        let telos_manager_for_read = telos_manager.clone();
+        let agent_manager_for_read = agent_manager.clone();
         let _ws_tx_for_read = ws_tx.clone();
 
         // Write handle: forward commands from both normal and resend channels
@@ -143,12 +143,12 @@ pub async fn run_ws_server(
                 };
                 match msg {
                     Some(m) => {
-                        if !handle_ws_message(&telos_manager_for_read, m).await {
+                        if !handle_ws_message(&agent_manager_for_read, m).await {
                             break;
                         }
                     }
                     None => {
-                        if !telos_manager_for_read.read().await.telos_connected {
+                        if !agent_manager_for_read.read().await.agent_connected {
                             break;
                         }
                     }
@@ -172,18 +172,18 @@ pub async fn run_ws_server(
 /// Process a single WebSocket message from Telos.
 /// Returns false if the connection should be closed.
 async fn handle_ws_message(
-    telos_manager: &Arc<RwLock<TelosManager>>,
+    agent_manager: &Arc<RwLock<AcpWsManager>>,
     msg: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
 ) -> bool {
     match msg {
         Some(Ok(Message::Text(text))) => {
             tracing::debug!("WS recv ({} bytes): {}", text.len(), &text[..text.len().min(200)]);
-            handle_telos_event(telos_manager, &text).await;
+            handle_telos_event(agent_manager, &text).await;
             true
         }
         Some(Ok(Message::Binary(data))) => {
             if let Ok(text) = String::from_utf8(data.to_vec()) {
-                handle_telos_event(telos_manager, &text).await;
+                handle_telos_event(agent_manager, &text).await;
             } else {
                 tracing::warn!("Non-UTF-8 binary WS message ({} bytes)", data.len());
             }
@@ -192,17 +192,17 @@ async fn handle_ws_message(
         Some(Ok(Message::Ping(_))) => true,
         Some(Ok(Message::Close(_))) => {
             tracing::info!("Telos WebSocket closed");
-            telos_manager.write().await.telos_connected = false;
+            agent_manager.write().await.agent_connected = false;
             false
         }
         Some(Err(e)) => {
             tracing::error!("WebSocket read error: {}", e);
-            telos_manager.write().await.telos_connected = false;
+            agent_manager.write().await.agent_connected = false;
             false
         }
         None => {
             tracing::info!("WebSocket stream ended");
-            telos_manager.write().await.telos_connected = false;
+            agent_manager.write().await.agent_connected = false;
             false
         }
         _ => true,
@@ -213,7 +213,7 @@ async fn handle_ws_message(
 ///
 /// Public so integration tests can drive the event loop directly without
 /// a WebSocket connection.
-pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text: &str) {
+pub async fn handle_telos_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text: &str) {
     tracing::debug!("WS event: {}", &text[..text.len().min(200)]);
 
     let msg: serde_json::Value = match serde_json::from_str(text) {
@@ -234,7 +234,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
     // Ping only updates ping time; all others update SSE event time
     // so the monitor can detect stalled event flow.
     {
-        let mut mgr = telos_manager.write().await;
+        let mut mgr = agent_manager.write().await;
         if event_type == "ping" {
             mgr.last_ping_time = Instant::now();
         } else {
@@ -251,7 +251,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
     match event_type {
         "ping" => {}
         "agent_ready" => {
-            let mut mgr = telos_manager.write().await;
+            let mut mgr = agent_manager.write().await;
             mgr.agent_ready = true;
             tracing::info!(
                 "Agent ready ({})",
@@ -271,7 +271,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut mgr = telos_manager.write().await;
+            let mut mgr = agent_manager.write().await;
             tracing::info!("Thread created: {}", acp_id);
 
             // Map request_id → local thread_id, and acp_thread_id →
@@ -347,7 +347,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 content.len()
             );
 
-            let mut mgr = telos_manager.write().await;
+            let mut mgr = agent_manager.write().await;
             // Write to the canonical local thread. The acp_id → local_id
             // mapping is established by thread_created (or rebuilt from
             // persisted threads), which always precedes message_added on
@@ -378,7 +378,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut mgr = telos_manager.write().await;
+            let mut mgr = agent_manager.write().await;
             // Consume the request mapping instead of deleting it: a
             // duplicate completion (interrupt race, wrapper replay) for
             // the same request_id finds the empty sentinel and is dropped,
@@ -473,7 +473,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut mgr = telos_manager.write().await;
+            let mut mgr = agent_manager.write().await;
             // Drop a duplicate error for an already-consumed request_id,
             // and record the turn so the poll/SSE index stays aligned. The
             // pending entry is consumed so a later message_completed for
@@ -521,7 +521,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 .unwrap_or("")
                 .to_string();
             let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-            let mut mgr = telos_manager.write().await;
+            let mut mgr = agent_manager.write().await;
             // A cancelled turn never fires message_completed; consume the
             // pending entry so reconnection does not resend it, the health
             // monitor does not stall on it, and a later completion for the
@@ -580,7 +580,7 @@ pub async fn handle_telos_event(telos_manager: &Arc<RwLock<TelosManager>>, text:
                 .and_then(|v| v.as_str())
                 .unwrap_or("?")
                 .to_string();
-            let mut mgr = telos_manager.write().await;
+            let mut mgr = agent_manager.write().await;
             mgr.pending_authorizations.insert(
                 tool_call_id.clone(),
                 crate::agent::PendingAuthorization {

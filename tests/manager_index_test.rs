@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use actus::agent::{ThreadMessage, ThreadSession};
 use actus::store::{RecordStore, Volume, VolumeStore};
-use actus::telos::TelosManager;
+use actus::acp_ws::AcpWsManager;
 
 // ── A volume in memory, with the reads it served counted ────────────────
 
@@ -94,8 +94,8 @@ fn thread_with(n: usize) -> ThreadSession {
     }
 }
 
-fn manager(dir: &std::path::Path, volume: &MemVolume) -> TelosManager {
-    TelosManager::with_store(
+fn manager(dir: &std::path::Path, volume: &MemVolume) -> AcpWsManager {
+    AcpWsManager::with_store(
         "ses_test".to_string(),
         "127.0.0.1:0".to_string(),
         Arc::new(VolumeStore::new(volume.clone(), dir)),

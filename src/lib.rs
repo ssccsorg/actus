@@ -10,4 +10,4 @@ pub mod git;
 pub mod run;
 pub mod server;
 pub mod store;
-pub mod telos;
+pub mod acp_ws;

@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use actus::agent::{AgentBackend, AgentKind, AgentRegistry};
 use actus::store::RecordStore;
-use actus::telos::backend::TelosBackend;
-use actus::telos::control::handle_telos_event;
-use actus::telos::{WsCommandTx, TelosManager};
+use actus::acp_ws::backend::AcpWsBackend;
+use actus::acp_ws::control::handle_telos_event;
+use actus::acp_ws::{WsCommandTx, AcpWsManager};
 use tokio::sync::RwLock;
 
-fn telos_manager(dir: &std::path::Path) -> TelosManager {
-    TelosManager::new(
+fn agent_manager(dir: &std::path::Path) -> AcpWsManager {
+    AcpWsManager::new(
         "ses_test".to_string(),
         "127.0.0.1:9999".to_string(),
         dir,
@@ -20,26 +20,37 @@ fn telos_manager(dir: &std::path::Path) -> TelosManager {
 
 #[test]
 fn agent_kind_roundtrip() {
-    assert_eq!(AgentKind::parse("telos"), Some(AgentKind::Telos));
+    assert_eq!(AgentKind::parse("acp_ws"), Some(AgentKind::AcpWs));
+    // The name this kind carried before it was named for what it is. A
+    // configuration written against the old name keeps parsing.
+    assert_eq!(AgentKind::parse("telos"), Some(AgentKind::AcpWs));
     assert_eq!(AgentKind::parse("langgraph"), Some(AgentKind::LangGraph));
     assert_eq!(AgentKind::parse("native"), Some(AgentKind::Native));
     assert_eq!(AgentKind::parse("unknown"), None);
-    assert_eq!(AgentKind::Telos.as_str(), "telos");
-    assert_eq!(serde_json::to_string(&AgentKind::Telos).unwrap(), "\"telos\"");
+    assert_eq!(AgentKind::AcpWs.as_str(), "acp_ws");
+    assert_eq!(
+        serde_json::to_string(&AgentKind::AcpWs).unwrap(),
+        "\"acp_ws\""
+    );
+    assert_eq!(
+        serde_json::from_str::<AgentKind>("\"telos\"").unwrap(),
+        AgentKind::AcpWs,
+        "an old configuration still deserializes"
+    );
     assert_eq!(
         serde_json::from_str::<AgentKind>("\"langgraph\"").unwrap(),
         AgentKind::LangGraph
     );
 }
 
-fn telos_backend() -> TelosBackend {
-    telos_backend_named("telos")
+fn acp_ws_backend() -> AcpWsBackend {
+    acp_ws_backend_named("telos")
 }
 
-fn telos_backend_named(name: &str) -> TelosBackend {
+fn acp_ws_backend_named(name: &str) -> AcpWsBackend {
     let dir = tempfile::tempdir().expect("tempdir");
     let manager = Arc::new(RwLock::new(
-        TelosManager::new(
+        AcpWsManager::new(
             "ses_test".to_string(),
             "127.0.0.1:9999".to_string(),
             dir.path(),
@@ -47,7 +58,7 @@ fn telos_backend_named(name: &str) -> TelosBackend {
         .expect("document store"),
     ));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-    TelosBackend {
+    AcpWsBackend {
         name: name.to_string(),
         manager,
         ws_tx,
@@ -58,12 +69,12 @@ fn telos_backend_named(name: &str) -> TelosBackend {
 #[tokio::test]
 async fn registry_default_agent_status() {
     let mut registry = AgentRegistry::new();
-    registry.register(Arc::new(telos_backend()), true);
+    registry.register(Arc::new(acp_ws_backend()), true);
 
     let default = registry.default_agent().expect("default agent");
     let status = default.status().await;
     assert_eq!(status.name, "telos");
-    assert_eq!(status.kind, AgentKind::Telos);
+    assert_eq!(status.kind, AgentKind::AcpWs);
     assert!(!status.connected);
     assert!(!status.ready);
 
@@ -75,7 +86,7 @@ async fn registry_default_agent_status() {
 #[tokio::test]
 async fn registry_get_by_name() {
     let mut registry = AgentRegistry::new();
-    registry.register(Arc::new(telos_backend()), true);
+    registry.register(Arc::new(acp_ws_backend()), true);
 
     assert!(registry.get("telos").is_some());
     assert!(registry.get("missing").is_none());
@@ -87,8 +98,8 @@ async fn registry_get_by_name() {
 /// so this is the difference between routing working and every conversation
 /// landing on one project.
 #[tokio::test]
-async fn telos_backend_reports_its_configured_name() {
-    let backend = telos_backend_named("alpha");
+async fn acp_ws_backend_reports_its_configured_name() {
+    let backend = acp_ws_backend_named("alpha");
     assert_eq!(backend.name(), "alpha");
 
     let status = backend.status().await;
@@ -98,8 +109,8 @@ async fn telos_backend_reports_its_configured_name() {
 #[tokio::test]
 async fn two_telos_agents_with_different_names_stay_distinct() {
     let mut registry = AgentRegistry::new();
-    registry.register(Arc::new(telos_backend_named("alpha")), true);
-    registry.register(Arc::new(telos_backend_named("beta")), false);
+    registry.register(Arc::new(acp_ws_backend_named("alpha")), true);
+    registry.register(Arc::new(acp_ws_backend_named("beta")), false);
 
     assert!(registry.get("alpha").is_some(), "the first agent is reachable");
     assert!(registry.get("beta").is_some(), "the second agent is reachable");
@@ -121,7 +132,7 @@ async fn two_telos_agents_with_different_names_stay_distinct() {
 
 #[tokio::test]
 async fn submit_fails_when_not_connected() {
-    let backend = telos_backend();
+    let backend = acp_ws_backend();
     let err = backend.submit(None, "hello").await.expect_err("must fail");
     assert!(
         err.contains("not connected") || err.contains("not ready"),
@@ -136,7 +147,7 @@ async fn submit_fails_when_not_connected() {
 /// bound across repeated failed submissions.
 #[tokio::test]
 async fn failed_submit_cleans_pending_requests() {
-    let backend = telos_backend();
+    let backend = acp_ws_backend();
 
     // Not connected: submit fails before inserting a mapping.
     {
@@ -153,7 +164,7 @@ async fn failed_submit_cleans_pending_requests() {
     // the send fails, and the mapping must be removed again.
     {
         let mut mgr = backend.manager.write().await;
-        mgr.telos_connected = true;
+        mgr.agent_connected = true;
         mgr.agent_ready = true;
     }
     {
@@ -179,7 +190,7 @@ async fn failed_submit_cleans_pending_requests() {
 #[test]
 fn truncation_never_splits_multibyte_chars() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = telos_manager(dir.path());
+    let mut mgr = agent_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     // Title: a long string of multi-byte chars (Korean) plus ASCII.
@@ -205,7 +216,7 @@ fn truncation_never_splits_multibyte_chars() {
 #[test]
 fn a_turn_context_leaves_the_notes_out() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = telos_manager(dir.path());
+    let mut mgr = agent_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     // A note first, as one would be said before anyone turns to the agent, then a turn's worth
@@ -249,7 +260,7 @@ fn a_turn_context_leaves_the_notes_out() {
 #[test]
 fn prepare_message_clears_stale_acp_mapping() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = telos_manager(dir.path());
+    let mut mgr = agent_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     // Simulate a persisted thread with an acp id from a past session.
@@ -397,7 +408,7 @@ fn load_threads_repairs_turn_counter_drift() {
 #[test]
 fn add_message_full_replaces_by_id_anywhere() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = telos_manager(dir.path());
+    let mut mgr = agent_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     mgr.add_message_full(
@@ -468,7 +479,7 @@ fn add_message_full_replaces_by_id_anywhere() {
 #[test]
 fn scoped_message_ids_do_not_collide_across_acp_threads() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = telos_manager(dir.path());
+    let mut mgr = agent_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     mgr.add_message_full(
@@ -505,7 +516,7 @@ fn scoped_message_ids_do_not_collide_across_acp_threads() {
 #[test]
 fn scoped_id_update_targets_only_its_acp_thread() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = telos_manager(dir.path());
+    let mut mgr = agent_manager(dir.path());
     let tid = mgr.get_or_create_thread(None);
 
     mgr.add_message_full(
@@ -547,7 +558,7 @@ fn scoped_id_update_targets_only_its_acp_thread() {
 
 #[tokio::test]
 async fn threads_empty_when_no_state() {
-    let backend = telos_backend();
+    let backend = acp_ws_backend();
     assert!(backend.threads().await.is_empty());
     assert!(backend.thread("missing").await.is_none());
 }
@@ -559,7 +570,7 @@ async fn threads_empty_when_no_state() {
 #[tokio::test]
 async fn duplicate_completion_consumed_by_sentinel() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     // Set up the local thread and ACP mapping as the submit path would.
     {
@@ -599,7 +610,7 @@ async fn duplicate_completion_consumed_by_sentinel() {
 #[tokio::test]
 async fn a_completion_with_no_platform_mapping_lands_by_request_id() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     // The request mapping is the only one, as a dropped `thread_created` leaves it.
     let tid = {
@@ -631,7 +642,7 @@ async fn a_completion_with_no_platform_mapping_lands_by_request_id() {
 #[tokio::test]
 async fn empty_completion_records_error() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -663,7 +674,7 @@ async fn empty_completion_records_error() {
 #[tokio::test]
 async fn error_then_completion_consumes_once() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -701,7 +712,7 @@ async fn error_then_completion_consumes_once() {
 #[tokio::test]
 async fn replay_of_prior_turn_entry_is_dropped() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     // Simulate turn 1: thinking + tool call + answer, then completion.
     {
@@ -790,7 +801,7 @@ async fn replay_of_prior_turn_entry_is_dropped() {
 #[test]
 fn consume_request_prunes_old_sentinels() {
     let dir = tempfile::tempdir().unwrap();
-    let mut mgr = telos_manager(dir.path());
+    let mut mgr = agent_manager(dir.path());
     mgr.sentinel_cap = 4;
 
     // Fill with active mappings plus consumed sentinels past the cap.
@@ -815,7 +826,7 @@ fn consume_request_prunes_old_sentinels() {
 #[tokio::test]
 async fn thread_created_after_consumption_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -846,7 +857,7 @@ async fn thread_created_after_consumption_is_ignored() {
 #[tokio::test]
 async fn error_then_thread_created_ignored() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -880,7 +891,7 @@ async fn error_then_thread_created_ignored() {
 #[tokio::test]
 async fn turn_cancelled_consumes_and_ignores_duplicate() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     {
         let mut mgr = manager.write().await;
@@ -916,7 +927,7 @@ async fn turn_cancelled_consumes_and_ignores_duplicate() {
 #[tokio::test]
 async fn thread_created_and_tool_metadata_flow() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     let tid = {
         let mut mgr = manager.write().await;
@@ -967,7 +978,7 @@ async fn thread_created_and_tool_metadata_flow() {
 #[tokio::test]
 async fn message_added_unknown_thread_ignored() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(RwLock::new(telos_manager(dir.path())));
+    let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
     handle_telos_event(
         &manager,
@@ -982,7 +993,7 @@ async fn message_added_unknown_thread_ignored() {
 /// cancel without a sender fails; with a sender it submits the command.
 #[tokio::test]
 async fn cancel_submits_when_connected() {
-    let backend = telos_backend();
+    let backend = acp_ws_backend();
 
     // No sender: cancel fails with not connected.
     let err = backend.cancel().await.expect_err("must fail without sender");
@@ -1004,7 +1015,7 @@ async fn cancel_submits_when_connected() {
 /// was answered as a noop while the turn kept running.
 #[tokio::test]
 async fn cancel_names_the_turn_in_flight() {
-    let backend = telos_backend();
+    let backend = acp_ws_backend();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     {
         let mut guard = backend.ws_tx.lock().await;
@@ -1033,7 +1044,7 @@ async fn cancel_names_the_turn_in_flight() {
 /// alone and falls back to the empty command.
 #[tokio::test]
 async fn cancel_ignores_a_consumed_turn() {
-    let backend = telos_backend();
+    let backend = acp_ws_backend();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     {
         let mut guard = backend.ws_tx.lock().await;
@@ -1056,7 +1067,7 @@ async fn cancel_ignores_a_consumed_turn() {
 /// create_thread creates a fresh thread and returns its id.
 #[tokio::test]
 async fn create_thread_creates_fresh_thread() {
-    let backend = telos_backend();
+    let backend = acp_ws_backend();
     let tid = backend.create_thread().await.expect("thread created");
     let thread = backend.thread(&tid).await.expect("thread exists");
     assert!(thread.messages.is_empty());
@@ -1067,7 +1078,7 @@ async fn create_thread_creates_fresh_thread() {
 /// connected; without a sender it fails.
 #[tokio::test]
 async fn resolve_tool_call_sends_when_connected() {
-    let backend = telos_backend();
+    let backend = acp_ws_backend();
     let tid = backend.create_thread().await.unwrap();
     let mgr = backend.manager.clone();
     {

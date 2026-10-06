@@ -1,4 +1,4 @@
-// TelosBackend — ACP/WebSocket adapter implementing the agent fabric trait.
+// AcpWsBackend — ACP/WebSocket adapter implementing the agent fabric trait.
 //
 // Runs one Telos process behind the `AgentBackend` interface.
 // ACP-over-WebSocket details (connection loop, event dispatch, reconnect)
@@ -15,17 +15,17 @@ use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
     ThreadParent, ThreadSession, NOTE_ROLE,
 };
-use crate::telos::{TelosManager, WsCommandTx};
+use crate::acp_ws::{AcpWsManager, WsCommandTx};
 
 /// One Telos agent instance behind the fabric interface.
-pub struct TelosBackend {
+pub struct AcpWsBackend {
     /// Name this instance answers to. The registry keys on it and routing
     /// looks it up, so it has to be the configured agent name: a constant
     /// would make every telos agent collide on one registry entry and leave
     /// all but the last unreachable.
     pub name: String,
-    pub manager: Arc<RwLock<TelosManager>>,
-    /// Shared command channel, kept in sync with `TelosManager::ws_tx` by
+    pub manager: Arc<RwLock<AcpWsManager>>,
+    /// Shared command channel, kept in sync with `AcpWsManager::ws_tx` by
     /// `telos::control`. Sending through the shared channel means a stale
     /// manager-side sender after a reconnect cannot silently drop a
     /// message.
@@ -58,13 +58,13 @@ fn cancel_command(request_id: Option<&str>) -> String {
 }
 
 #[async_trait::async_trait]
-impl AgentBackend for TelosBackend {
+impl AgentBackend for AcpWsBackend {
     fn name(&self) -> &str {
         &self.name
     }
 
     fn kind(&self) -> AgentKind {
-        AgentKind::Telos
+        AgentKind::AcpWs
     }
 
     fn scope(&self) -> Option<String> {
@@ -83,7 +83,7 @@ impl AgentBackend for TelosBackend {
         AgentStatus {
             name: self.name().to_string(),
             kind: self.kind(),
-            connected: mgr.telos_connected,
+            connected: mgr.agent_connected,
             ready: mgr.agent_ready,
             capabilities: self.kind().capabilities(),
             last_error: None,
@@ -112,7 +112,7 @@ impl AgentBackend for TelosBackend {
         // sending so the command channel is not blocked by thread work.
         let (thread_id, request_id, is_new, cmd) = {
             let mut mgr = self.manager.write().await;
-            if !mgr.telos_connected || !mgr.agent_ready {
+            if !mgr.agent_connected || !mgr.agent_ready {
                 return Err("agent not connected or not ready".to_string());
             }
             let tid = mgr.get_or_create_thread(thread_id);
@@ -369,7 +369,7 @@ impl AgentBackend for TelosBackend {
     }
 }
 
-impl TelosBackend {
+impl AcpWsBackend {
     /// The turns this agent is running, by request id.
     ///
     /// `pending_requests` holds a live mapping while a turn is in flight and a blank

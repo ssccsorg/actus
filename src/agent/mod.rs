@@ -2,7 +2,7 @@
 //
 // Actus weaves heterogeneous agent platforms behind one thin execution
 // interface, the same way neXus weaves heterogeneous FIH storage types
-// behind one knowledge fabric. A platform adapter (TelosBackend now, a
+// behind one knowledge fabric. A platform adapter (AcpWsBackend now, a
 // LangGraph or Native adapter later) implements `AgentBackend`; the
 // registry maps agent names to running adapters; HTTP handlers talk only
 // to the trait.
@@ -22,9 +22,11 @@ pub mod native;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
-    /// Telos over ACP/WebSocket. Default agent when a Telos binary and
-    /// provider credentials are available.
-    Telos,
+    /// An agent that speaks the agent-client protocol over a WebSocket. The default
+    /// kind. What runs on the other end is a deployment choice; the contract is the
+    /// protocol, and the executor implementing it is named by the configuration.
+    #[serde(rename = "acp_ws", alias = "telos")]
+    AcpWs,
     /// LangGraph Server over REST/SSE. Future adapter.
     LangGraph,
     /// In-process Rust agent loop. Reference adapter (deterministic,
@@ -39,7 +41,7 @@ pub enum AgentKind {
 
 impl AgentKind {
     pub const ALL: [AgentKind; 4] = [
-        AgentKind::Telos,
+        AgentKind::AcpWs,
         AgentKind::LangGraph,
         AgentKind::Native,
         AgentKind::ExtCli,
@@ -47,16 +49,20 @@ impl AgentKind {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            AgentKind::Telos => "telos",
+            AgentKind::AcpWs => "acp_ws",
             AgentKind::LangGraph => "langgraph",
             AgentKind::Native => "native",
             AgentKind::ExtCli => "ext_cli",
         }
     }
 
-    /// Strict lookup of a kind by its wire name. Returns None for
-    /// unknown names.
+    /// Lookup of a kind by its wire name. `telos` is the name this kind carried before
+    /// it was named for what it is, and stays accepted so a configuration written
+    /// against the old name keeps parsing.
     pub fn parse(s: &str) -> Option<AgentKind> {
+        if s == "telos" {
+            return Some(AgentKind::AcpWs);
+        }
         AgentKind::ALL.iter().find(|k| k.as_str() == s).copied()
     }
 
@@ -64,7 +70,7 @@ impl AgentKind {
     /// sessionful; a raw-CLI agent is a one-shot, parallel act.
     pub fn capabilities(self) -> AgentCapabilities {
         match self {
-            AgentKind::Telos => AgentCapabilities {
+            AgentKind::AcpWs => AgentCapabilities {
                 sessionful: true,
                 streaming: true,
                 tools: true,

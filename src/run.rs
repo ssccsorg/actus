@@ -24,9 +24,9 @@ use crate::agent::{AgentKind, AgentRegistry};
 use crate::control;
 use crate::server::{run_http_server, AppState};
 use crate::store::RecordStore;
-use crate::telos::backend::TelosBackend;
-use crate::telos::control::run_ws_server;
-use crate::telos::{ensure_telos_settings, launch_telos, TelosManager, WsCommandTx};
+use crate::acp_ws::backend::AcpWsBackend;
+use crate::acp_ws::control::run_ws_server;
+use crate::acp_ws::{ensure_agent_settings, launch_agent, AcpWsManager, WsCommandTx};
 
 /// Where an agent's record lives, decided by whoever composes the server.
 pub type StoreFactory = Arc<dyn Fn(&Path) -> Result<Arc<dyn RecordStore>, String> + Send + Sync>;
@@ -338,7 +338,7 @@ pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
     let mut registry = AgentRegistry::new();
     let mut children = AgentChildren::new();
     // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
-    let mut monitors: Vec<(Arc<RwLock<TelosManager>>, WsCommandTx)> = Vec::new();
+    let mut monitors: Vec<(Arc<RwLock<AcpWsManager>>, WsCommandTx)> = Vec::new();
     // Per-agent user data dirs stay alive for the process lifetime; Telos
     // reads settings at startup and watches them while running.
     let mut _user_data_dirs: Vec<tempfile::TempDir> = Vec::new();
@@ -348,7 +348,7 @@ pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
 
     for spec in &specs {
         match spec.kind {
-            AgentKind::Telos => {
+            AgentKind::AcpWs => {
                 if !spec.bin.exists() {
                     return Err(anyhow::anyhow!(
                         "agent '{}': telos binary not found at {}",
@@ -377,7 +377,7 @@ pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
                 };
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
-                ensure_telos_settings(user_data_dir.path(), spec)?;
+                ensure_agent_settings(user_data_dir.path(), spec)?;
                 let threads_dir = threads_root.join(&spec.name);
                 std::fs::create_dir_all(&threads_dir)?;
                 let session_id = format!(
@@ -386,7 +386,7 @@ pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
                     &uuid::Uuid::new_v4().to_string()[..8]
                 );
                 let manager = Arc::new(RwLock::new(
-                    TelosManager::with_store(
+                    AcpWsManager::with_store(
                         session_id.clone(),
                         ws_host.clone(),
                         store(&threads_dir).map_err(anyhow::Error::msg)?,
@@ -407,11 +407,11 @@ pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
                         }
                     }
                 });
-                // Debounced thread persistence (see TelosManager::save_threads).
-                TelosManager::spawn_thread_saver(manager.clone());
+                // Debounced thread persistence (see AcpWsManager::save_threads).
+                AcpWsManager::spawn_thread_saver(manager.clone());
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-                let child = launch_telos(
+                let child = launch_agent(
                     &spec.bin,
                     &agent_workdir,
                     user_data_dir.path(),
@@ -434,7 +434,7 @@ pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
                 );
                 children.push(child);
 
-                let backend = Arc::new(TelosBackend {
+                let backend = Arc::new(AcpWsBackend {
                     name: spec.name.clone(),
                     manager: manager.clone(),
                     ws_tx: ws_tx.clone(),
@@ -616,7 +616,7 @@ pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
                     let (connected, elapsed, active_turn) = {
                         let g = mgr.read().await;
                         (
-                            g.telos_connected,
+                            g.agent_connected,
                             g.last_sse_event_time.elapsed(),
                             !g.pending_chat_queue.is_empty(),
                         )
@@ -627,13 +627,13 @@ pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
                             "Health monitor: no events for {}s during an active turn, forcing reconnection",
                             elapsed.as_secs()
                         );
-                        // Force reconnection: clear telos_connected and the
+                        // Force reconnection: clear agent_connected and the
                         // shared command channel. The WS read loop's
                         // periodic check breaks, and the connection loop
-                        // accepts a new connection (Telos auto-reconnects).
+                        // accepts a new connection (the executor reconnects).
                         {
                             let mut g = mgr.write().await;
-                            g.telos_connected = false;
+                            g.agent_connected = false;
                         }
                         {
                             let mut guard = ws_tx.lock().await;

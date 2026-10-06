@@ -1,11 +1,11 @@
-// Serialization round-trip tests for the Telos protocol types (issue #9).
+// Serialization round-trip tests for the agent-client protocol types (issue #9).
 //
 // The SyncEvent enum is adjacently tagged (`event_type` + `data`), which
-// is the wire format Telos emits over the WebSocket. These tests pin that
+// is the wire format the executor emits over the WebSocket. These tests pin that
 // format and prove every variant survives a JSON round trip, including
 // the defaulted fields of MessageAdded.
 
-use actus::telos::types::{IncomingChatMessage, OutgoingMessage, SyncEvent};
+use actus::acp_ws::types::{IncomingChatMessage, OutgoingMessage, SyncEvent};
 
 #[test]
 fn sync_event_roundtrip_all_variants() {

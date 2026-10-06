@@ -2,7 +2,7 @@
 // (issue #25: an agent thinks at the level the operator chose, or not at all).
 
 use actus::agent::config::{load_config, AgentDefaults, AgentSpec, ToolApproval};
-use actus::telos::ensure_telos_settings;
+use actus::acp_ws::ensure_agent_settings;
 use std::path::PathBuf;
 
 fn spec_with_effort(level: &str) -> AgentSpec {
@@ -23,7 +23,7 @@ fn spec_with_effort(level: &str) -> AgentSpec {
 
 fn settings_written(spec: &AgentSpec) -> serde_json::Value {
     let dir = tempfile::tempdir().unwrap();
-    ensure_telos_settings(dir.path(), spec).unwrap();
+    ensure_agent_settings(dir.path(), spec).unwrap();
     serde_json::from_str(&std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap())
         .unwrap()
 }
@@ -106,7 +106,7 @@ fn an_existing_default_model_is_left_alone() {
     )
     .unwrap();
 
-    ensure_telos_settings(dir.path(), &spec_with_effort("high")).unwrap();
+    ensure_agent_settings(dir.path(), &spec_with_effort("high")).unwrap();
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
     )

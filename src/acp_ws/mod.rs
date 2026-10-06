@@ -9,8 +9,8 @@ use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Channel sender for WebSocket commands to Telos. Shared between
-/// `AppState` and `TelosManager` so cancel can send without acquiring the
-/// `TelosManager` RwLock (avoiding lock contention with long-running SSE
+/// `AppState` and `AcpWsManager` so cancel can send without acquiring the
+/// `AcpWsManager` RwLock (avoiding lock contention with long-running SSE
 /// handlers).
 pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
 
@@ -41,10 +41,10 @@ use uuid::Uuid;
 
 /// Manages a single Telos WebSocket connection and message dispatch.
 #[allow(dead_code)]
-pub struct TelosManager {
+pub struct AcpWsManager {
     pub session_id: String,
     pub ws_host: String,
-    pub telos_connected: bool,
+    pub agent_connected: bool,
     pub agent_ready: bool,
     /// Channel to send WebSocket commands to Telos
     pub ws_tx: Option<mpsc::UnboundedSender<String>>,
@@ -100,7 +100,7 @@ pub struct TelosManager {
     pub sentinel_cap: usize,
 }
 
-impl TelosManager {
+impl AcpWsManager {
     /// Open the manager over the store this deployment's environment selects.
     pub fn new(session_id: String, ws_host: String, threads_dir: &Path) -> Result<Self, String> {
         Self::with_store(session_id, ws_host, crate::store::open(threads_dir)?)
@@ -145,7 +145,7 @@ impl TelosManager {
         Ok(Self {
             session_id,
             ws_host,
-            telos_connected: false,
+            agent_connected: false,
             agent_ready: false,
             ws_tx: None,
             threads,
@@ -538,7 +538,7 @@ impl TelosManager {
     /// snapshot the threads under a read lock, release it, and write the
     /// file on a blocking thread. Keeps the heavy JSON serialization and
     /// disk write off the manager lock and off the async runtime.
-    pub fn spawn_thread_saver(manager: Arc<RwLock<TelosManager>>) {
+    pub fn spawn_thread_saver(manager: Arc<RwLock<AcpWsManager>>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -619,7 +619,7 @@ fn telos_command(
     cmd
 }
 
-pub async fn launch_telos(
+pub async fn launch_agent(
     bin_path: &Path,
     workdir: &Path,
     user_data_dir: &Path,
@@ -731,7 +731,7 @@ fn resolve_variables(
     Ok(out)
 }
 
-pub fn ensure_telos_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
+pub fn ensure_agent_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
     use std::fs;
     use std::io::Write;
 

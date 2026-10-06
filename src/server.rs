@@ -24,7 +24,7 @@ use crate::agent::{AgentBackend, AgentRegistry, AgentStatus, ThreadMessage, Thre
 use crate::context;
 use crate::files;
 use crate::git;
-pub use crate::telos::WsCommandTx;
+pub use crate::acp_ws::WsCommandTx;
 
 // ── App State ──────────────────────────────────────────────────────────
 

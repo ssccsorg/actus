@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use super::RecordStore;
 use crate::agent::{ThreadMessage, ThreadSession};
-use crate::telos::truncate_utf8;
+use crate::acp_ws::truncate_utf8;
 
 pub struct DocumentStore {
     path: PathBuf,

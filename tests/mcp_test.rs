@@ -9,7 +9,7 @@
 use actus::agent::config::{
     load_config, AgentDefaults, AgentSpec, McpServer, ToolApproval, DEFAULT_REASONING_EFFORT,
 };
-use actus::telos::ensure_telos_settings;
+use actus::acp_ws::ensure_agent_settings;
 use std::path::PathBuf;
 
 fn defaults() -> AgentDefaults {
@@ -146,7 +146,7 @@ fn six_server_settings_injection_schema() {
         std::fs::write(&cfg, SIX_SERVER_TOML).unwrap();
         load_config(Some(&cfg), &defaults()).unwrap()
     };
-    ensure_telos_settings(data_dir, &specs[0]).unwrap();
+    ensure_agent_settings(data_dir, &specs[0]).unwrap();
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(data_dir.join("config/settings.json")).unwrap(),
@@ -195,7 +195,7 @@ fn settings_injection_skipped_without_endpoint_config() {
     // whose own built-in provider matches the label can still resolve the
     // key.
     let dir = tempfile::tempdir().unwrap();
-    ensure_telos_settings(dir.path(), &spec_without_endpoint()).unwrap();
+    ensure_agent_settings(dir.path(), &spec_without_endpoint()).unwrap();
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
@@ -288,7 +288,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
         headers: Default::default(),
         timeout: None,
     }];
-    ensure_telos_settings(
+    ensure_agent_settings(
         dir.path(),
         &spec_with(mcp, actus::agent::config::ToolApproval::Always),
     )
@@ -342,7 +342,7 @@ fn scenario_injected_stdio_server_is_spawnable() {
 fn an_always_agent_is_allowed_the_terminal() {
     fn settings_for(tool_approval: actus::agent::config::ToolApproval) -> serde_json::Value {
         let dir = tempfile::tempdir().unwrap();
-        ensure_telos_settings(dir.path(), &spec_with(Vec::new(), tool_approval)).unwrap();
+        ensure_agent_settings(dir.path(), &spec_with(Vec::new(), tool_approval)).unwrap();
         serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
         )
@@ -404,7 +404,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
         "a declaration may put a server in the catalog without starting it"
     );
 
-    ensure_telos_settings(dir.path(), &spec).unwrap();
+    ensure_agent_settings(dir.path(), &spec).unwrap();
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
     )
@@ -444,7 +444,7 @@ headers = { "Authorization" = "Bearer $KLETOS_MCP_ENV_TEST" }
     let cfg = dir.path().join("config.toml");
     std::fs::write(&cfg, TOML).unwrap();
     let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
-    let result = ensure_telos_settings(dir.path(), &spec);
+    let result = ensure_agent_settings(dir.path(), &spec);
 
     match previous {
         Some(value) => unsafe { std::env::set_var("KLETOS_MCP_ENV_TEST", value) },
@@ -490,7 +490,7 @@ env = { "GITHUB_PERSONAL_ACCESS_TOKEN" = "$KLETOS_MCP_UNSET_TEST" }
     std::fs::write(&cfg, TOML).unwrap();
     let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
 
-    let error = ensure_telos_settings(dir.path(), &spec)
+    let error = ensure_agent_settings(dir.path(), &spec)
         .expect_err("an unset declared variable must fail the launch of a server that starts")
         .to_string();
     assert!(error.contains("mcp-server-github"), "{error}");
@@ -520,7 +520,7 @@ env = { "GITHUB_PERSONAL_ACCESS_TOKEN" = "$KLETOS_MCP_OFF_UNSET_TEST" }
     let cfg = dir.path().join("config.toml");
     std::fs::write(&cfg, TOML).unwrap();
     let spec = load_config(Some(&cfg), &defaults()).unwrap().remove(0);
-    ensure_telos_settings(dir.path(), &spec)
+    ensure_agent_settings(dir.path(), &spec)
         .expect("a server that is off must not hold up the launch");
 
     let settings: serde_json::Value = serde_json::from_str(
@@ -562,7 +562,7 @@ fn declared_servers_merge_into_the_file() {
         }],
         actus::agent::config::ToolApproval::Always,
     );
-    ensure_telos_settings(dir.path(), &spec).unwrap();
+    ensure_agent_settings(dir.path(), &spec).unwrap();
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(config_dir.join("settings.json")).unwrap(),
