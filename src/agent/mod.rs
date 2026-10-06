@@ -2,7 +2,7 @@
 //
 // Actus weaves heterogeneous agent platforms behind one thin execution
 // interface, the same way neXus weaves heterogeneous FIH storage types
-// behind one knowledge fabric. A platform adapter (AcpWsBackend now, a
+// behind one knowledge fabric. A platform adapter (AcpwsBackend now, a
 // LangGraph or Native adapter later) implements `AgentBackend`; the
 // registry maps agent names to running adapters; HTTP handlers talk only
 // to the trait.
@@ -25,8 +25,8 @@ pub enum AgentKind {
     /// An agent that speaks the agent-client protocol over a WebSocket. The default
     /// kind. What runs on the other end is a deployment choice; the contract is the
     /// protocol, and the executor implementing it is named by the configuration.
-    #[serde(rename = "acp_ws", alias = "telos")]
-    AcpWs,
+    #[serde(rename = "acpws", alias = "telos")]
+    Acpws,
     /// LangGraph Server over REST/SSE. Future adapter.
     LangGraph,
     /// In-process Rust agent loop. Reference adapter (deterministic,
@@ -41,7 +41,7 @@ pub enum AgentKind {
 
 impl AgentKind {
     pub const ALL: [AgentKind; 4] = [
-        AgentKind::AcpWs,
+        AgentKind::Acpws,
         AgentKind::LangGraph,
         AgentKind::Native,
         AgentKind::ExtCli,
@@ -49,7 +49,7 @@ impl AgentKind {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            AgentKind::AcpWs => "acp_ws",
+            AgentKind::Acpws => "acpws",
             AgentKind::LangGraph => "langgraph",
             AgentKind::Native => "native",
             AgentKind::ExtCli => "ext_cli",
@@ -61,7 +61,7 @@ impl AgentKind {
     /// against the old name keeps parsing.
     pub fn parse(s: &str) -> Option<AgentKind> {
         if s == "telos" {
-            return Some(AgentKind::AcpWs);
+            return Some(AgentKind::Acpws);
         }
         AgentKind::ALL.iter().find(|k| k.as_str() == s).copied()
     }
@@ -70,13 +70,13 @@ impl AgentKind {
     /// sessionful; a raw-CLI agent is a one-shot, parallel act.
     pub fn capabilities(self) -> AgentCapabilities {
         match self {
-            AgentKind::AcpWs => AgentCapabilities {
+            AgentKind::Acpws => AgentCapabilities {
                 sessionful: true,
                 streaming: true,
                 tools: true,
                 approval: true,
                 parallel: false,
-                transport: "acp_ws",
+                transport: "acpws",
             },
             AgentKind::LangGraph => AgentCapabilities {
                 sessionful: true,

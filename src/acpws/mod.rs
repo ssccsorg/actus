@@ -9,8 +9,8 @@ use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Channel sender for WebSocket commands to the executor. Shared between
-/// `AppState` and `AcpWsManager` so cancel can send without acquiring the
-/// `AcpWsManager` RwLock (avoiding lock contention with long-running SSE
+/// `AppState` and `AcpwsManager` so cancel can send without acquiring the
+/// `AcpwsManager` RwLock (avoiding lock contention with long-running SSE
 /// handlers).
 pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
 
@@ -29,7 +29,7 @@ use crate::util::truncate_utf8;
 
 /// Manages a single executor WebSocket connection and message dispatch.
 #[allow(dead_code)]
-pub struct AcpWsManager {
+pub struct AcpwsManager {
     pub session_id: String,
     pub ws_host: String,
     pub agent_connected: bool,
@@ -88,7 +88,7 @@ pub struct AcpWsManager {
     pub sentinel_cap: usize,
 }
 
-impl AcpWsManager {
+impl AcpwsManager {
     /// Open the manager over the store this deployment's environment selects.
     pub fn new(session_id: String, ws_host: String, threads_dir: &Path) -> Result<Self, String> {
         Self::with_store(session_id, ws_host, crate::store::open(threads_dir)?)
@@ -526,7 +526,7 @@ impl AcpWsManager {
     /// snapshot the threads under a read lock, release it, and write the
     /// file on a blocking thread. Keeps the heavy JSON serialization and
     /// disk write off the manager lock and off the async runtime.
-    pub fn spawn_thread_saver(manager: Arc<RwLock<AcpWsManager>>) {
+    pub fn spawn_thread_saver(manager: Arc<RwLock<AcpwsManager>>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

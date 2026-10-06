@@ -2,7 +2,7 @@
 // library target exists so integration tests in `/tests` can link the
 // modules directly.
 
-pub mod acp_ws;
+pub mod acpws;
 pub mod agent;
 pub mod context;
 pub mod control;

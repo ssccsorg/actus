@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use actus::acp_ws::AcpWsManager;
+use actus::acpws::AcpwsManager;
 use actus::agent::{ThreadMessage, ThreadSession};
 use actus::store::{RecordStore, Volume, VolumeStore};
 
@@ -94,8 +94,8 @@ fn thread_with(n: usize) -> ThreadSession {
     }
 }
 
-fn manager(dir: &std::path::Path, volume: &MemVolume) -> AcpWsManager {
-    AcpWsManager::with_store(
+fn manager(dir: &std::path::Path, volume: &MemVolume) -> AcpwsManager {
+    AcpwsManager::with_store(
         "ses_test".to_string(),
         "127.0.0.1:0".to_string(),
         Arc::new(VolumeStore::new(volume.clone(), dir)),

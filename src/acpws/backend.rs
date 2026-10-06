@@ -1,4 +1,4 @@
-// AcpWsBackend — ACP/WebSocket adapter implementing the agent fabric trait.
+// AcpwsBackend — ACP/WebSocket adapter implementing the agent fabric trait.
 //
 // Runs one Telos process behind the `AgentBackend` interface.
 // ACP-over-WebSocket details (connection loop, event dispatch, reconnect)
@@ -11,21 +11,21 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::{Notify, RwLock};
 
-use crate::acp_ws::{AcpWsManager, WsCommandTx};
+use crate::acpws::{AcpwsManager, WsCommandTx};
 use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
     ThreadParent, ThreadSession, NOTE_ROLE,
 };
 
 /// One executor agent instance behind the fabric interface.
-pub struct AcpWsBackend {
+pub struct AcpwsBackend {
     /// Name this instance answers to. The registry keys on it and routing
     /// looks it up, so it has to be the configured agent name: a constant
     /// would make every telos agent collide on one registry entry and leave
     /// all but the last unreachable.
     pub name: String,
-    pub manager: Arc<RwLock<AcpWsManager>>,
-    /// Shared command channel, kept in sync with `AcpWsManager::ws_tx` by
+    pub manager: Arc<RwLock<AcpwsManager>>,
+    /// Shared command channel, kept in sync with `AcpwsManager::ws_tx` by
     /// `telos::control`. Sending through the shared channel means a stale
     /// manager-side sender after a reconnect cannot silently drop a
     /// message.
@@ -58,13 +58,13 @@ fn cancel_command(request_id: Option<&str>) -> String {
 }
 
 #[async_trait::async_trait]
-impl AgentBackend for AcpWsBackend {
+impl AgentBackend for AcpwsBackend {
     fn name(&self) -> &str {
         &self.name
     }
 
     fn kind(&self) -> AgentKind {
-        AgentKind::AcpWs
+        AgentKind::Acpws
     }
 
     fn scope(&self) -> Option<String> {
@@ -369,7 +369,7 @@ impl AgentBackend for AcpWsBackend {
     }
 }
 
-impl AcpWsBackend {
+impl AcpwsBackend {
     /// The turns this agent is running, by request id.
     ///
     /// `pending_requests` holds a live mapping while a turn is in flight and a blank

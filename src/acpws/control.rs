@@ -19,8 +19,8 @@ use tokio_tungstenite::accept_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::acp_ws::types::SyncEvent;
-use crate::acp_ws::AcpWsManager;
+use crate::acpws::types::SyncEvent;
+use crate::acpws::AcpwsManager;
 use crate::server::WsCommandTx;
 
 /// Run the WebSocket server that accepts connections from the Telos process.
@@ -33,7 +33,7 @@ use crate::server::WsCommandTx;
 ///   5. On disconnect, accept the next connection (Telos auto-reconnects)
 pub async fn run_ws_server(
     ws_host: &str,
-    agent_manager: Arc<RwLock<AcpWsManager>>,
+    agent_manager: Arc<RwLock<AcpwsManager>>,
     ws_tx: WsCommandTx,
 ) -> anyhow::Result<()> {
     // Bind the address the caller configured. Parsing the port back out and
@@ -172,7 +172,7 @@ pub async fn run_ws_server(
 /// Process a single WebSocket message from Telos.
 /// Returns false if the connection should be closed.
 async fn handle_ws_message(
-    agent_manager: &Arc<RwLock<AcpWsManager>>,
+    agent_manager: &Arc<RwLock<AcpwsManager>>,
     msg: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
 ) -> bool {
     match msg {
@@ -213,7 +213,7 @@ async fn handle_ws_message(
 ///
 /// Public so integration tests can drive the event loop directly without
 /// a WebSocket connection.
-pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text: &str) {
+pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text: &str) {
     tracing::debug!("WS event: {}", &text[..text.len().min(200)]);
 
     let msg: serde_json::Value = match serde_json::from_str(text) {

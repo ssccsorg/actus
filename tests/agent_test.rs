@@ -2,15 +2,15 @@
 
 use std::sync::Arc;
 
-use actus::acp_ws::backend::AcpWsBackend;
-use actus::acp_ws::control::handle_agent_event;
-use actus::acp_ws::{WsCommandTx, AcpWsManager};
+use actus::acpws::backend::AcpwsBackend;
+use actus::acpws::control::handle_agent_event;
+use actus::acpws::{WsCommandTx, AcpwsManager};
 use actus::agent::{AgentBackend, AgentKind, AgentRegistry};
 use actus::store::RecordStore;
 use tokio::sync::RwLock;
 
-fn agent_manager(dir: &std::path::Path) -> AcpWsManager {
-    AcpWsManager::new(
+fn agent_manager(dir: &std::path::Path) -> AcpwsManager {
+    AcpwsManager::new(
         "ses_test".to_string(),
         "127.0.0.1:9999".to_string(),
         dir,
@@ -20,21 +20,21 @@ fn agent_manager(dir: &std::path::Path) -> AcpWsManager {
 
 #[test]
 fn agent_kind_roundtrip() {
-    assert_eq!(AgentKind::parse("acp_ws"), Some(AgentKind::AcpWs));
+    assert_eq!(AgentKind::parse("acpws"), Some(AgentKind::Acpws));
     // The name this kind carried before it was named for what it is. A
     // configuration written against the old name keeps parsing.
-    assert_eq!(AgentKind::parse("telos"), Some(AgentKind::AcpWs));
+    assert_eq!(AgentKind::parse("telos"), Some(AgentKind::Acpws));
     assert_eq!(AgentKind::parse("langgraph"), Some(AgentKind::LangGraph));
     assert_eq!(AgentKind::parse("native"), Some(AgentKind::Native));
     assert_eq!(AgentKind::parse("unknown"), None);
-    assert_eq!(AgentKind::AcpWs.as_str(), "acp_ws");
+    assert_eq!(AgentKind::Acpws.as_str(), "acpws");
     assert_eq!(
-        serde_json::to_string(&AgentKind::AcpWs).unwrap(),
-        "\"acp_ws\""
+        serde_json::to_string(&AgentKind::Acpws).unwrap(),
+        "\"acpws\""
     );
     assert_eq!(
         serde_json::from_str::<AgentKind>("\"telos\"").unwrap(),
-        AgentKind::AcpWs,
+        AgentKind::Acpws,
         "an old configuration still deserializes"
     );
     assert_eq!(
@@ -43,14 +43,14 @@ fn agent_kind_roundtrip() {
     );
 }
 
-fn acp_ws_backend() -> AcpWsBackend {
-    acp_ws_backend_named("telos")
+fn acpws_backend() -> AcpwsBackend {
+    acpws_backend_named("telos")
 }
 
-fn acp_ws_backend_named(name: &str) -> AcpWsBackend {
+fn acpws_backend_named(name: &str) -> AcpwsBackend {
     let dir = tempfile::tempdir().expect("tempdir");
     let manager = Arc::new(RwLock::new(
-        AcpWsManager::new(
+        AcpwsManager::new(
             "ses_test".to_string(),
             "127.0.0.1:9999".to_string(),
             dir.path(),
@@ -58,7 +58,7 @@ fn acp_ws_backend_named(name: &str) -> AcpWsBackend {
         .expect("document store"),
     ));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-    AcpWsBackend {
+    AcpwsBackend {
         name: name.to_string(),
         manager,
         ws_tx,
@@ -69,12 +69,12 @@ fn acp_ws_backend_named(name: &str) -> AcpWsBackend {
 #[tokio::test]
 async fn registry_default_agent_status() {
     let mut registry = AgentRegistry::new();
-    registry.register(Arc::new(acp_ws_backend()), true);
+    registry.register(Arc::new(acpws_backend()), true);
 
     let default = registry.default_agent().expect("default agent");
     let status = default.status().await;
     assert_eq!(status.name, "telos");
-    assert_eq!(status.kind, AgentKind::AcpWs);
+    assert_eq!(status.kind, AgentKind::Acpws);
     assert!(!status.connected);
     assert!(!status.ready);
 
@@ -86,7 +86,7 @@ async fn registry_default_agent_status() {
 #[tokio::test]
 async fn registry_get_by_name() {
     let mut registry = AgentRegistry::new();
-    registry.register(Arc::new(acp_ws_backend()), true);
+    registry.register(Arc::new(acpws_backend()), true);
 
     assert!(registry.get("telos").is_some());
     assert!(registry.get("missing").is_none());
@@ -98,8 +98,8 @@ async fn registry_get_by_name() {
 /// so this is the difference between routing working and every conversation
 /// landing on one project.
 #[tokio::test]
-async fn acp_ws_backend_reports_its_configured_name() {
-    let backend = acp_ws_backend_named("alpha");
+async fn acpws_backend_reports_its_configured_name() {
+    let backend = acpws_backend_named("alpha");
     assert_eq!(backend.name(), "alpha");
 
     let status = backend.status().await;
@@ -109,8 +109,8 @@ async fn acp_ws_backend_reports_its_configured_name() {
 #[tokio::test]
 async fn two_telos_agents_with_different_names_stay_distinct() {
     let mut registry = AgentRegistry::new();
-    registry.register(Arc::new(acp_ws_backend_named("alpha")), true);
-    registry.register(Arc::new(acp_ws_backend_named("beta")), false);
+    registry.register(Arc::new(acpws_backend_named("alpha")), true);
+    registry.register(Arc::new(acpws_backend_named("beta")), false);
 
     assert!(registry.get("alpha").is_some(), "the first agent is reachable");
     assert!(registry.get("beta").is_some(), "the second agent is reachable");
@@ -132,7 +132,7 @@ async fn two_telos_agents_with_different_names_stay_distinct() {
 
 #[tokio::test]
 async fn submit_fails_when_not_connected() {
-    let backend = acp_ws_backend();
+    let backend = acpws_backend();
     let err = backend.submit(None, "hello").await.expect_err("must fail");
     assert!(
         err.contains("not connected") || err.contains("not ready"),
@@ -147,7 +147,7 @@ async fn submit_fails_when_not_connected() {
 /// bound across repeated failed submissions.
 #[tokio::test]
 async fn failed_submit_cleans_pending_requests() {
-    let backend = acp_ws_backend();
+    let backend = acpws_backend();
 
     // Not connected: submit fails before inserting a mapping.
     {
@@ -558,7 +558,7 @@ fn scoped_id_update_targets_only_its_acp_thread() {
 
 #[tokio::test]
 async fn threads_empty_when_no_state() {
-    let backend = acp_ws_backend();
+    let backend = acpws_backend();
     assert!(backend.threads().await.is_empty());
     assert!(backend.thread("missing").await.is_none());
 }
@@ -993,7 +993,7 @@ async fn message_added_unknown_thread_ignored() {
 /// cancel without a sender fails; with a sender it submits the command.
 #[tokio::test]
 async fn cancel_submits_when_connected() {
-    let backend = acp_ws_backend();
+    let backend = acpws_backend();
 
     // No sender: cancel fails with not connected.
     let err = backend.cancel().await.expect_err("must fail without sender");
@@ -1015,7 +1015,7 @@ async fn cancel_submits_when_connected() {
 /// was answered as a noop while the turn kept running.
 #[tokio::test]
 async fn cancel_names_the_turn_in_flight() {
-    let backend = acp_ws_backend();
+    let backend = acpws_backend();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     {
         let mut guard = backend.ws_tx.lock().await;
@@ -1044,7 +1044,7 @@ async fn cancel_names_the_turn_in_flight() {
 /// alone and falls back to the empty command.
 #[tokio::test]
 async fn cancel_ignores_a_consumed_turn() {
-    let backend = acp_ws_backend();
+    let backend = acpws_backend();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     {
         let mut guard = backend.ws_tx.lock().await;
@@ -1067,7 +1067,7 @@ async fn cancel_ignores_a_consumed_turn() {
 /// create_thread creates a fresh thread and returns its id.
 #[tokio::test]
 async fn create_thread_creates_fresh_thread() {
-    let backend = acp_ws_backend();
+    let backend = acpws_backend();
     let tid = backend.create_thread().await.expect("thread created");
     let thread = backend.thread(&tid).await.expect("thread exists");
     assert!(thread.messages.is_empty());
@@ -1078,7 +1078,7 @@ async fn create_thread_creates_fresh_thread() {
 /// connected; without a sender it fails.
 #[tokio::test]
 async fn resolve_tool_call_sends_when_connected() {
-    let backend = acp_ws_backend();
+    let backend = acpws_backend();
     let tid = backend.create_thread().await.unwrap();
     let mgr = backend.manager.clone();
     {

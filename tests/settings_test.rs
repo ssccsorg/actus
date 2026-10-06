@@ -1,7 +1,7 @@
 // Integration tests for the settings an actus-launched agent starts from
 // (issue #25: an agent thinks at the level the operator chose, or not at all).
 
-use actus::acp_ws::ensure_agent_settings;
+use actus::acpws::ensure_agent_settings;
 use actus::agent::config::{load_config, AgentDefaults, AgentSpec, ToolApproval};
 use std::path::PathBuf;
 

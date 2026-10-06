@@ -31,7 +31,7 @@ fn no_file_yields_single_default_telos() {
     let specs = load_config(None, &defaults()).unwrap();
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].name, "telos");
-    assert_eq!(specs[0].kind, AgentKind::AcpWs);
+    assert_eq!(specs[0].kind, AgentKind::Acpws);
     assert_eq!(specs[0].provider, "openai-compatible");
     assert_eq!(specs[0].model, "example-model");
     assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
@@ -291,7 +291,7 @@ base_url = "https://api.anthropic.com/v1"
     assert_eq!(specs.len(), 2);
 
     // telos inherits everything from defaults
-    assert_eq!(specs[0].kind, AgentKind::AcpWs);
+    assert_eq!(specs[0].kind, AgentKind::Acpws);
     assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
     assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
 

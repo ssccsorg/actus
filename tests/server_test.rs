@@ -2,7 +2,7 @@
 //
 // These are real end-to-end tests: the production router is served on
 // an ephemeral port and exercised through a real HTTP client. The agent
-// backend is a disconnected AcpWsBackend, so endpoints that require a
+// backend is a disconnected AcpwsBackend, so endpoints that require a
 // live agent exercise the failure paths (503, error payloads) while
 // endpoints that only need the workspace (files, git, threads) are
 // covered end to end.
@@ -10,8 +10,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use actus::acp_ws::backend::AcpWsBackend;
-use actus::acp_ws::{WsCommandTx, AcpWsManager};
+use actus::acpws::backend::AcpwsBackend;
+use actus::acpws::{WsCommandTx, AcpwsManager};
 use actus::agent::{AgentBackend, AgentRegistry, ThreadMessage};
 use actus::server::{build_router, AppState, SharedState};
 use tokio::net::TcpListener;
@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 /// State with one disconnected Telos backend and an empty temp workdir.
 /// The TempDir is returned so it outlives the tests. Auth is enabled with
 /// a fixed token; `client()` sends it on every request.
-type Manager = Arc<RwLock<AcpWsManager>>;
+type Manager = Arc<RwLock<AcpwsManager>>;
 
 fn test_state() -> (SharedState, tempfile::TempDir) {
     let (state, workdir, _manager) = test_state_with_manager();
@@ -33,7 +33,7 @@ fn test_state() -> (SharedState, tempfile::TempDir) {
 fn test_state_with_manager() -> (SharedState, tempfile::TempDir, Manager) {
     let workdir = tempfile::tempdir().expect("tempdir");
     let manager: Manager = Arc::new(RwLock::new(
-        AcpWsManager::new(
+        AcpwsManager::new(
             "ses_test".to_string(),
             "127.0.0.1:9999".to_string(),
             workdir.path(),
@@ -41,7 +41,7 @@ fn test_state_with_manager() -> (SharedState, tempfile::TempDir, Manager) {
         .expect("document store"),
     ));
     let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-    let backend: Arc<dyn AgentBackend> = Arc::new(AcpWsBackend {
+    let backend: Arc<dyn AgentBackend> = Arc::new(AcpwsBackend {
         name: "telos".to_string(),
         manager: manager.clone(),
         ws_tx,
@@ -98,7 +98,7 @@ fn two_agent_state() -> (SharedState, tempfile::TempDir, Manager, Manager) {
         let threads_dir = workdir.path().join(name);
         std::fs::create_dir_all(&threads_dir).expect("threads dir");
         let manager: Manager = Arc::new(RwLock::new(
-            AcpWsManager::new(
+            AcpwsManager::new(
                 format!("ses_{name}"),
                 "127.0.0.1:9999".to_string(),
                 &threads_dir,
@@ -106,7 +106,7 @@ fn two_agent_state() -> (SharedState, tempfile::TempDir, Manager, Manager) {
             .expect("document store"),
         ));
         let ws_tx: WsCommandTx = Arc::new(tokio::sync::Mutex::new(None));
-        let backend: Arc<dyn AgentBackend> = Arc::new(AcpWsBackend {
+        let backend: Arc<dyn AgentBackend> = Arc::new(AcpwsBackend {
             name: name.to_string(),
             manager: manager.clone(),
             ws_tx,
@@ -182,7 +182,7 @@ async fn health_reports_disconnected_agent() {
     assert_eq!(agents[0]["name"], "telos");
     // The kind is the transport the agent speaks, not the product that implements it: the
     // executor behind it is a deployment choice.
-    assert_eq!(agents[0]["kind"], "acp_ws");
+    assert_eq!(agents[0]["kind"], "acpws");
     // The version is reported from the start, so a viewer that connected before a write has
     // a number to compare the next answer against.
     assert_eq!(agents[0]["thread_version"], 0);

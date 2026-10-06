@@ -380,9 +380,9 @@ pub fn load_config(
         if !names.insert(f.name.clone()) {
             return Err(format!("config: duplicate agent name '{}'", f.name));
         }
-        let kind = f.kind.unwrap_or(AgentKind::AcpWs);
+        let kind = f.kind.unwrap_or(AgentKind::Acpws);
         let ws_port = f.ws_port.unwrap_or(defaults.ws_port);
-        if kind == AgentKind::AcpWs {
+        if kind == AgentKind::Acpws {
             if let Some(prev) = ports.insert(ws_port, f.name.clone()) {
                 return Err(format!(
                     "config: agents '{}' and '{}' share WebSocket port {}",

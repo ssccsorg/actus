@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use crate::acp_ws::backend::AcpWsBackend;
-use crate::acp_ws::control::run_ws_server;
-use crate::acp_ws::{ensure_agent_settings, launch_agent, AcpWsManager, WsCommandTx};
+use crate::acpws::backend::AcpwsBackend;
+use crate::acpws::control::run_ws_server;
+use crate::acpws::{ensure_agent_settings, launch_agent, AcpwsManager, WsCommandTx};
 use crate::agent::config::{load_config, load_control_policy, AgentDefaults, AgentSpec};
 use crate::agent::config::{resolve_llm_settings, unquote_env_value};
 use crate::agent::ext_cli::ExtCliAgent;
@@ -370,7 +370,7 @@ pub async fn run_with(
     let mut registry = AgentRegistry::new();
     let mut children = AgentChildren::new();
     // (manager, ws_tx) pairs drive the shutdown handler and health monitor.
-    let mut monitors: Vec<(Arc<RwLock<AcpWsManager>>, WsCommandTx)> = Vec::new();
+    let mut monitors: Vec<(Arc<RwLock<AcpwsManager>>, WsCommandTx)> = Vec::new();
     // Per-agent user data dirs stay alive for the process lifetime; Telos
     // reads settings at startup and watches them while running.
     let mut _user_data_dirs: Vec<tempfile::TempDir> = Vec::new();
@@ -390,7 +390,7 @@ pub async fn run_with(
             continue;
         }
         match spec.kind {
-            AgentKind::AcpWs => {
+            AgentKind::Acpws => {
                 if !spec.bin.exists() {
                     return Err(anyhow::anyhow!(
                         "agent '{}': telos binary not found at {}",
@@ -428,7 +428,7 @@ pub async fn run_with(
                     &uuid::Uuid::new_v4().to_string()[..8]
                 );
                 let manager = Arc::new(RwLock::new(
-                    AcpWsManager::with_store(
+                    AcpwsManager::with_store(
                         session_id.clone(),
                         ws_host.clone(),
                         store(&threads_dir).map_err(anyhow::Error::msg)?,
@@ -449,8 +449,8 @@ pub async fn run_with(
                         }
                     }
                 });
-                // Debounced thread persistence (see AcpWsManager::save_threads).
-                AcpWsManager::spawn_thread_saver(manager.clone());
+                // Debounced thread persistence (see AcpwsManager::save_threads).
+                AcpwsManager::spawn_thread_saver(manager.clone());
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
                 let child = launch_agent(
@@ -476,7 +476,7 @@ pub async fn run_with(
                 );
                 children.push(child);
 
-                let backend = Arc::new(AcpWsBackend {
+                let backend = Arc::new(AcpwsBackend {
                     name: spec.name.clone(),
                     manager: manager.clone(),
                     ws_tx: ws_tx.clone(),

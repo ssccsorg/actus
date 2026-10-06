@@ -5,7 +5,7 @@
 // format and prove every variant survives a JSON round trip, including
 // the defaulted fields of MessageAdded.
 
-use actus::acp_ws::types::{IncomingChatMessage, OutgoingMessage, SyncEvent};
+use actus::acpws::types::{IncomingChatMessage, OutgoingMessage, SyncEvent};
 
 #[test]
 fn sync_event_roundtrip_all_variants() {
