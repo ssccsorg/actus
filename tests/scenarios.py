@@ -188,13 +188,13 @@ def agent_launch_contract(pid):
     tokens = [t for t in cmd.split() if not t.startswith("-")]
     workdir = tokens[-1] if tokens else os.getcwd()
     env = {
-        "TELOS_EXTERNAL_SYNC_ENABLED": "true",
-        "TELOS_WEBSOCKET_SYNC_ENABLED": "true",
-        "TELOS_WS_URL": f"127.0.0.1:{WS_PORT}",
-        "TELOS_WS_TOKEN": "test-token",
-        "TELOS_STATELESS": "1",
-        "TELOS_SESSION_ID": "ses_actus-reconnect-test",
-        "TELOS_TOOL_APPROVAL": "always",
+        "ACPWS_EXTERNAL_SYNC_ENABLED": "true",
+        "ACPWS_WEBSOCKET_SYNC_ENABLED": "true",
+        "ACPWS_WS_URL": f"127.0.0.1:{WS_PORT}",
+        "ACPWS_WS_TOKEN": "test-token",
+        "ACPWS_STATELESS": "1",
+        "ACPWS_SESSION_ID": "ses_actus-reconnect-test",
+        "ACPWS_TOOL_APPROVAL": "always",
         "RUST_LOG": "info",
     }
     return env, user_data_dir, workdir
@@ -383,13 +383,13 @@ def ensure_agent():
     pid = find_agent_pid()
     env, user_data_dir, workdir = agent_launch_contract(pid) if pid else (
         {
-            "TELOS_EXTERNAL_SYNC_ENABLED": "true",
-            "TELOS_WEBSOCKET_SYNC_ENABLED": "true",
-            "TELOS_WS_URL": f"127.0.0.1:{WS_PORT}",
-            "TELOS_WS_TOKEN": "test-token",
-            "TELOS_STATELESS": "1",
-            "TELOS_SESSION_ID": "ses_actus-reconnect-test",
-            "TELOS_TOOL_APPROVAL": "always",
+            "ACPWS_EXTERNAL_SYNC_ENABLED": "true",
+            "ACPWS_WEBSOCKET_SYNC_ENABLED": "true",
+            "ACPWS_WS_URL": f"127.0.0.1:{WS_PORT}",
+            "ACPWS_WS_TOKEN": "test-token",
+            "ACPWS_STATELESS": "1",
+            "ACPWS_SESSION_ID": "ses_actus-reconnect-test",
+            "ACPWS_TOOL_APPROVAL": "always",
             "RUST_LOG": "info",
         },
         None,

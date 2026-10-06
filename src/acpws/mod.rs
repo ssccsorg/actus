@@ -588,7 +588,21 @@ const DEFAULT_LAUNCH_ARGS: [&str; 5] = [
     "{workdir}",
 ];
 
-const DEFAULT_LAUNCH_ENV: [(&str, &str); 8] = [
+/// The environment of the built-in launch.
+///
+/// The `TELOS_*` entries are the names the contract carried before it was named
+/// for the protocol. They are carried here, and in the deploy's generated config,
+/// for an executor built before the rename, and they go away once the executor
+/// artifacts are built after it.
+const DEFAULT_LAUNCH_ENV: [(&str, &str); 15] = [
+    ("ACPWS_EXTERNAL_SYNC_ENABLED", "true"),
+    ("ACPWS_WEBSOCKET_SYNC_ENABLED", "true"),
+    ("ACPWS_WS_URL", "{ws_url}"),
+    ("ACPWS_WS_TOKEN", "{token}"),
+    ("ACPWS_STATELESS", "1"),
+    ("ACPWS_SESSION_ID", "{session_id}"),
+    ("ACPWS_TOOL_APPROVAL", "{tool_approval}"),
+    ("RUST_LOG", "info"),
     ("TELOS_EXTERNAL_SYNC_ENABLED", "true"),
     ("TELOS_WEBSOCKET_SYNC_ENABLED", "true"),
     ("TELOS_WS_URL", "{ws_url}"),
@@ -596,7 +610,6 @@ const DEFAULT_LAUNCH_ENV: [(&str, &str); 8] = [
     ("TELOS_STATELESS", "1"),
     ("TELOS_SESSION_ID", "{session_id}"),
     ("TELOS_TOOL_APPROVAL", "{tool_approval}"),
-    ("RUST_LOG", "info"),
 ];
 
 /// One process launch: what the configuration declared, and the values actus
@@ -1104,6 +1117,23 @@ mod tests {
 
         let envs = envs_of(&cmd);
         let expect = [
+            ("ACPWS_EXTERNAL_SYNC_ENABLED", "true"),
+            ("ACPWS_WEBSOCKET_SYNC_ENABLED", "true"),
+            ("ACPWS_WS_URL", "127.0.0.1:8080"),
+            ("ACPWS_WS_TOKEN", "process-token-7f3a"),
+            ("ACPWS_STATELESS", "1"),
+            ("ACPWS_SESSION_ID", "ses_actus-test"),
+            ("ACPWS_TOOL_APPROVAL", "always"),
+            ("RUST_LOG", "info"),
+        ];
+        for (key, value) in expect {
+            assert_eq!(envs.get(key).map(String::as_str), Some(value), "env {key}");
+        }
+
+        // The names the contract carried before the rename are carried too, which is
+        // what lets an executor built before it on this launch. They go away with the
+        // executor artifacts.
+        let legacy = [
             ("TELOS_EXTERNAL_SYNC_ENABLED", "true"),
             ("TELOS_WEBSOCKET_SYNC_ENABLED", "true"),
             ("TELOS_WS_URL", "127.0.0.1:8080"),
@@ -1111,9 +1141,8 @@ mod tests {
             ("TELOS_STATELESS", "1"),
             ("TELOS_SESSION_ID", "ses_actus-test"),
             ("TELOS_TOOL_APPROVAL", "always"),
-            ("RUST_LOG", "info"),
         ];
-        for (key, value) in expect {
+        for (key, value) in legacy {
             assert_eq!(envs.get(key).map(String::as_str), Some(value), "env {key}");
         }
     }
@@ -1181,6 +1210,7 @@ mod tests {
         );
         assert_eq!(envs.get("POLICY").map(String::as_str), Some("always"));
         assert_eq!(envs.get("LITERAL").map(String::as_str), Some("{braces}"));
+        assert!(!envs.contains_key("ACPWS_WS_URL"), "envs: {envs:?}");
         assert!(!envs.contains_key("TELOS_WS_URL"), "envs: {envs:?}");
 
         let unknown = vec!["{ws_socket}".to_string()];
