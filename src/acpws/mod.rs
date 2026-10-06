@@ -6,6 +6,7 @@ pub mod types;
 
 use crate::agent::config::{AgentSpec, ToolApproval};
 use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
+use crate::store::Record;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Channel sender for WebSocket commands to the executor. Shared between
@@ -50,9 +51,9 @@ pub struct AcpwsManager {
     pub pending_requests: HashMap<String, String>,
     /// Mapping from the platform thread id to the local thread id (for reverse lookup)
     pub thread_id_map: HashMap<String, String>,
-    /// Where this agent's thread record lives. The store owns its shape; the
-    /// manager only asks it to load and to persist.
-    pub store: Arc<dyn crate::store::RecordStore>,
+    /// Where this agent's thread record lives. The rule for reading and writing it is the
+    /// same for every backend that keeps one, so it is held once and borrowed here.
+    pub record: Record,
     /// Threads that have been activated (context sent) in the current executor session
     pub threads_activated: HashSet<String>,
     /// Notifier for thread state changes (SSE consumers)
@@ -109,17 +110,8 @@ impl AcpwsManager {
         // to persist, so the index is what is loaded and the messages of a thread are read
         // when the thread is worked on. A store that writes one document needs the whole
         // state, and it is loaded whole, which is the behavior this manager always had.
-        let whole = store.needs_whole_state();
-        let threads = if whole {
-            store.load()?
-        } else {
-            store.load_index()?
-        };
-        let held: HashSet<String> = if whole {
-            threads.keys().cloned().collect()
-        } else {
-            HashSet::new()
-        };
+        let record = Record::new(store);
+        let (threads, held) = record.load()?;
 
         // Rebuild thread_id_map from persisted threads that have an acp_thread_id
         let mut thread_id_map = HashMap::new();
@@ -141,7 +133,7 @@ impl AcpwsManager {
             held,
             pending_requests: HashMap::new(),
             thread_id_map,
-            store,
+            record,
             threads_activated: HashSet::new(),
             thread_notify,
             thread_waiters: HashMap::new(),
@@ -163,15 +155,7 @@ impl AcpwsManager {
     /// volume they do not read, and what makes the first turn of a resumed thread the moment
     /// its history is read.
     fn hold(&mut self, thread_id: &str) -> Result<(), String> {
-        if self.held.contains(thread_id) || !self.threads.contains_key(thread_id) {
-            return Ok(());
-        }
-        let messages = self.store.load_messages(thread_id, 0, usize::MAX)?;
-        if let Some(thread) = self.threads.get_mut(thread_id) {
-            thread.messages = messages;
-        }
-        self.held.insert(thread_id.to_string());
-        Ok(())
+        self.record.hold(&mut self.threads, &mut self.held, thread_id)
     }
 
     /// How many messages a thread holds.
@@ -179,12 +163,8 @@ impl AcpwsManager {
     /// From memory when the thread is in hand and from the store otherwise, which is what a
     /// listing counts without reading the volume behind it.
     pub fn message_count(&self, thread_id: &str) -> Result<usize, String> {
-        if self.held.contains(thread_id) {
-            if let Some(thread) = self.threads.get(thread_id) {
-                return Ok(thread.messages.len());
-            }
-        }
-        self.store.message_count(thread_id)
+        self.record
+            .message_count(&self.threads, &self.held, thread_id)
     }
 
     /// A window of a thread's messages, by position.
@@ -197,16 +177,8 @@ impl AcpwsManager {
         from: usize,
         limit: usize,
     ) -> Result<Vec<ThreadMessage>, String> {
-        if self.held.contains(thread_id) {
-            if let Some(thread) = self.threads.get(thread_id) {
-                let end = from.saturating_add(limit).min(thread.messages.len());
-                if from >= end {
-                    return Ok(Vec::new());
-                }
-                return Ok(thread.messages[from..end].to_vec());
-            }
-        }
-        self.store.load_messages(thread_id, from, limit)
+        self.record
+            .window(&self.threads, &self.held, thread_id, from, limit)
     }
 
     /// The last `limit` messages of a thread, which is what a live turn's reader wants.
@@ -515,7 +487,7 @@ impl AcpwsManager {
     /// Write the full threads file synchronously. Used at shutdown, where
     /// the process is about to exit and the debounced saver may not run.
     pub fn flush_threads(&self) {
-        if let Err(e) = self.store.persist(self.threads.clone()) {
+        if let Err(e) = self.record.persist(self.threads.clone()) {
             tracing::error!("Failed to persist threads: {}", e);
         }
     }
@@ -538,12 +510,12 @@ impl AcpwsManager {
                 if !dirty {
                     continue;
                 }
-                let (snapshot, store) = {
+                let (snapshot, record) = {
                     let mgr = manager.read().await;
-                    (mgr.threads.clone(), mgr.store.clone())
+                    (mgr.threads.clone(), mgr.record.clone())
                 };
                 tokio::task::spawn_blocking(move || {
-                    if let Err(e) = store.persist(snapshot) {
+                    if let Err(e) = record.persist(snapshot) {
                         tracing::error!("Failed to persist threads: {}", e);
                     }
                 })

@@ -36,6 +36,12 @@ fn client() -> reqwest::Client {
         .expect("client")
 }
 
+/// A record for a test agent: a document under the test's own directory, so a test does not
+/// depend on the store the environment selects.
+fn record(dir: &std::path::Path) -> Arc<dyn actus::store::RecordStore> {
+    Arc::new(actus::store::DocumentStore::new(dir.join("threads.json")))
+}
+
 /// State with one default ext_cli agent running the python3 stub in the
 /// given workdir.
 fn test_state_with_agent(bin: std::path::PathBuf, workdir: &std::path::Path) -> SharedState {
@@ -56,7 +62,9 @@ fn test_state_with_agent_and_policy(
         PromptMode::Arg,
         30,
         workdir.to_path_buf(),
-    );
+        record(workdir),
+    )
+    .expect("a record under the test directory");
     let mut registry = AgentRegistry::new();
     registry.register(Arc::new(agent), true);
     Arc::new(AppState::new_with_policy(

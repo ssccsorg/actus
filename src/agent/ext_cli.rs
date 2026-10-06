@@ -15,7 +15,7 @@
 //   - `cli_env` adds per-agent environment over the inherited server
 //     environment, so each CLI can carry its own credentials.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,9 +26,10 @@ use tokio::sync::{watch, Mutex, RwLock};
 
 use crate::agent::config::PromptMode;
 use crate::agent::{
-    truncate_title, AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt,
-    ThreadMessage, ThreadParent, ThreadSession,
+    AgentBackend, AgentKind, AgentStatus, NOTE_ROLE, PendingAuthorization, SubmitReceipt,
+    ThreadMessage, ThreadParent, ThreadSession, truncate_title,
 };
+use crate::store::{Record, RecordStore};
 
 /// Cap on the recorded assistant message, in characters. A CLI can emit
 /// long output; a thread message stays bounded.
@@ -80,9 +81,19 @@ pub struct ExtCliAgent {
     /// Launch probe failure at construction; None when the binary could
     /// be spawned. Readiness and the health status derive from it.
     start_error: Option<String>,
-    threads: Arc<RwLock<HashMap<String, ThreadSession>>>,
+    threads: Arc<RwLock<Threads>>,
     running: Arc<Mutex<HashMap<String, Child>>>,
     notify: watch::Sender<u64>,
+    /// Where this agent's record lives. A device whose work a room reads keeps one, the
+    /// same way an executor's agent does, so a turn of either is in the room's record.
+    record: Record,
+}
+
+/// The threads this agent holds, and which of them have their messages in hand.
+#[derive(Default)]
+struct Threads {
+    threads: HashMap<String, ThreadSession>,
+    held: HashSet<String>,
 }
 
 impl ExtCliAgent {
@@ -94,10 +105,15 @@ impl ExtCliAgent {
         prompt_mode: PromptMode,
         timeout_secs: u64,
         workdir: PathBuf,
-    ) -> Self {
+        store: Arc<dyn RecordStore>,
+    ) -> Result<Self, String> {
         let (notify, _) = watch::channel(0u64);
         let start_error = probe_binary(&bin);
-        Self {
+        // A store that cannot be read is a deployment that must not start, rather than an
+        // agent that answers from a record it will then replace.
+        let record = Record::new(store);
+        let (threads, held) = record.load()?;
+        Ok(Self {
             name: name.into(),
             bin,
             args,
@@ -106,10 +122,20 @@ impl ExtCliAgent {
             timeout: Duration::from_secs(timeout_secs.max(1)),
             workdir,
             start_error,
-            threads: Arc::new(RwLock::new(HashMap::new())),
+            threads: Arc::new(RwLock::new(Threads { threads, held })),
             running: Arc::new(Mutex::new(HashMap::new())),
             notify,
-        }
+            record,
+        })
+    }
+
+    /// Write what this agent holds back to its record, off the lock and waiting for the write.
+    ///
+    /// A turn writes twice, a person's line and the answer, and either can be the last thing a
+    /// reader needs. The write is waited on before the room is told the thread moved, so a
+    /// reader that sees the answer sees it in the record rather than only in this process.
+    async fn persist(&self, threads: HashMap<String, ThreadSession>) {
+        persist_to(self.record.clone(), threads).await;
     }
 
     /// Launch probe failure, if any. Upper layers log it at registration.
@@ -143,20 +169,29 @@ impl ExtCliAgent {
     }
 
     async fn get_or_create(&self, thread_id: Option<&str>) -> (String, bool) {
-        let mut threads = self.threads.write().await;
-        let tid = match thread_id {
-            Some(t) if threads.contains_key(t) => t.to_string(),
+        let mut state = self.threads.write().await;
+        let Threads { threads, held } = &mut *state;
+        let (tid, created) = match thread_id {
+            Some(t) if threads.contains_key(t) => (t.to_string(), false),
             Some(t) => {
                 let tid = t.to_string();
                 threads.insert(tid.clone(), Self::blank_session(tid.clone()));
-                tid
+                (tid, true)
             }
             None => {
                 let tid = format!("cli-{}", uuid::Uuid::new_v4());
                 threads.insert(tid.clone(), Self::blank_session(tid.clone()));
-                tid
+                (tid, true)
             }
         };
+        // A thread whose messages are not in hand is read now, before anything is written to
+        // it: a write onto a thread the index held would replace the history it did not carry.
+        // A thread created here is in hand already.
+        if created {
+            held.insert(tid.clone());
+        } else if let Err(e) = self.record.hold(threads, held, &tid) {
+            tracing::warn!("reading the history of {tid} failed: {e}");
+        }
         let is_new = threads
             .get(&tid)
             .map(|t| t.messages.is_empty())
@@ -224,8 +259,9 @@ impl AgentBackend for ExtCliAgent {
         let now = chrono::Utc::now();
 
         {
-            let mut threads = self.threads.write().await;
-            let session = threads
+            let mut state = self.threads.write().await;
+            let session = state
+                .threads
                 .get_mut(&tid)
                 .ok_or_else(|| format!("thread '{}' vanished", tid))?;
             if session.title.is_none() {
@@ -248,6 +284,8 @@ impl AgentBackend for ExtCliAgent {
             });
             session.completed = false;
         }
+        let snapshot = self.threads.read().await.threads.clone();
+        self.persist(snapshot).await;
 
         // Resolve the argument template for this turn.
         let mut cmd_args: Vec<String> = Vec::with_capacity(self.args.len() + 1);
@@ -315,6 +353,7 @@ impl AgentBackend for ExtCliAgent {
         let threads = self.threads.clone();
         let running = self.running.clone();
         let notify = self.notify.clone();
+        let persist_record = self.record.clone();
         let timeout = self.timeout;
         let task_thread_id = tid.clone();
         let task_request_id = request_id.clone();
@@ -402,8 +441,8 @@ impl AgentBackend for ExtCliAgent {
             };
 
             let now = chrono::Utc::now();
-            let mut threads = threads.write().await;
-            if let Some(session) = threads.get_mut(&task_thread_id) {
+            let mut state = threads.write().await;
+            if let Some(session) = state.threads.get_mut(&task_thread_id) {
                 session.messages.push(ThreadMessage {
                     role: "assistant".to_string(),
                     content,
@@ -417,7 +456,9 @@ impl AgentBackend for ExtCliAgent {
                 session.completed = true;
                 session.turn_completed += 1;
             }
-            drop(threads);
+            let snapshot = state.threads.clone();
+            drop(state);
+            persist_to(persist_record, snapshot).await;
             notify.send_modify(|v| *v = v.wrapping_add(1));
         });
 
@@ -449,11 +490,39 @@ impl AgentBackend for ExtCliAgent {
     }
 
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession> {
-        self.threads.read().await.get(thread_id).cloned()
+        let mut state = self.threads.write().await;
+        let Threads { threads, held } = &mut *state;
+        if let Err(e) = self.record.hold(threads, held, thread_id) {
+            tracing::warn!("reading the messages of {thread_id} failed: {e}");
+        }
+        threads.get(thread_id).cloned()
     }
 
     async fn threads(&self) -> Vec<ThreadSession> {
-        self.threads.read().await.values().cloned().collect()
+        self.threads.read().await.threads.values().cloned().collect()
+    }
+
+    async fn record_store(&self) -> String {
+        self.record.describe()
+    }
+
+    async fn message_count(&self, thread_id: &str) -> usize {
+        let state = self.threads.read().await;
+        self.record
+            .message_count(&state.threads, &state.held, thread_id)
+            .unwrap_or(0)
+    }
+
+    async fn messages_window(
+        &self,
+        thread_id: &str,
+        from: usize,
+        limit: usize,
+    ) -> Vec<ThreadMessage> {
+        let state = self.threads.read().await;
+        self.record
+            .window(&state.threads, &state.held, thread_id, from, limit)
+            .unwrap_or_default()
     }
 
     async fn subscribe(&self) -> watch::Receiver<u64> {
@@ -475,7 +544,60 @@ impl AgentBackend for ExtCliAgent {
 
     async fn create_thread(&self) -> Result<String, String> {
         let (tid, _) = self.get_or_create(None).await;
+        let snapshot = self.threads.read().await.threads.clone();
+        self.persist(snapshot).await;
         Ok(tid)
+    }
+
+    /// A person's line in this room, kept like any other message.
+    ///
+    /// A device's room is read by the people watching it, so what they say to each other is
+    /// part of the record. No turn is involved: the note is stored and the people who read
+    /// the room see it where it was said.
+    async fn append_note(
+        &self,
+        thread_id: Option<&str>,
+        content: &str,
+        author: Option<&str>,
+    ) -> Result<String, String> {
+        let (tid, _) = self.get_or_create(thread_id).await;
+        {
+            let mut state = self.threads.write().await;
+            let session = state
+                .threads
+                .get_mut(&tid)
+                .ok_or_else(|| format!("thread '{}' vanished", tid))?;
+            if session.title.is_none() {
+                session.title = Some(truncate_title(content));
+            }
+            session.messages.push(ThreadMessage {
+                role: NOTE_ROLE.to_string(),
+                content: content.to_string(),
+                message_id: None,
+                entry_type: None,
+                tool_name: None,
+                tool_status: None,
+                author: author.map(str::to_string),
+                timestamp: chrono::Utc::now(),
+            });
+        }
+        let snapshot = self.threads.read().await.threads.clone();
+        self.persist(snapshot).await;
+        self.notify.send_modify(|v| *v = v.wrapping_add(1));
+        Ok(tid)
+    }
+}
+
+/// Write a snapshot back to the record, off the lock and off the runtime.
+///
+/// The caller waits for it. A record that could not be written is reported rather than
+/// dropped: a room that reads an answer the record does not hold is the failure this exists
+/// to prevent.
+async fn persist_to(record: Record, threads: HashMap<String, ThreadSession>) {
+    match tokio::task::spawn_blocking(move || record.persist(threads)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!("Failed to persist threads: {}", e),
+        Err(e) => tracing::error!("the persist task failed: {}", e),
     }
 }
 

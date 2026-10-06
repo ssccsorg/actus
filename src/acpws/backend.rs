@@ -66,7 +66,7 @@ impl AgentBackend for AcpwsBackend {
     }
 
     async fn record_store(&self) -> String {
-        self.manager.read().await.store.describe()
+        self.manager.read().await.record.describe()
     }
 
     async fn status(&self) -> AgentStatus {

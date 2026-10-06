@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 use crate::acpws::backend::AcpwsBackend;
 use crate::acpws::control::run_ws_server;
 use crate::acpws::{
-    default_settings, launch_agent, AcpwsManager, Launch, SettingsWriter, WsCommandTx,
+    AcpwsManager, Launch, SettingsWriter, WsCommandTx, default_settings, launch_agent,
 };
 use crate::agent::config::{load_config, load_control_policy, AgentDefaults, AgentSpec};
 use crate::agent::config::{resolve_llm_settings, unquote_env_value};
@@ -49,6 +49,21 @@ pub fn no_backends() -> BackendFactory {
 /// The factory the plain binary passes: the store `ACTUS_RECORD_STORE` selects.
 pub fn environment_store() -> StoreFactory {
     Arc::new(|dir: &Path| crate::store::open(dir))
+}
+
+/// The store `factory` opens for one agent, under that agent's own directory.
+///
+/// The composition decides where a record lives, and it is asked once per agent so one
+/// agent is one volume. A backend that keeps no record is not handed one, so this is
+/// called from the arms that record rather than above the match.
+fn agent_store(
+    factory: &StoreFactory,
+    threads_root: &Path,
+    name: &str,
+) -> anyhow::Result<Arc<dyn RecordStore>> {
+    let dir = threads_root.join(name);
+    std::fs::create_dir_all(&dir)?;
+    factory(&dir).map_err(anyhow::Error::msg)
 }
 
 /// The `actus control` stdio MCP proxy is a subcommand so the same binary
@@ -475,8 +490,6 @@ pub async fn run_with_composition(args: Args, composition: Composition) -> anyho
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
                 composition.settings.write(user_data_dir.path(), spec)?;
-                let threads_dir = threads_root.join(&spec.name);
-                std::fs::create_dir_all(&threads_dir)?;
                 let session_id = format!(
                     "ses_actus-{}-{}",
                     spec.name,
@@ -486,7 +499,7 @@ pub async fn run_with_composition(args: Args, composition: Composition) -> anyho
                     AcpwsManager::with_store(
                         session_id.clone(),
                         ws_host.clone(),
-                        (composition.store)(&threads_dir).map_err(anyhow::Error::msg)?,
+                        agent_store(&composition.store, &threads_root, &spec.name)?,
                     )
                     .map_err(anyhow::Error::msg)?,
                 ));
@@ -521,6 +534,7 @@ pub async fn run_with_composition(args: Args, composition: Composition) -> anyho
                     http_port: args.http_port,
                     tool_approval: spec.tool_approval,
                 };
+                let threads_dir = threads_root.join(&spec.name);
                 let child = launch_agent(&launch, &threads_dir.join("executor.log")).await?;
                 _user_data_dirs.push(user_data_dir);
                 tracing::info!(
@@ -571,15 +585,19 @@ pub async fn run_with_composition(args: Args, composition: Composition) -> anyho
                         spec.name
                     )
                 })?;
-                let backend = Arc::new(ExtCliAgent::new(
-                    spec.name.clone(),
-                    bin.clone(),
-                    spec.cli_args.clone(),
-                    spec.cli_env.clone(),
-                    spec.cli_prompt,
-                    spec.cli_timeout_secs,
-                    agent_workdir.clone(),
-                ));
+                let backend = Arc::new(
+                    ExtCliAgent::new(
+                        spec.name.clone(),
+                        bin.clone(),
+                        spec.cli_args.clone(),
+                        spec.cli_env.clone(),
+                        spec.cli_prompt,
+                        spec.cli_timeout_secs,
+                        agent_workdir.clone(),
+                        agent_store(&composition.store, &threads_root, &spec.name)?,
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                );
                 if let Some(err) = backend.probe_error() {
                     tracing::warn!(
                         "Agent '{}': launch probe failed ({}); health reports ready=false",

@@ -12,10 +12,12 @@
 //! that chose it.
 
 mod document;
+mod record;
 mod socket;
 mod volume;
 
 pub use document::DocumentStore;
+pub use record::Record;
 pub use socket::SocketVolume;
 pub use volume::{Volume, VolumeStore};
 

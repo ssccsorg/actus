@@ -40,6 +40,12 @@ fn stub_bin(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
     path
 }
 
+/// A record for a test agent: a document under the test's own directory, so a test does not
+/// depend on the store the environment selects.
+fn record(dir: &Path) -> std::sync::Arc<dyn actus::store::RecordStore> {
+    std::sync::Arc::new(actus::store::DocumentStore::new(dir.join("threads.json")))
+}
+
 fn agent_with(dir: &Path, bin: std::path::PathBuf, args: Vec<String>) -> ExtCliAgent {
     ExtCliAgent::new(
         "aux",
@@ -49,13 +55,15 @@ fn agent_with(dir: &Path, bin: std::path::PathBuf, args: Vec<String>) -> ExtCliA
         PromptMode::Arg,
         30,
         dir.to_path_buf(),
+        record(dir),
     )
+    .expect("a record under the test directory")
 }
 
-/// An adapter with no record says so rather than answering a note nobody kept, which is how a
-/// client tells a note that was stored from one that was not.
+/// A person's line in a device's room is kept, because the device's room has a record like any
+/// other: several people read it, and what they say to each other is part of it.
 #[tokio::test]
-async fn an_adapter_with_no_record_reports_no_notes() {
+async fn a_note_in_a_device_room_is_kept() {
     let dir = tempfile::tempdir().unwrap();
     let agent = agent_with(
         dir.path(),
@@ -63,11 +71,40 @@ async fn an_adapter_with_no_record_reports_no_notes() {
         vec![],
     );
 
-    let error = agent
-        .append_note(None, "a note this adapter has nowhere to keep", None)
+    let thread = agent
+        .append_note(None, "a note the room keeps", Some("chrispark"))
         .await
-        .expect_err("an adapter with no record cannot keep a note");
-    assert!(error.contains("does not record notes"), "{error}");
+        .expect("the note is kept");
+    let session = agent.thread(&thread).await.expect("the thread is there");
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(session.messages[0].role, "note");
+    assert_eq!(session.messages[0].content, "a note the room keeps");
+    assert_eq!(session.messages[0].author.as_deref(), Some("chrispark"));
+    assert_eq!(session.title.as_deref(), Some("a note the room keeps"));
+    // No turn runs for a note, so the room is not left working on one.
+    assert!(session.completed);
+}
+
+/// A second adapter over the same record reads back what the first one wrote, which is what
+/// makes the record the room's rather than the process's.
+#[tokio::test]
+async fn a_restart_reads_the_record_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = stub_bin(dir.path(), "cli.sh", "#!/bin/sh\necho \"got: $*\"\n");
+
+    let first = agent_with(dir.path(), bin.clone(), Vec::new());
+    let receipt = first.submit(None, "summarize src").await.unwrap();
+    let _ = wait_for_assistant(&first, &receipt.thread_id).await;
+    drop(first);
+
+    let second = agent_with(dir.path(), bin, Vec::new());
+    let session = second
+        .thread(&receipt.thread_id)
+        .await
+        .expect("the thread survived the restart");
+    assert_eq!(session.messages.len(), 2);
+    assert!(session.messages[1].content.contains("got: summarize src"));
+    assert!(session.completed);
 }
 
 async fn wait_for_assistant(agent: &ExtCliAgent, thread_id: &str) -> String {
@@ -119,7 +156,9 @@ async fn ext_cli_workdir_controls_child_cwd() {
         PromptMode::Arg,
         30,
         work_subdir.clone(),
-    );
+        record(dir.path()),
+    )
+    .expect("a record under the test directory");
 
     let receipt = agent.submit(None, "where am I").await.unwrap();
     let content = wait_for_assistant(&agent, &receipt.thread_id).await;
@@ -165,7 +204,9 @@ async fn ext_cli_stdin_mode_writes_prompt_to_stdin() {
         PromptMode::Stdin,
         30,
         dir.path().to_path_buf(),
-    );
+        record(dir.path()),
+    )
+    .expect("a record under the test directory");
 
     let receipt = agent.submit(None, "read this from stdin").await.unwrap();
     let content = wait_for_assistant(&agent, &receipt.thread_id).await;
@@ -215,7 +256,9 @@ async fn ext_cli_env_literal_and_passthrough() {
         PromptMode::Arg,
         30,
         dir.path().to_path_buf(),
-    );
+        record(dir.path()),
+    )
+    .expect("a record under the test directory");
     let receipt = agent.submit(None, "hi").await.unwrap();
     let content = wait_for_assistant(&agent, &receipt.thread_id).await;
     std::env::remove_var("EXTCLI_TEST_SOURCE");
@@ -374,7 +417,9 @@ async fn ext_cli_timeout_kills_child() {
         PromptMode::Arg,
         1,
         dir.path().to_path_buf(),
-    );
+        record(dir.path()),
+    )
+    .expect("a record under the test directory");
 
     let receipt = agent.submit(None, "slow turn").await.unwrap();
     let content = wait_for_assistant(&agent, &receipt.thread_id).await;
