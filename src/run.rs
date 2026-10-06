@@ -24,7 +24,6 @@ use crate::acpws::{
 use crate::agent::config::{load_config, load_control_policy, AgentDefaults, AgentSpec};
 use crate::agent::config::{resolve_llm_settings, unquote_env_value};
 use crate::agent::ext_cli::ExtCliAgent;
-use crate::agent::native::NativeAgent;
 use crate::agent::{AgentBackend, AgentKind, AgentRegistry};
 use crate::control;
 use crate::server::{run_http_server, AppState};
@@ -553,14 +552,6 @@ pub async fn run_with_composition(args: Args, composition: Composition) -> anyho
                     scope: Some(agent_workdir.display().to_string()),
                 });
                 registry.register(backend, spec.name == default_name);
-            }
-            AgentKind::Native => {
-                let backend = Arc::new(NativeAgent::new(spec.name.clone()));
-                registry.register(backend, spec.name == default_name);
-                tracing::info!(
-                    "Agent '{}' running (native reference adapter, in-process)",
-                    spec.name
-                );
             }
             AgentKind::ExtCli => {
                 // Per-agent working directory overrides the server

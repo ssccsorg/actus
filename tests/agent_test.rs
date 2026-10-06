@@ -25,7 +25,6 @@ fn agent_kind_roundtrip() {
     // configuration written against the old name keeps parsing.
     assert_eq!(AgentKind::parse("telos"), Some(AgentKind::Acpws));
     assert_eq!(AgentKind::parse("langgraph"), Some(AgentKind::LangGraph));
-    assert_eq!(AgentKind::parse("native"), Some(AgentKind::Native));
     assert_eq!(AgentKind::parse("unknown"), None);
     assert_eq!(AgentKind::Acpws.as_str(), "acpws");
     assert_eq!(

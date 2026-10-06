@@ -2,8 +2,8 @@
 //
 // Actus weaves heterogeneous agent platforms behind one thin execution
 // interface, the same way neXus weaves heterogeneous FIH storage types
-// behind one knowledge fabric. A platform adapter (AcpwsBackend now, a
-// LangGraph or Native adapter later) implements `AgentBackend`; the
+// behind one knowledge fabric. A platform adapter (the acpws bridge and the
+// CLI adapter now, a LangGraph adapter later) implements `AgentBackend`; the
 // registry maps agent names to running adapters; HTTP handlers talk only
 // to the trait.
 
@@ -15,7 +15,6 @@ use tokio::sync::watch;
 
 pub mod config;
 pub mod ext_cli;
-pub mod native;
 
 /// Supported agent platform kinds. Adding a platform means adding a kind
 /// and an `AgentBackend` adapter; the rest of actus is unchanged.
@@ -29,9 +28,6 @@ pub enum AgentKind {
     Acpws,
     /// LangGraph Server over REST/SSE. Future adapter.
     LangGraph,
-    /// In-process Rust agent loop. Reference adapter (deterministic,
-    /// no LLM); proves the fabric seam and lets actus run without an external executor.
-    Native,
     /// Any external CLI binary as an auxiliary agent. Raw transport: per
     /// turn, actus spawns `bin <args...> <prompt>` and records the output.
     /// Ante is the first attached binary (`cli_args = ["-p"]`).
@@ -40,10 +36,9 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
-    pub const ALL: [AgentKind; 4] = [
+    pub const ALL: [AgentKind; 3] = [
         AgentKind::Acpws,
         AgentKind::LangGraph,
-        AgentKind::Native,
         AgentKind::ExtCli,
     ];
 
@@ -51,7 +46,6 @@ impl AgentKind {
         match self {
             AgentKind::Acpws => "acpws",
             AgentKind::LangGraph => "langgraph",
-            AgentKind::Native => "native",
             AgentKind::ExtCli => "ext_cli",
         }
     }
@@ -86,14 +80,6 @@ impl AgentKind {
                 parallel: false,
                 transport: "rest_sse",
             },
-            AgentKind::Native => AgentCapabilities {
-                sessionful: true,
-                streaming: false,
-                tools: false,
-                approval: false,
-                parallel: false,
-                transport: "inproc",
-            },
             AgentKind::ExtCli => AgentCapabilities {
                 sessionful: false,
                 streaming: false,
@@ -111,7 +97,7 @@ impl AgentKind {
 /// situation instead of assuming every agent is a full session.
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentCapabilities {
-    /// Multi-turn conversation with resume (acpws, native).
+    /// Multi-turn conversation with resume (acpws).
     pub sessionful: bool,
     /// Intermediate streaming events during a turn.
     pub streaming: bool,
