@@ -1,0 +1,22 @@
+# The agent this repository's own run launches.
+#
+# The kind is `ext_cli`: a program actus runs once per turn with the prompt, which is the
+# transport that needs nothing of the executor beyond its command line, and it is what this
+# crate's binary can run.
+#
+# A sessionful executor is the kind `acpws`, and its settings file is the program's own
+# format. Starting one therefore takes a composition that supplies the writer rendering that
+# format, which is a deployment: this binary is not one, and the writer is not actus's to
+# carry. The deployment that composes one declares the `acpws` launch itself, in the same
+# terms (see `kletos`'s `deploy/gen-config.sh`), and the values it declares are the ones this
+# file no longer repeats.
+#
+# `bin` is deliberately absent: the run passes `--bin` (or `ACTUS_EXECUTOR_BIN`), and an
+# entry that omits it takes the binary from there. That is what lets CI launch `/bin/true`
+# against this same declaration.
+
+[[agents]]
+name = "agent"
+kind = "ext_cli"
+cli_args = ["{prompt}"]
+cli_timeout_secs = 30

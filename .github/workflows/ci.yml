@@ -58,38 +58,10 @@ jobs:
             --entrypoint cargo \
             actus:ci test --test store_integrity_test
 
-  # Agent-binary tier: runs the suite against the actual headless agent
-  # binary from the public prebuilt telos image (ghcr.io/ssccsorg/telos).
-  # The image is never built here and is pulled anonymously; no registry
-  # credentials are required because the package is public.
-  e2e-agent-binary:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Suite against the prebuilt telos image
-        run: |
-          set -e
-          image="ghcr.io/ssccsorg/telos:latest"
-          if ! docker pull "$image"; then
-            echo "::notice::e2e-agent-binary skipped: prebuilt telos image not available."
-            exit 0
-          fi
-          # Stub backend keeps the tier LLM-free (TELOS_STUB_BACKEND=1,
-          # LLM_API_KEY=ci-skip, and --test's LLM_CHAT gate) while the real
-          # binary connects, so health reflects agent_connected/agent_ready
-          # true and the full endpoint suite runs against a real agent
-          # process.
-          # Mount actus outside the telos image's /workspace root: the
-          # image carries its own Cargo.toml there, and cargo would
-          # otherwise treat actus as a member of the telos workspace.
-          docker run --rm \
-            -e CI \
-            -e ACTUS_EXECUTOR_BIN=/workspace/target/telos-release/tel \
-            -e LLM_API_KEY=ci-skip \
-            -e TELOS_STUB_BACKEND=1 \
-            -v "$GITHUB_WORKSPACE:/home/actus" \
-            -w /home/actus \
-            "$image" \
-            bash run.sh --test
+  # Agent-binary tier: the sessionful contract used to be exercised here, by running this
+  # repository's suite against the telos binary from its public image. The settings file a
+  # sessionful executor reads is the executor's own format, so this crate's binary cannot
+  # start one at all: the writer that renders it belongs to a deployment. That tier moved
+  # with the writer, to the deployment (`kletos`, whose checks drive a real telos directly),
+  # where the format and its writer live.
 

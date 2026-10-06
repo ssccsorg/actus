@@ -35,6 +35,11 @@ ACTUS_BIN = PROJECT_DIR / "target" / "debug" / "actus"
 # environment or --bin, which wins. A default here would be the same guess at a
 # machine's layout that the library refuses to make.
 ACTUS_EXECUTOR_BIN = os.environ.get("ACTUS_EXECUTOR_BIN")
+# The declaration of the agent a development run launches. actus carries no executor: the
+# argv, the environment, and the settings format are the deployment's, so the run names a
+# config that declares them. A caller that named its own keeps it, because a set
+# ACTUS_CONFIG wins.
+DEV_CONFIG = SCRIPT_DIR / "config" / "dev.toml"
 TERMINAL = SCRIPT_DIR / "terminal.py"
 
 
@@ -127,6 +132,11 @@ def main():
                 ):
                     value = value[1:-1]
                 os.environ.setdefault(key, value)
+
+    # The declaration of the agent this run launches. A .env that names one wins, and so does
+    # an ACTUS_CONFIG the caller exported.
+    if not os.environ.get("ACTUS_CONFIG") and DEV_CONFIG.exists():
+        os.environ["ACTUS_CONFIG"] = str(DEV_CONFIG)
 
     # Resolve API key
     api_key = args.api_key or os.environ.get("LLM_API_KEY", "")

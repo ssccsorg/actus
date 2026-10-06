@@ -126,13 +126,14 @@ pub struct AgentSpec {
     pub cli_prompt: PromptMode,
     /// Per-turn timeout in seconds for cli-kind agents.
     pub cli_timeout_secs: u64,
-    /// The argv actus launches this agent's process with. Empty takes the
-    /// built-in launch for the kind. A value may carry a `{marker}` that actus
-    /// fills in, so the declaration names the executor's own arguments and actus
-    /// supplies the wiring it owns.
+    /// The argv actus launches this agent's process with. A value may carry a
+    /// `{marker}` that actus fills in, so the declaration names the executor's own
+    /// arguments and actus supplies the wiring it owns. Empty is refused at the
+    /// launch: the argv is the executor's, and actus carries none of its own.
     pub launch_args: Vec<String>,
     /// The environment actus launches this agent's process with, name to value,
-    /// resolved like `launch_args`. Empty takes the built-in launch for the kind.
+    /// resolved like `launch_args`. Empty is refused at the launch, with the same
+    /// reason.
     pub launch_env: HashMap<String, String>,
 }
 

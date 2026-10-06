@@ -15,8 +15,10 @@
 #              stack; ca-certificates provides the root store.
 #
 # Actus delegates agent execution to the telos process, which is never
-# bundled into any of these images; it is located via TELOS_BIN or the
-# agent config, keeping the Apache-2.0 actus image free of GPL telos.
+# bundled into any of these images; the binary is located via --bin or
+# ACTUS_EXECUTOR_BIN, and how it starts is the deployment's declaration
+# (config/dev.toml is the one this repository's own test tier uses), keeping
+# the Apache-2.0 actus image free of GPL telos.
 
 FROM ubuntu:24.04 AS toolchain
 
@@ -37,6 +39,7 @@ RUN cargo fetch --locked
 
 COPY src/ src/
 COPY tests/ tests/
+COPY config/ config/
 COPY run.sh runner.py terminal.py ./
 
 FROM toolchain AS release

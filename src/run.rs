@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 use crate::acpws::backend::AcpwsBackend;
 use crate::acpws::control::run_ws_server;
 use crate::acpws::{
-    AcpwsManager, Launch, SettingsWriter, WsCommandTx, default_settings, launch_agent,
+    launch_agent, write_settings, AcpwsManager, Launch, SettingsWriter, WsCommandTx,
 };
 use crate::agent::config::{load_config, load_control_policy, AgentDefaults, AgentSpec};
 use crate::agent::config::{resolve_llm_settings, unquote_env_value};
@@ -255,23 +255,30 @@ fn resolve_api_token(arg: Option<String>) -> anyhow::Result<String> {
 ///
 /// Actus is a fabric, and each of these is a choice a deployment makes: another store,
 /// another platform, another executor with another settings format. The entry points
-/// below fill in what a bare `actus` runs, so a composition names only the parts it
-/// differs on.
+/// below fill in the store and the platform a bare `actus` runs, so a composition names
+/// only the parts it differs on. `settings` is the part no entry point fills: the format
+/// belongs to the executor, so only a deployment that runs one can name the writer.
 pub struct Composition {
     pub store: StoreFactory,
     pub backends: BackendFactory,
-    pub settings: Arc<dyn SettingsWriter>,
+    /// What writes the executor's settings before it is launched.
+    ///
+    /// The settings file is the executor's format, so the writer belongs to the deployment
+    /// that runs that executor. `None` is a deployment that launches no executor whose
+    /// format actus carries, which is what the crate's own binary is: a launch that needs a
+    /// writer is refused by name rather than filled from a format this crate would have to
+    /// carry.
+    pub settings: Option<Arc<dyn SettingsWriter>>,
 }
 
 impl Composition {
-    /// The composition a bare `actus` runs: the store the environment names, no platform
-    /// beyond the crate's own kinds, and the settings writer of the executor this stack
-    /// runs today.
-    pub fn from_environment() -> Self {
+    /// The composition a deployment supplies: its settings writer, the store the
+    /// environment names, and no platform beyond the crate's own kinds.
+    pub fn new(settings: Option<Arc<dyn SettingsWriter>>) -> Self {
         Self {
             store: environment_store(),
             backends: no_backends(),
-            settings: default_settings(),
+            settings,
         }
     }
 
@@ -279,7 +286,7 @@ impl Composition {
     pub fn with_store(store: StoreFactory) -> Self {
         Self {
             store,
-            ..Self::from_environment()
+            ..Self::new(None)
         }
     }
 
@@ -288,7 +295,7 @@ impl Composition {
         Self {
             store,
             backends,
-            ..Self::from_environment()
+            ..Self::new(None)
         }
     }
 }
@@ -488,7 +495,7 @@ pub async fn run_with_composition(args: Args, composition: Composition) -> anyho
                 };
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
-                composition.settings.write(user_data_dir.path(), spec)?;
+                write_settings(composition.settings.as_deref(), user_data_dir.path(), spec)?;
                 let session_id = format!(
                     "ses_actus-{}-{}",
                     spec.name,

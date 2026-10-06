@@ -27,7 +27,9 @@ TERMINAL="$SCRIPT_DIR/terminal.py"
 # The executor binary this run launches. This is the one place that knows the sibling
 # build, because actus names no path of its own: the value goes on with --bin and is
 # exported for the scenario harness. Set ACTUS_EXECUTOR_BIN to launch another binary
-# (CI sets /bin/true for the mock tier).
+# (CI sets /bin/true for the mock tier). The agent this run declares is in
+# config/dev.toml; a sessionful executor takes a deployment that composes a settings
+# writer, so it is the deployment's file that declares that launch.
 if [ -z "${ACTUS_EXECUTOR_BIN:-}" ]; then
     ACTUS_EXECUTOR_BIN="$SCRIPT_DIR/../telos/target/telos-release/tel"
 fi

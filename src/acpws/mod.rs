@@ -22,7 +22,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 use uuid::Uuid;
 
@@ -558,56 +557,16 @@ static LAUNCH_MARKERS: [LaunchMarker; 8] = [
     }),
 ];
 
-/// The argv of the built-in launch, used when the configuration declares none. A
-/// deployment that declares its own replaces it, which is how a different executor runs
-/// on this fabric without actus naming it.
-///
-/// Public so a deployment can hold its own declaration against it while the built-in is
-/// still here.
-pub const DEFAULT_LAUNCH_ARGS: [&str; 5] = [
-    "--headless",
-    "--allow-multiple-instances",
-    "--user-data-dir",
-    "{user_data_dir}",
-    "{workdir}",
-];
-
-/// The environment of the built-in launch, with the same contract as
-/// `DEFAULT_LAUNCH_ARGS`.
-///
-/// The `TELOS_*` entries are the names the contract carried before it was named for the
-/// protocol. They are carried here, and in the deploy's generated config, for an
-/// executor built before the rename, and they go away once the executor artifacts are
-/// built after it.
-pub const DEFAULT_LAUNCH_ENV: [(&str, &str); 15] = [
-    ("ACPWS_EXTERNAL_SYNC_ENABLED", "true"),
-    ("ACPWS_WEBSOCKET_SYNC_ENABLED", "true"),
-    ("ACPWS_WS_URL", "{ws_url}"),
-    ("ACPWS_WS_TOKEN", "{token}"),
-    ("ACPWS_STATELESS", "1"),
-    ("ACPWS_SESSION_ID", "{session_id}"),
-    ("ACPWS_TOOL_APPROVAL", "{tool_approval}"),
-    ("RUST_LOG", "info"),
-    ("TELOS_EXTERNAL_SYNC_ENABLED", "true"),
-    ("TELOS_WEBSOCKET_SYNC_ENABLED", "true"),
-    ("TELOS_WS_URL", "{ws_url}"),
-    ("TELOS_WS_TOKEN", "{token}"),
-    ("TELOS_STATELESS", "1"),
-    ("TELOS_SESSION_ID", "{session_id}"),
-    ("TELOS_TOOL_APPROVAL", "{tool_approval}"),
-];
-
 /// One process launch: what the configuration declared, and the values actus
 /// fills into it.
 pub struct Launch<'a> {
     /// The agent this launch is for. Every error names it.
     pub agent_name: &'a str,
-    /// The argv the configuration declared. Empty takes the built-in launch, and a
-    /// declaration replaces it whole: a deployment that changes one argument writes all
-    /// of them.
+    /// The argv the configuration declared. A declaration replaces the whole launch: a
+    /// deployment that changes one argument writes all of them, and actus carries no
+    /// argv of its own.
     pub args: &'a [String],
-    /// The environment the configuration declared, with the same contract as `args`,
-    /// empty to take the built-in launch.
+    /// The environment the configuration declared, with the same contract as `args`.
     pub env: &'a HashMap<String, String>,
     /// The binary to run.
     pub bin: &'a Path,
@@ -693,23 +652,27 @@ impl Launch<'_> {
     }
 
     /// The argv and environment of the launch, with the markers resolved.
+    ///
+    /// A declaration is the deployment's, so an empty one is refused by name rather than
+    /// filled from a built-in: actus carries no executor's argv or environment, because
+    /// both are that executor's and a stack component that knew them would not be one.
     fn declared(&self) -> anyhow::Result<LaunchPlan> {
-        let args: Vec<String> = if self.args.is_empty() {
-            DEFAULT_LAUNCH_ARGS.map(str::to_string).to_vec()
-        } else {
-            self.args.to_vec()
-        };
-        let env: Vec<(String, String)> = if self.env.is_empty() {
-            DEFAULT_LAUNCH_ENV
-                .iter()
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect()
-        } else {
-            self.env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect()
-        };
+        if self.args.is_empty() {
+            return Err(anyhow::anyhow!(
+                "the configuration declares no launch_args, and actus carries none of its own"
+            ));
+        }
+        if self.env.is_empty() {
+            return Err(anyhow::anyhow!(
+                "the configuration declares no launch_env, and actus carries none of its own"
+            ));
+        }
+        let args: Vec<String> = self.args.to_vec();
+        let env: Vec<(String, String)> = self
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
 
         let mut resolved_args = Vec::with_capacity(args.len());
         for arg in &args {
@@ -828,6 +791,23 @@ pub fn resolve_declared(
     Ok(resolved)
 }
 
+/// The spec a settings writer receives: every value a declared context server reads from
+/// the environment is resolved here, against this process's environment.
+///
+/// The resolution is actus's because the environment is: a `$NAME` names a value this
+/// process holds, and a deployment that supplied a writer would otherwise restate the
+/// policy for reading it, in a crate that does not own the value. The refusal an unset
+/// name earns lives in `resolve_declared`, so it is one decision in one place, made
+/// before the writer runs.
+pub fn resolve_mcp(spec: &AgentSpec) -> anyhow::Result<AgentSpec> {
+    let mut resolved = spec.clone();
+    for server in &mut resolved.mcp {
+        server.env = resolve_declared(&server.env, &server.name, "env value", server.enabled)?;
+        server.headers = resolve_declared(&server.headers, &server.name, "header", server.enabled)?;
+    }
+    Ok(resolved)
+}
+
 /// Replace every `$NAME` in `value` with `lookup(NAME)`, where a name starts with a
 /// letter or an underscore. A `$` that no name follows stays literal, so an amount
 /// like `$5` or a bare dollar sign is unchanged rather than being read as a variable.
@@ -875,202 +855,30 @@ pub trait SettingsWriter: Send + Sync {
     fn write(&self, data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()>;
 }
 
-/// The settings shape of the executor this stack runs today.
-pub struct DefaultSettings;
-
-impl SettingsWriter for DefaultSettings {
-    fn write(&self, data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
-        write_executor_settings(data_dir, spec)
-    }
-}
-
-/// The built-in writer, for a composition that names none.
-pub fn default_settings() -> Arc<dyn SettingsWriter> {
-    Arc::new(DefaultSettings)
-}
-
-/// Write the settings the built-in writer produces.
+/// Hand the executor's settings to the writer that renders them: the one step between a
+/// parsed declaration and a launched executor.
 ///
-/// Public because it is the shape the tests pin, and because a deployment that runs this
-/// executor wants something to check its own writer against.
-pub fn ensure_agent_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
-    DefaultSettings.write(data_dir, spec)
-}
-
-fn write_executor_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
-    use std::fs;
-    use std::io::Write;
-
-    let api_key = spec.api_key.as_deref().ok_or_else(|| {
+/// The reference a declared server carries is resolved first, so the writer receives values
+/// and a name that is not set fails here, naming the variable, rather than reaching the
+/// executor as text. A composition that names no writer is a deployment that runs no
+/// executor whose format actus carries, and it is refused by name: a launch that wrote no
+/// settings at all would start a program that then fails on its own first read.
+pub fn write_settings(
+    writer: Option<&dyn SettingsWriter>,
+    data_dir: &Path,
+    spec: &AgentSpec,
+) -> anyhow::Result<()> {
+    let spec = resolve_mcp(spec).map_err(|e| anyhow::anyhow!("agent '{}': {e}", spec.name))?;
+    let writer = writer.ok_or_else(|| {
         anyhow::anyhow!(
-            "agent '{}': LLM API key required (LLM_API_KEY or --api-key)",
+            "agent '{}': the kind 'acpws' starts a program whose settings format is the \
+             program's, and this composition names no writer for it",
             spec.name
         )
     })?;
-    let provider = spec.provider.as_str();
-    let base_url = spec.base_url.as_str();
-    let model_name = spec.model.as_str();
-    let model_display = spec.model_display.as_str();
-    let reasoning_effort = spec.reasoning_effort.as_str();
-    let mcp = &spec.mcp;
-    let tool_approval = spec.tool_approval;
-
-    let settings_dir = data_dir.join("config");
-    fs::create_dir_all(&settings_dir)?;
-    let settings_file = settings_dir.join("settings.json");
-
-    let mut settings: serde_json::Value = if settings_file.exists() {
-        serde_json::from_str(&fs::read_to_string(&settings_file)?)?
-    } else {
-        serde_json::json!({})
-    };
-
-    // Inject the OpenAI-compatible endpoint only when the operator
-    // supplied a base URL and a model name (local environment or agent
-    // config). Without them actus writes no provider entry: an empty
-    // api_url or model would break the agent's settings parse, and actus
-    // does not invent endpoint values.
-    let endpoint_configured = !base_url.trim().is_empty() && !model_name.trim().is_empty();
-    if endpoint_configured {
-        if settings
-            .get("language_models")
-            .and_then(|lm| lm.get("openai_compatible"))
-            .and_then(|oc| oc.get(provider))
-            .is_none()
-        {
-            let mut model = serde_json::json!({
-                "name": model_name,
-                "display_name": model_display,
-                "max_tokens": 65536,
-                "max_output_tokens": 8192,
-                "tool_use": true,
-            });
-            // The agent's OpenAI-compatible provider decides whether a model can
-            // think from this field, and sends the level with every request. A
-            // level of `none` is written as no field at all: that is the one
-            // shape that asks for no reasoning parameter, which is what a model
-            // that rejects the parameter needs.
-            if reasoning_effort != "none" {
-                model["reasoning_effort"] = serde_json::json!(reasoning_effort);
-            }
-            settings["language_models"]["openai_compatible"][provider] = serde_json::json!({
-                "api_url": base_url,
-                "available_models": [model],
-            });
-        }
-    } else {
-        tracing::warn!(
-            "LLM endpoint not configured (set LLM_BASE_URL and LLM_MODEL in the local environment or the agent's config.toml); skipping provider injection"
-        );
-    }
-
-    // A thread reads its thinking state from `agent.default_model` and nowhere
-    // else, so without this a launched agent thinks at the provider's default
-    // while its editor sibling thinks at the level the operator chose. Written
-    // only when nothing set it, so a hand-edited file stays the operator's.
-    if endpoint_configured && settings["agent"]["default_model"].is_null() {
-        let enable_thinking = reasoning_effort != "none";
-        settings["agent"]["default_model"] = serde_json::json!({
-            "provider": provider,
-            "model": model_name,
-            "enable_thinking": enable_thinking,
-            "effort": if enable_thinking {
-                serde_json::Value::String(reasoning_effort.to_string())
-            } else {
-                serde_json::Value::Null
-            },
-        });
-    }
-
-    // The terminal is the tool a headless agent runs commands with, and it is the one the
-    // agent's permission gate can refuse outright: a command containing a shell
-    // substitution is denied whenever the tool's effective decision is not an
-    // unconditional allow, and that happens before an approval could be asked for. The
-    // refusal protects a per-command approval prompt, so a deployment that starts its
-    // agents with `always` has nothing left for it to protect and gets the tool opened
-    // up here. Any other mode keeps the agent's own setting, prompt and all.
-    //
-    // Only the terminal's own default is written, and only when nothing set it, so a rule
-    // an operator wrote by hand stays theirs.
-    if tool_approval == crate::agent::config::ToolApproval::Always {
-        let permissions = &mut settings["agent"]["tool_permissions"];
-        if permissions["tools"]["terminal"]["default"].is_null() {
-            permissions["tools"]["terminal"]["default"] = serde_json::json!("allow");
-        }
-    }
-
-    // MCP servers: map each declaration to the executor.s `context_servers` entry.
-    // Stdio servers become `{ command, args, env }`; HTTP servers become
-    // `{ url, headers }`. The headless agent's context server registry
-    // starts the enabled ones and exposes their tools to the model, and the
-    // disabled ones stay in the agent's catalog, which is what the agent's
-    // own `enable_context_server` tool reads.
-    //
-    // Declared entries are merged over whatever the file holds, so a server
-    // the operator added by hand survives. A value of the form `$NAME` is
-    // resolved from the actus environment here, and an unset name is an
-    // error: the server process would otherwise start with an empty token and
-    // fail on every call instead of once, at launch, with the name to fix.
-    for s in mcp {
-        let mut obj = serde_json::Map::new();
-        if let Some(url) = &s.url {
-            obj.insert("url".to_string(), serde_json::json!(url));
-            let headers = resolve_declared(&s.headers, &s.name, "header", s.enabled)?;
-            if !headers.is_empty() {
-                obj.insert("headers".to_string(), serde_json::json!(headers));
-            }
-        } else {
-            if let Some(cmd) = &s.command {
-                obj.insert("command".to_string(), serde_json::json!(cmd));
-            }
-            if !s.args.is_empty() {
-                obj.insert("args".to_string(), serde_json::json!(s.args));
-            }
-            let env = resolve_declared(&s.env, &s.name, "env value", s.enabled)?;
-            if !env.is_empty() {
-                obj.insert("env".to_string(), serde_json::json!(env));
-            }
-            if let Some(t) = s.timeout {
-                obj.insert("timeout".to_string(), serde_json::json!(t));
-            }
-        }
-        obj.insert("enabled".to_string(), serde_json::json!(s.enabled));
-        settings["context_servers"][s.name.as_str()] = serde_json::Value::Object(obj);
-    }
-    if !mcp.is_empty() {
-        let enabled = mcp.iter().filter(|s| s.enabled).count();
-        tracing::info!(
-            "Wrote {} MCP server(s) to settings, {} of them enabled",
-            mcp.len(),
-            enabled
-        );
-    }
-
-    let mut f = fs::File::create(&settings_file)?;
-    f.write_all(serde_json::to_string_pretty(&settings)?.as_bytes())?;
-
-    let creds_dir = data_dir.join("credentials");
-    fs::create_dir_all(&creds_dir)?;
-    let creds_file = creds_dir.join("credentials.json");
-
-    let mut creds = serde_json::Map::new();
-    let mut provider_creds = serde_json::Map::new();
-    provider_creds.insert(
-        "api_key".to_string(),
-        serde_json::Value::String(api_key.to_string()),
-    );
-    creds.insert(
-        format!("provider/{}", provider),
-        serde_json::Value::Object(provider_creds),
-    );
-    let creds = serde_json::Value::Object(creds);
-
-    let mut f = fs::File::create(&creds_file)?;
-    f.write_all(serde_json::to_string_pretty(&creds)?.as_bytes())?;
-
-    tracing::info!("Executor settings written to {}", settings_file.display());
-    Ok(())
+    writer.write(data_dir, &spec)
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1120,62 +928,27 @@ mod tests {
             .collect()
     }
 
-    /// A configuration that declares no launch still gets the executor this stack
-    /// runs today, both its argv and its environment.
+    /// The launch is the deployment's, so one that declares nothing is refused by name:
+    /// actus carries no executor's argv or environment, and a launch that fell back to one
+    /// would run a program nobody declared.
     #[test]
-    fn the_built_in_launch_sets_expected_args_and_env() {
+    fn a_launch_that_declares_nothing_is_refused_by_name() {
         let dir = tempfile::tempdir().unwrap();
-        let workdir = dir.path().join("work");
-        std::fs::create_dir_all(&workdir).unwrap();
-        let user_data_dir = dir.path().join("user");
-        std::fs::create_dir_all(&user_data_dir).unwrap();
-        let log = std::fs::File::create(dir.path().join("agent.log")).unwrap();
         let bin = dir.path().join("tel");
-
         let no_env = HashMap::new();
-        let launch = launch_with(&bin, &workdir, &user_data_dir, &[], &no_env);
-        let cmd = launch_command(&launch, log).unwrap();
 
-        let args = args_of(&cmd);
-        let pair = [
-            "--user-data-dir".to_string(),
-            user_data_dir.to_string_lossy().into_owned(),
-        ];
-        assert!(args.windows(2).any(|w| w == pair), "args: {args:?}");
-        assert!(args.contains(&workdir.to_string_lossy().into_owned()));
-        assert!(args.iter().any(|a| a == "--headless"));
-        assert!(args.iter().any(|a| a == "--allow-multiple-instances"));
+        let log = std::fs::File::create(dir.path().join("agent.log")).unwrap();
+        let launch = launch_with(&bin, dir.path(), dir.path(), &[], &no_env);
+        let error = launch_command(&launch, log).unwrap_err().to_string();
+        assert!(error.contains("agent 'telos'"), "{error}");
+        assert!(error.contains("launch_args"), "{error}");
 
-        let envs = envs_of(&cmd);
-        let expect = [
-            ("ACPWS_EXTERNAL_SYNC_ENABLED", "true"),
-            ("ACPWS_WEBSOCKET_SYNC_ENABLED", "true"),
-            ("ACPWS_WS_URL", "127.0.0.1:8080"),
-            ("ACPWS_WS_TOKEN", "process-token-7f3a"),
-            ("ACPWS_STATELESS", "1"),
-            ("ACPWS_SESSION_ID", "ses_actus-test"),
-            ("ACPWS_TOOL_APPROVAL", "always"),
-            ("RUST_LOG", "info"),
-        ];
-        for (key, value) in expect {
-            assert_eq!(envs.get(key).map(String::as_str), Some(value), "env {key}");
-        }
-
-        // The names the contract carried before the rename are carried too, which is
-        // what lets an executor built before it on this launch. They go away with the
-        // executor artifacts.
-        let legacy = [
-            ("TELOS_EXTERNAL_SYNC_ENABLED", "true"),
-            ("TELOS_WEBSOCKET_SYNC_ENABLED", "true"),
-            ("TELOS_WS_URL", "127.0.0.1:8080"),
-            ("TELOS_WS_TOKEN", "process-token-7f3a"),
-            ("TELOS_STATELESS", "1"),
-            ("TELOS_SESSION_ID", "ses_actus-test"),
-            ("TELOS_TOOL_APPROVAL", "always"),
-        ];
-        for (key, value) in legacy {
-            assert_eq!(envs.get(key).map(String::as_str), Some(value), "env {key}");
-        }
+        let args = vec!["--headless".to_string()];
+        let log = std::fs::File::create(dir.path().join("second.log")).unwrap();
+        let launch = launch_with(&bin, dir.path(), dir.path(), &args, &no_env);
+        let error = launch_command(&launch, log).unwrap_err().to_string();
+        assert!(error.contains("agent 'telos'"), "{error}");
+        assert!(error.contains("launch_env"), "{error}");
     }
 
     /// The variables actus sets for its own control proxy are actus's interface,
