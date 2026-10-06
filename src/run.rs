@@ -19,17 +19,30 @@ use tokio::sync::RwLock;
 use crate::acp_ws::backend::AcpWsBackend;
 use crate::acp_ws::control::run_ws_server;
 use crate::acp_ws::{ensure_agent_settings, launch_agent, AcpWsManager, WsCommandTx};
-use crate::agent::config::{load_config, load_control_policy, AgentDefaults};
+use crate::agent::config::{load_config, load_control_policy, AgentDefaults, AgentSpec};
 use crate::agent::config::{resolve_llm_settings, unquote_env_value};
 use crate::agent::ext_cli::ExtCliAgent;
 use crate::agent::native::NativeAgent;
-use crate::agent::{AgentKind, AgentRegistry};
+use crate::agent::{AgentBackend, AgentKind, AgentRegistry};
 use crate::control;
 use crate::server::{run_http_server, AppState};
 use crate::store::RecordStore;
 
 /// Where an agent's record lives, decided by whoever composes the server.
 pub type StoreFactory = Arc<dyn Fn(&Path) -> Result<Arc<dyn RecordStore>, String> + Send + Sync>;
+
+/// A platform the composition supplies, asked for each configured agent before the
+/// built-in kinds are considered.
+///
+/// A stack that composes actus registers a platform of its own here, so the crate does not
+/// have to name it. `None` hands the entry back to the built-in kinds, which is what a
+/// stack that adds nothing returns for every agent.
+pub type BackendFactory = Arc<dyn Fn(&AgentSpec) -> Option<Arc<dyn AgentBackend>> + Send + Sync>;
+
+/// The factory a composition that adds no platform of its own passes.
+pub fn no_backends() -> BackendFactory {
+    Arc::new(|_| None)
+}
 
 /// The factory the plain binary passes: the store `ACTUS_RECORD_STORE` selects.
 pub fn environment_store() -> StoreFactory {
@@ -223,12 +236,31 @@ fn resolve_api_token(arg: Option<String>) -> anyhow::Result<String> {
 
 /// Parse the process arguments and run the server with `store`.
 pub async fn main_with_store(store: StoreFactory) -> anyhow::Result<()> {
-    let args: Args = clap::Parser::parse();
-    run(args, store).await
+    main_with(store, no_backends()).await
 }
 
-/// Run the server with the store the caller supplies.
+/// Parse the process arguments and run the server with `store`, registering the platforms
+/// `backends` supplies.
+///
+/// This is the entry a stack that composes actus uses: the crate knows its own built-in
+/// kinds, and a product adds one of its own behind this factory without the crate naming
+/// it.
+pub async fn main_with(store: StoreFactory, backends: BackendFactory) -> anyhow::Result<()> {
+    let args: Args = clap::Parser::parse();
+    run_with(args, store, backends).await
+}
+
+/// Run the server with the store the caller supplies and no platform of its own.
 pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
+    run_with(args, store, no_backends()).await
+}
+
+/// Run the server with the store and the platforms the caller supplies.
+pub async fn run_with(
+    args: Args,
+    store: StoreFactory,
+    backends: BackendFactory,
+) -> anyhow::Result<()> {
     // The control MCP proxy runs as its own process under a sessionful
     // agent; it never starts the server.
     if let Some(Command::Control) = args.command {
@@ -347,6 +379,16 @@ pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
     let default_name = specs[0].name.clone();
 
     for spec in &specs {
+        // A platform the composition supplies is asked for first, so a stack adds one
+        // without this crate naming it. Nothing here reads what the factory returned.
+        if let Some(backend) = backends(spec) {
+            tracing::info!(
+                "Agent '{}' running (registered by the composition)",
+                spec.name
+            );
+            registry.register(backend, spec.name == default_name);
+            continue;
+        }
         match spec.kind {
             AgentKind::AcpWs => {
                 if !spec.bin.exists() {
