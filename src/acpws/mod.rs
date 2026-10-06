@@ -866,7 +866,42 @@ fn resolve_variables(
     Ok(out)
 }
 
+/// What writes the executor's settings before it is launched.
+///
+/// A settings file is the executor's format: which keys exist, how they nest, and what a
+/// headless run needs from them are properties of the program that reads it. Actus knows
+/// the values it resolved, the endpoint and the reasoning effort, the MCP catalogue, the
+/// approval policy, and the data dir the executor was told to use, and hands them over.
+/// This renders them into that format, so a deployment that runs another executor
+/// supplies another writer and actus is unchanged.
+pub trait SettingsWriter: Send + Sync {
+    /// Write the settings the executor reads into the data dir it was told to use.
+    fn write(&self, data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()>;
+}
+
+/// The settings shape of the executor this stack runs today.
+pub struct DefaultSettings;
+
+impl SettingsWriter for DefaultSettings {
+    fn write(&self, data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
+        write_executor_settings(data_dir, spec)
+    }
+}
+
+/// The built-in writer, for a composition that names none.
+pub fn default_settings() -> Arc<dyn SettingsWriter> {
+    Arc::new(DefaultSettings)
+}
+
+/// Write the settings the built-in writer produces.
+///
+/// Public because it is the shape the tests pin, and because a deployment that runs this
+/// executor wants something to check its own writer against.
 pub fn ensure_agent_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
+    DefaultSettings.write(data_dir, spec)
+}
+
+fn write_executor_settings(data_dir: &Path, spec: &AgentSpec) -> anyhow::Result<()> {
     use std::fs;
     use std::io::Write;
 

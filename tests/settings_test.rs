@@ -1,7 +1,7 @@
 // Integration tests for the settings an actus-launched agent starts from
 // (issue #25: an agent thinks at the level the operator chose, or not at all).
 
-use actus::acpws::ensure_agent_settings;
+use actus::acpws::{default_settings, ensure_agent_settings};
 use actus::agent::config::{load_config, AgentDefaults, AgentSpec, ToolApproval};
 use std::path::PathBuf;
 
@@ -26,6 +26,21 @@ fn settings_written(spec: &AgentSpec) -> serde_json::Value {
     ensure_agent_settings(dir.path(), spec).unwrap();
     serde_json::from_str(&std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap())
         .unwrap()
+}
+
+/// The seam's default is the built-in shape: a composition that names no writer gets
+/// what `ensure_agent_settings` produces, so the two cannot drift while the default is
+/// the one this stack runs.
+#[test]
+fn the_default_writer_is_the_built_in_shape() {
+    let spec = spec_with_effort("high");
+    let dir = tempfile::tempdir().unwrap();
+    default_settings().write(dir.path(), &spec).unwrap();
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("config/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written, settings_written(&spec));
 }
 
 /// A level the operator declares reaches both places the agent reads it from:

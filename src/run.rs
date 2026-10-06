@@ -18,7 +18,9 @@ use tokio::sync::RwLock;
 
 use crate::acpws::backend::AcpwsBackend;
 use crate::acpws::control::run_ws_server;
-use crate::acpws::{ensure_agent_settings, launch_agent, AcpwsManager, Launch, WsCommandTx};
+use crate::acpws::{
+    default_settings, launch_agent, AcpwsManager, Launch, SettingsWriter, WsCommandTx,
+};
 use crate::agent::config::{load_config, load_control_policy, AgentDefaults, AgentSpec};
 use crate::agent::config::{resolve_llm_settings, unquote_env_value};
 use crate::agent::ext_cli::ExtCliAgent;
@@ -234,9 +236,39 @@ fn resolve_api_token(arg: Option<String>) -> anyhow::Result<String> {
     Ok(token)
 }
 
+/// What a process composes: where each agent's record lives, which agent platforms the
+/// crate does not know, and what writes the executor's settings.
+///
+/// Actus is a fabric, and each of these is a choice a deployment makes: another store,
+/// another platform, another executor with another settings format. The entry points
+/// below fill in what a bare `actus` runs, so a composition names only the parts it
+/// differs on.
+pub struct Composition {
+    pub store: StoreFactory,
+    pub backends: BackendFactory,
+    pub settings: Arc<dyn SettingsWriter>,
+}
+
+impl Composition {
+    /// The composition a bare `actus` runs: the store the environment names, no platform
+    /// beyond the crate's own kinds, and the settings writer of the executor this stack
+    /// runs today.
+    pub fn from_environment() -> Self {
+        Self {
+            store: environment_store(),
+            backends: no_backends(),
+            settings: default_settings(),
+        }
+    }
+}
+
 /// Parse the process arguments and run the server with `store`.
 pub async fn main_with_store(store: StoreFactory) -> anyhow::Result<()> {
-    main_with(store, no_backends()).await
+    main_with_composition(Composition {
+        store,
+        ..Composition::from_environment()
+    })
+    .await
 }
 
 /// Parse the process arguments and run the server with `store`, registering the platforms
@@ -246,13 +278,30 @@ pub async fn main_with_store(store: StoreFactory) -> anyhow::Result<()> {
 /// kinds, and a product adds one of its own behind this factory without the crate naming
 /// it.
 pub async fn main_with(store: StoreFactory, backends: BackendFactory) -> anyhow::Result<()> {
+    main_with_composition(Composition {
+        store,
+        backends,
+        ..Composition::from_environment()
+    })
+    .await
+}
+
+/// Parse the process arguments and run the server with everything the caller composes.
+pub async fn main_with_composition(composition: Composition) -> anyhow::Result<()> {
     let args: Args = clap::Parser::parse();
-    run_with(args, store, backends).await
+    run_with_composition(args, composition).await
 }
 
 /// Run the server with the store the caller supplies and no platform of its own.
 pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
-    run_with(args, store, no_backends()).await
+    run_with_composition(
+        args,
+        Composition {
+            store,
+            ..Composition::from_environment()
+        },
+    )
+    .await
 }
 
 /// Run the server with the store and the platforms the caller supplies.
@@ -261,6 +310,19 @@ pub async fn run_with(
     store: StoreFactory,
     backends: BackendFactory,
 ) -> anyhow::Result<()> {
+    run_with_composition(
+        args,
+        Composition {
+            store,
+            backends,
+            ..Composition::from_environment()
+        },
+    )
+    .await
+}
+
+/// Run the server with everything the caller composes.
+pub async fn run_with_composition(args: Args, composition: Composition) -> anyhow::Result<()> {
     // The control MCP proxy runs as its own process under a sessionful
     // agent; it never starts the server.
     if let Some(Command::Control) = args.command {
@@ -370,7 +432,7 @@ pub async fn run_with(
     for spec in &specs {
         // A platform the composition supplies is asked for first, so a stack adds one
         // without this crate naming it. Nothing here reads what the factory returned.
-        if let Some(backend) = backends(spec) {
+        if let Some(backend) = (composition.backends)(spec) {
             tracing::info!(
                 "Agent '{}' running (registered by the composition)",
                 spec.name
@@ -419,7 +481,7 @@ pub async fn run_with(
                 };
                 let ws_host = format!("127.0.0.1:{}", spec.ws_port);
                 let user_data_dir = tempfile::tempdir()?;
-                ensure_agent_settings(user_data_dir.path(), spec)?;
+                composition.settings.write(user_data_dir.path(), spec)?;
                 let threads_dir = threads_root.join(&spec.name);
                 std::fs::create_dir_all(&threads_dir)?;
                 let session_id = format!(
@@ -431,7 +493,7 @@ pub async fn run_with(
                     AcpwsManager::with_store(
                         session_id.clone(),
                         ws_host.clone(),
-                        store(&threads_dir).map_err(anyhow::Error::msg)?,
+                        (composition.store)(&threads_dir).map_err(anyhow::Error::msg)?,
                     )
                     .map_err(anyhow::Error::msg)?,
                 ));
