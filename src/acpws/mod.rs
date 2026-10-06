@@ -562,25 +562,37 @@ impl AcpwsManager {
     }
 }
 
+/// One marker a declared launch may carry, with the value actus supplies for it.
+///
+/// The list and the resolver are one table, so the names an error reports cannot drift
+/// from the names the resolver accepts.
+type LaunchMarker = (&'static str, fn(&Launch<'_>) -> String);
+
 /// The markers a declared launch may carry. Each names a value actus owns and a
-/// deployment cannot know: a path it derived, a port it bound, a token it
-/// generated at startup.
-pub const LAUNCH_MARKERS: [&str; 8] = [
-    "workdir",
-    "user_data_dir",
-    "session_id",
-    "ws_url",
-    "token",
-    "agent_name",
-    "http_port",
-    "tool_approval",
+/// deployment cannot know: a path it derived, a port it bound, a token it generated at
+/// startup.
+static LAUNCH_MARKERS: [LaunchMarker; 8] = [
+    ("workdir", |launch| launch.workdir.display().to_string()),
+    ("user_data_dir", |launch| {
+        launch.user_data_dir.display().to_string()
+    }),
+    ("session_id", |launch| launch.session_id.to_string()),
+    ("ws_url", |launch| launch.ws_url.to_string()),
+    ("token", |launch| launch.token.to_string()),
+    ("agent_name", |launch| launch.agent_name.to_string()),
+    ("http_port", |launch| launch.http_port.to_string()),
+    ("tool_approval", |launch| {
+        launch.tool_approval.as_str().to_string()
+    }),
 ];
 
-/// The launch the executor this stack runs today reads, used when the
-/// configuration declares none. A deployment that declares its own replaces it,
-/// which is how a different executor runs on this fabric without actus naming
-/// it.
-const DEFAULT_LAUNCH_ARGS: [&str; 5] = [
+/// The argv of the built-in launch, used when the configuration declares none. A
+/// deployment that declares its own replaces it, which is how a different executor runs
+/// on this fabric without actus naming it.
+///
+/// Public so a deployment can hold its own declaration against it while the built-in is
+/// still here.
+pub const DEFAULT_LAUNCH_ARGS: [&str; 5] = [
     "--headless",
     "--allow-multiple-instances",
     "--user-data-dir",
@@ -588,13 +600,14 @@ const DEFAULT_LAUNCH_ARGS: [&str; 5] = [
     "{workdir}",
 ];
 
-/// The environment of the built-in launch.
+/// The environment of the built-in launch, with the same contract as
+/// `DEFAULT_LAUNCH_ARGS`.
 ///
-/// The `TELOS_*` entries are the names the contract carried before it was named
-/// for the protocol. They are carried here, and in the deploy's generated config,
-/// for an executor built before the rename, and they go away once the executor
-/// artifacts are built after it.
-const DEFAULT_LAUNCH_ENV: [(&str, &str); 15] = [
+/// The `TELOS_*` entries are the names the contract carried before it was named for the
+/// protocol. They are carried here, and in the deploy's generated config, for an
+/// executor built before the rename, and they go away once the executor artifacts are
+/// built after it.
+pub const DEFAULT_LAUNCH_ENV: [(&str, &str); 15] = [
     ("ACPWS_EXTERNAL_SYNC_ENABLED", "true"),
     ("ACPWS_WEBSOCKET_SYNC_ENABLED", "true"),
     ("ACPWS_WS_URL", "{ws_url}"),
@@ -617,9 +630,12 @@ const DEFAULT_LAUNCH_ENV: [(&str, &str); 15] = [
 pub struct Launch<'a> {
     /// The agent this launch is for. Every error names it.
     pub agent_name: &'a str,
-    /// The argv the configuration declared, empty to take the default.
+    /// The argv the configuration declared. Empty takes the built-in launch, and a
+    /// declaration replaces it whole: a deployment that changes one argument writes all
+    /// of them.
     pub args: &'a [String],
-    /// The environment the configuration declared, empty to take the default.
+    /// The environment the configuration declared, with the same contract as `args`,
+    /// empty to take the built-in launch.
     pub env: &'a HashMap<String, String>,
     /// The binary to run.
     pub bin: &'a Path,
@@ -665,7 +681,7 @@ impl Launch<'_> {
     /// `{{` and `}}` are a literal brace. A marker actus does not supply fails
     /// the launch rather than passing through as text: a declaration that reaches
     /// the executor with its marker intact is a declaration that does nothing.
-    fn resolve(&self, value: &str) -> Result<String, String> {
+    fn resolve(&self, value: &str) -> anyhow::Result<String> {
         let mut out = String::with_capacity(value.len());
         let mut rest = value;
         while let Some(at) = rest.find(['{', '}']) {
@@ -683,13 +699,13 @@ impl Launch<'_> {
             }
             if tail.starts_with('{') {
                 let close = tail.find('}').ok_or_else(|| {
-                    format!("a '{{' opens a marker that no '}}' closes in {value:?}")
+                    anyhow::anyhow!("a '{{' opens a marker that no '}}' closes in {value:?}")
                 })?;
                 let marker = &tail[1..close];
                 let resolved = self.value(marker).ok_or_else(|| {
-                    format!(
+                    anyhow::anyhow!(
                         "'{{{marker}}}' is not a marker actus supplies; it supplies {}",
-                        LAUNCH_MARKERS.join(", ")
+                        marker_names().join(", ")
                     )
                 })?;
                 out.push_str(&resolved);
@@ -705,7 +721,7 @@ impl Launch<'_> {
     }
 
     /// The argv and environment of the launch, with the markers resolved.
-    fn declared(&self) -> Result<LaunchPlan, String> {
+    fn declared(&self) -> anyhow::Result<LaunchPlan> {
         let args: Vec<String> = if self.args.is_empty() {
             DEFAULT_LAUNCH_ARGS.map(str::to_string).to_vec()
         } else {
@@ -725,14 +741,17 @@ impl Launch<'_> {
 
         let mut resolved_args = Vec::with_capacity(args.len());
         for arg in &args {
-            resolved_args.push(self.resolve(arg).map_err(|e| format!("launch_args: {e}"))?);
+            resolved_args.push(
+                self.resolve(arg)
+                    .map_err(|e| anyhow::anyhow!("launch_args: {e}"))?,
+            );
         }
         let mut resolved_env = Vec::with_capacity(env.len());
         for (key, value) in &env {
             resolved_env.push((
                 key.clone(),
                 self.resolve(value)
-                    .map_err(|e| format!("launch_env[{key}]: {e}"))?,
+                    .map_err(|e| anyhow::anyhow!("launch_env[{key}]: {e}"))?,
             ));
         }
         Ok(LaunchPlan {
@@ -742,15 +761,20 @@ impl Launch<'_> {
     }
 }
 
+/// The names a declared launch may carry, for the message that refuses one it may not.
+fn marker_names() -> Vec<&'static str> {
+    LAUNCH_MARKERS.iter().map(|(name, _)| *name).collect()
+}
+
 /// Build the process command for one launch, kept separate from spawning so the
 /// contract is unit-testable without a real executor.
 pub fn launch_command(
     launch: &Launch<'_>,
     stderr_log: std::fs::File,
-) -> Result<std::process::Command, String> {
+) -> anyhow::Result<std::process::Command> {
     let plan = launch
         .declared()
-        .map_err(|e| format!("agent '{}': {e}", launch.agent_name))?;
+        .map_err(|e| anyhow::anyhow!("agent '{}': {e}", launch.agent_name))?;
     let mut cmd = std::process::Command::new(launch.bin);
     cmd.args(plan.args);
     for (key, value) in plan.env {
@@ -777,7 +801,7 @@ pub async fn launch_agent(
 
     let stderr_log = std::fs::File::create(stderr_log)
         .map_err(|e| anyhow::anyhow!("cannot create stderr log {}: {}", stderr_log.display(), e))?;
-    let mut cmd = launch_command(launch, stderr_log).map_err(anyhow::Error::msg)?;
+    let mut cmd = launch_command(launch, stderr_log)?;
     let child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("cannot spawn {}: {}", launch.bin.display(), e))?;
@@ -1251,7 +1275,7 @@ mod tests {
         let unknown = vec!["{ws_socket}".to_string()];
         let log = std::fs::File::create(dir.path().join("second.log")).unwrap();
         let launch = launch_with(&bin, dir.path(), dir.path(), &unknown, &env);
-        let error = launch_command(&launch, log).unwrap_err();
+        let error = launch_command(&launch, log).unwrap_err().to_string();
         assert!(error.contains("agent 'telos'"), "{error}");
         assert!(error.contains("ws_socket"), "{error}");
     }

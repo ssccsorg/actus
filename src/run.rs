@@ -260,15 +260,28 @@ impl Composition {
             settings: default_settings(),
         }
     }
+
+    /// The environment's composition, with `store` in place of the environment's own.
+    pub fn with_store(store: StoreFactory) -> Self {
+        Self {
+            store,
+            ..Self::from_environment()
+        }
+    }
+
+    /// The environment's composition, with a store and the platforms `backends` names.
+    pub fn with_store_and_backends(store: StoreFactory, backends: BackendFactory) -> Self {
+        Self {
+            store,
+            backends,
+            ..Self::from_environment()
+        }
+    }
 }
 
 /// Parse the process arguments and run the server with `store`.
 pub async fn main_with_store(store: StoreFactory) -> anyhow::Result<()> {
-    main_with_composition(Composition {
-        store,
-        ..Composition::from_environment()
-    })
-    .await
+    main_with_composition(Composition::with_store(store)).await
 }
 
 /// Parse the process arguments and run the server with `store`, registering the platforms
@@ -278,12 +291,7 @@ pub async fn main_with_store(store: StoreFactory) -> anyhow::Result<()> {
 /// kinds, and a product adds one of its own behind this factory without the crate naming
 /// it.
 pub async fn main_with(store: StoreFactory, backends: BackendFactory) -> anyhow::Result<()> {
-    main_with_composition(Composition {
-        store,
-        backends,
-        ..Composition::from_environment()
-    })
-    .await
+    main_with_composition(Composition::with_store_and_backends(store, backends)).await
 }
 
 /// Parse the process arguments and run the server with everything the caller composes.
@@ -294,14 +302,7 @@ pub async fn main_with_composition(composition: Composition) -> anyhow::Result<(
 
 /// Run the server with the store the caller supplies and no platform of its own.
 pub async fn run(args: Args, store: StoreFactory) -> anyhow::Result<()> {
-    run_with_composition(
-        args,
-        Composition {
-            store,
-            ..Composition::from_environment()
-        },
-    )
-    .await
+    run_with_composition(args, Composition::with_store(store)).await
 }
 
 /// Run the server with the store and the platforms the caller supplies.
@@ -310,15 +311,7 @@ pub async fn run_with(
     store: StoreFactory,
     backends: BackendFactory,
 ) -> anyhow::Result<()> {
-    run_with_composition(
-        args,
-        Composition {
-            store,
-            backends,
-            ..Composition::from_environment()
-        },
-    )
-    .await
+    run_with_composition(args, Composition::with_store_and_backends(store, backends)).await
 }
 
 /// Run the server with everything the caller composes.
