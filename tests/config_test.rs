@@ -14,7 +14,7 @@ fn defaults() -> AgentDefaults {
         model_display: "example-model".to_string(),
         base_url: "https://api.example.com/v1".to_string(),
         api_key: Some("sk-test".to_string()),
-        bin: PathBuf::from("/bin/telos"),
+        bin: Some(PathBuf::from("/bin/telos")),
         ws_port: 8080,
         reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
     }
@@ -35,7 +35,7 @@ fn no_file_yields_single_default_telos() {
     assert_eq!(specs[0].provider, "openai-compatible");
     assert_eq!(specs[0].model, "example-model");
     assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
-    assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
+    assert_eq!(specs[0].bin, Some(PathBuf::from("/bin/telos")));
     assert_eq!(specs[0].ws_port, 8080);
     assert_eq!(specs[0].tool_approval, ToolApproval::Always);
     assert!(specs[0].workdir.is_none());
@@ -211,7 +211,7 @@ workdir = "/tmp/aux-work"
     let s = &specs[0];
     assert_eq!(s.name, "aux");
     assert_eq!(s.kind, AgentKind::ExtCli);
-    assert_eq!(s.bin, PathBuf::from("ante"));
+    assert_eq!(s.bin, Some(PathBuf::from("ante")));
     assert_eq!(s.cli_args, vec!["-p".to_string(), "{prompt}".to_string()]);
     assert_eq!(s.cli_env.get("FOO").map(String::as_str), Some("bar"));
     assert_eq!(
@@ -293,7 +293,7 @@ base_url = "https://api.anthropic.com/v1"
     // telos inherits everything from defaults
     assert_eq!(specs[0].kind, AgentKind::Acpws);
     assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
-    assert_eq!(specs[0].bin, PathBuf::from("/bin/telos"));
+    assert_eq!(specs[0].bin, Some(PathBuf::from("/bin/telos")));
 
     // claude overrides provider/model/base_url, inherits api_key
     assert_eq!(specs[1].kind, AgentKind::LangGraph);

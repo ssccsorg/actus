@@ -99,8 +99,10 @@ pub struct AgentSpec {
     /// LLM API key. Optional at the fabric level; the executor the configuration
     /// launches requires one when it serves an agent.
     pub api_key: Option<String>,
-    /// Path to the executor binary the configuration launches.
-    pub bin: PathBuf,
+    /// Path to the executor binary a launch runs. None is refused at the launch
+    /// with the name of the agent, rather than defaulted to a path that is one
+    /// machine's layout.
+    pub bin: Option<PathBuf>,
     /// WebSocket port the agent process connects back to.
     pub ws_port: u16,
     /// Tool call approval policy, handed to the executor when it is launched.
@@ -289,7 +291,10 @@ pub struct AgentDefaults {
     pub model_display: String,
     pub base_url: String,
     pub api_key: Option<String>,
-    pub bin: PathBuf,
+    /// Path to the executor binary every agent launches unless the agent declares
+    /// its own. None leaves an agent with no binary, which the launch refuses by
+    /// name.
+    pub bin: Option<PathBuf>,
     pub ws_port: u16,
     pub reasoning_effort: String,
 }
@@ -423,7 +428,7 @@ pub fn load_config(
             model_display,
             base_url: f.base_url.unwrap_or_else(|| defaults.base_url.clone()),
             api_key: f.api_key.or_else(|| defaults.api_key.clone()),
-            bin: f.bin.unwrap_or_else(|| defaults.bin.clone()),
+            bin: f.bin.or_else(|| defaults.bin.clone()),
             ws_port,
             tool_approval,
             reasoning_effort,

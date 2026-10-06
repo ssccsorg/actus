@@ -12,7 +12,7 @@ fn spec_with_effort(level: &str) -> AgentSpec {
         model_display: "example-model".to_string(),
         base_url: "https://api.example.com/v1".to_string(),
         api_key: Some("sk-test".to_string()),
-        bin: PathBuf::from("/bin/telos"),
+        bin: Some(PathBuf::from("/bin/telos")),
         ws_port: 8080,
         reasoning_effort: level.to_string(),
     };

@@ -26,7 +26,7 @@ fn defaults_with_endpoint(base_url: &str, model: &str) -> AgentDefaults {
         model_display: model.to_string(),
         base_url: base_url.to_string(),
         api_key: Some("sk-test".to_string()),
-        bin: PathBuf::from("/bin/telos"),
+        bin: Some(PathBuf::from("/bin/telos")),
         ws_port: 8080,
         reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
     }

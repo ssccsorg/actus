@@ -285,17 +285,6 @@ pub async fn run_with(
         .or_else(|| std::env::var("LLM_API_KEY").ok())
         .map(|k| unquote_env_value(&k));
 
-    // Resolve the executor binary path: --bin, TELOS_BIN, or the sibling
-    // build. Used by the acpws adapter only; existence is checked at
-    // launch so agents of other kinds do not require it.
-    let bin_path = if let Some(p) = args.bin {
-        p
-    } else if let Ok(p) = std::env::var("TELOS_BIN") {
-        PathBuf::from(p)
-    } else {
-        PathBuf::from("../telos/target/telos-release/tel")
-    };
-
     let workdir = std::fs::canonicalize(&args.workdir)?;
 
     // The HTTP API requires a bearer token. Resolution order: CLI arg,
@@ -344,7 +333,7 @@ pub async fn run_with(
         model_display: model_display.clone(),
         base_url: base_url.clone(),
         api_key: api_key.clone(),
-        bin: bin_path.clone(),
+        bin: args.bin.clone(),
         ws_port: args.ws_port,
         reasoning_effort: reasoning_effort.clone(),
     };
@@ -391,11 +380,22 @@ pub async fn run_with(
         }
         match spec.kind {
             AgentKind::Acpws => {
-                if !spec.bin.exists() {
+                // The launch runs a program, and actus names no path of its own: a
+                // path into a checkout that happens to sit beside this one is one
+                // machine's layout, and a silent default to a path that is there hides
+                // the deployment that never declared one.
+                let bin = spec.bin.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "agent '{}': no executor binary declared; pass --bin, or set `bin` for \
+                         this agent in the config",
+                        spec.name
+                    )
+                })?;
+                if !bin.exists() {
                     return Err(anyhow::anyhow!(
                         "agent '{}': executor binary not found at {}",
                         spec.name,
-                        spec.bin.display()
+                        bin.display()
                     ));
                 }
                 // A per-agent workdir scopes this agent to one project. Without
@@ -457,7 +457,7 @@ pub async fn run_with(
                     agent_name: &spec.name,
                     args: &spec.launch_args,
                     env: &spec.launch_env,
-                    bin: &spec.bin,
+                    bin,
                     workdir: &agent_workdir,
                     user_data_dir: user_data_dir.path(),
                     session_id: &session_id,
@@ -509,9 +509,16 @@ pub async fn run_with(
                     })?,
                     None => workdir.clone(),
                 };
+                let bin = spec.bin.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "agent '{}': no binary declared; pass --bin, or set `bin` for this agent \
+                         in the config",
+                        spec.name
+                    )
+                })?;
                 let backend = Arc::new(ExtCliAgent::new(
                     spec.name.clone(),
-                    spec.bin.clone(),
+                    bin.clone(),
                     spec.cli_args.clone(),
                     spec.cli_env.clone(),
                     spec.cli_prompt,
@@ -529,7 +536,7 @@ pub async fn run_with(
                 tracing::info!(
                     "Agent '{}' running (ext_cli adapter, raw transport, bin {}, workdir {})",
                     spec.name,
-                    spec.bin.display(),
+                    bin.display(),
                     agent_workdir.display()
                 );
             }
