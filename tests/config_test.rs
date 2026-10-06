@@ -281,7 +281,7 @@ ws_port = 8080
 
 [[agents]]
 name = "claude"
-kind = "langgraph"
+kind = "ext_cli"
 provider = "anthropic"
 model = "claude-sonnet-4"
 base_url = "https://api.anthropic.com/v1"
@@ -295,8 +295,8 @@ base_url = "https://api.anthropic.com/v1"
     assert_eq!(specs[0].api_key.as_deref(), Some("sk-test"));
     assert_eq!(specs[0].bin, Some(PathBuf::from("/bin/telos")));
 
-    // claude overrides provider/model/base_url, inherits api_key
-    assert_eq!(specs[1].kind, AgentKind::LangGraph);
+    // claude overrides kind, provider/model/base_url, inherits api_key
+    assert_eq!(specs[1].kind, AgentKind::ExtCli);
     assert_eq!(specs[1].provider, "anthropic");
     assert_eq!(specs[1].model, "claude-sonnet-4");
     assert_eq!(specs[1].model_display, "claude-sonnet-4");

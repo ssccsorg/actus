@@ -604,12 +604,6 @@ pub async fn run_with_composition(args: Args, composition: Composition) -> anyho
                     agent_workdir.display()
                 );
             }
-            AgentKind::LangGraph => {
-                tracing::warn!(
-                    "Agent '{}': kind langgraph has no adapter yet, skipping",
-                    spec.name
-                );
-            }
         }
     }
 

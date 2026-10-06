@@ -3,7 +3,7 @@
 // Actus weaves heterogeneous agent platforms behind one thin execution
 // interface, the same way neXus weaves heterogeneous FIH storage types
 // behind one knowledge fabric. A platform adapter (the acpws bridge and the
-// CLI adapter now, a LangGraph adapter later) implements `AgentBackend`; the
+// CLI adapter) implements `AgentBackend`; the
 // registry maps agent names to running adapters; HTTP handlers talk only
 // to the trait.
 
@@ -26,8 +26,6 @@ pub enum AgentKind {
     /// protocol, and the executor implementing it is named by the configuration.
     #[serde(rename = "acpws", alias = "telos")]
     Acpws,
-    /// LangGraph Server over REST/SSE. Future adapter.
-    LangGraph,
     /// Any external CLI binary as an auxiliary agent. Raw transport: per
     /// turn, actus spawns `bin <args...> <prompt>` and records the output.
     /// Ante is the first attached binary (`cli_args = ["-p"]`).
@@ -36,16 +34,11 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
-    pub const ALL: [AgentKind; 3] = [
-        AgentKind::Acpws,
-        AgentKind::LangGraph,
-        AgentKind::ExtCli,
-    ];
+    pub const ALL: [AgentKind; 2] = [AgentKind::Acpws, AgentKind::ExtCli];
 
     pub fn as_str(self) -> &'static str {
         match self {
             AgentKind::Acpws => "acpws",
-            AgentKind::LangGraph => "langgraph",
             AgentKind::ExtCli => "ext_cli",
         }
     }
@@ -71,14 +64,6 @@ impl AgentKind {
                 approval: true,
                 parallel: false,
                 transport: "acpws",
-            },
-            AgentKind::LangGraph => AgentCapabilities {
-                sessionful: true,
-                streaming: true,
-                tools: true,
-                approval: false,
-                parallel: false,
-                transport: "rest_sse",
             },
             AgentKind::ExtCli => AgentCapabilities {
                 sessionful: false,

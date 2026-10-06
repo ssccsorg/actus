@@ -24,7 +24,6 @@ fn agent_kind_roundtrip() {
     // The name this kind carried before it was named for what it is. A
     // configuration written against the old name keeps parsing.
     assert_eq!(AgentKind::parse("telos"), Some(AgentKind::Acpws));
-    assert_eq!(AgentKind::parse("langgraph"), Some(AgentKind::LangGraph));
     assert_eq!(AgentKind::parse("unknown"), None);
     assert_eq!(AgentKind::Acpws.as_str(), "acpws");
     assert_eq!(
@@ -37,8 +36,8 @@ fn agent_kind_roundtrip() {
         "an old configuration still deserializes"
     );
     assert_eq!(
-        serde_json::from_str::<AgentKind>("\"langgraph\"").unwrap(),
-        AgentKind::LangGraph
+        serde_json::from_str::<AgentKind>("\"acpws\"").unwrap(),
+        AgentKind::Acpws
     );
 }
 
