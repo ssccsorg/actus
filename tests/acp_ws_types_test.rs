@@ -179,3 +179,42 @@ fn incoming_chat_message_roundtrip_and_defaults() {
     assert_eq!(parsed.agent_name, None);
     assert!(!parsed.interrupt);
 }
+
+/// The contract tolerates a field the executor left out: a peer that says less is speaking the
+/// same contract. A field of the wrong type is refused, and so is an event the contract does
+/// not name, which is the difference between writing the contract down and reading whatever
+/// arrives.
+#[test]
+fn an_absent_field_is_tolerated_and_a_wrong_type_is_not() {
+    let sparse =
+        r#"{"event_type":"message_added","data":{"acp_thread_id":"a","message_id":"1","content":"hi"}}"#;
+    let event: SyncEvent = serde_json::from_str(sparse).expect("a sparse event parses");
+    match event {
+        SyncEvent::MessageAdded {
+            role,
+            entry_type,
+            timestamp,
+            ..
+        } => {
+            assert!(
+                role.is_empty(),
+                "an absent role is empty, and the dispatch names the default"
+            );
+            assert!(entry_type.is_empty());
+            assert_eq!(timestamp, 0);
+        }
+        other => panic!("not the variant the tag named: {other:?}"),
+    }
+
+    let wrong_type = r#"{"event_type":"message_added","data":{"acp_thread_id":"a","content":5}}"#;
+    assert!(
+        serde_json::from_str::<SyncEvent>(wrong_type).is_err(),
+        "a field of the wrong type is refused"
+    );
+
+    let unknown = r#"{"event_type":"something_new","data":{}}"#;
+    assert!(
+        serde_json::from_str::<SyncEvent>(unknown).is_err(),
+        "an event the contract does not name is refused, and the caller ignores it"
+    );
+}

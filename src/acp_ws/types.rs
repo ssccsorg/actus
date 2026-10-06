@@ -1,10 +1,16 @@
 #![allow(dead_code)]
 
-// Protocol types for the actus-telos WebSocket contract.
+// The agent sync contract: what an executor sends over the WebSocket, and what actus
+// sends back.
 //
-// The wire shapes mirror the sync events exchanged with the telos agent.
-// Only the types actus actually needs are kept; the upstream crate that
-// defines the full protocol lives in the telos repository.
+// This is the actus side of a contract whose fuller form is the executor's own wire
+// protocol. Only the events and commands actus depends on are here, and every field is
+// tolerated as absent: a peer that omits one is speaking the contract with less detail
+// rather than a different one. A field of a wrong type is not tolerated, which is the
+// point of writing the contract down.
+//
+// actus is a peer, not the authority. An event this file does not name is ignored rather
+// than refused, so a newer executor can send one before this end learns it.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,13 +31,17 @@ pub enum SyncEvent {
     /// Sent when Telos creates a new ACP thread in response to a chat_message.
     #[serde(rename = "thread_created")]
     ThreadCreated {
+        #[serde(default)]
         acp_thread_id: String,
+        #[serde(default)]
         request_id: String,
     },
     /// Sent when thread title changes in Telos.
     #[serde(rename = "thread_title_changed")]
     ThreadTitleChanged {
+        #[serde(default)]
         acp_thread_id: String,
+        #[serde(default)]
         title: String,
     },
     /// Sent while AI is streaming response content.
@@ -39,9 +49,13 @@ pub enum SyncEvent {
     /// "tool_call" (tool invocation).
     #[serde(rename = "message_added")]
     MessageAdded {
+        #[serde(default)]
         acp_thread_id: String,
+        #[serde(default)]
         message_id: String,
+        #[serde(default)]
         role: String,
+        #[serde(default)]
         content: String,
         #[serde(default)]
         request_id: String,
@@ -51,38 +65,51 @@ pub enum SyncEvent {
         tool_name: String,
         #[serde(default)]
         tool_status: String,
+        #[serde(default)]
         timestamp: i64,
     },
     /// Sent when AI finishes responding.
     #[serde(rename = "message_completed")]
     MessageCompleted {
+        #[serde(default)]
         acp_thread_id: String,
+        #[serde(default)]
         message_id: String,
+        #[serde(default)]
         request_id: String,
     },
     /// Sent when a turn aborts (agent crash, max tokens, etc.).
     #[serde(rename = "chat_response_error")]
     ChatResponseError {
+        #[serde(default)]
         request_id: String,
+        #[serde(default)]
         error: String,
     },
     /// Sent when the agent has finished initialization and is ready.
     #[serde(rename = "agent_ready")]
     AgentReady {
+        #[serde(default)]
         agent_name: String,
+        #[serde(default)]
         thread_id: Option<String>,
     },
     /// Response to cancel_current_turn.
     #[serde(rename = "turn_cancelled")]
     TurnCancelled {
+        #[serde(default)]
         request_id: String,
+        #[serde(default)]
         status: String,
     },
     /// Sent when the agent requests permission for a tool call (ask mode).
     #[serde(rename = "tool_call_authorization_requested")]
     ToolCallAuthorizationRequested {
+        #[serde(default)]
         acp_thread_id: String,
+        #[serde(default)]
         tool_call_id: String,
+        #[serde(default)]
         tool_name: String,
     },
 }

@@ -1,14 +1,13 @@
-// WebSocket control — server loop and event dispatch for Telos communication.
+// WebSocket control: the server loop, and the dispatch of one event into the record.
 //
-// Manages the WebSocket connection between actus (server) and the Telos
-// process (client). The connection loop handles:
-// - Accepting incoming WS connections from Telos
-// - Forwarding commands (chat_message, cancel) from actus to Telos
-// - Receiving events (message_added, message_completed) from Telos
+// Manages the WebSocket connection between actus (server) and the executor (client).
+// The connection loop handles:
+// - Accepting incoming WS connections from the executor
+// - Forwarding commands (chat_message, cancel) to it
+// - Receiving events (message_added, message_completed) from it
 // - Automatic reconnection when the WS drops
 //
-// This is the actus-side counterpart to the websocket_sync module the
-// telos binary vendors: a simpler, single-runtime implementation.
+// This is the actus side of the sync contract; the executor implements the other side.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,8 +19,9 @@ use tokio_tungstenite::accept_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::server::WsCommandTx;
+use crate::acp_ws::types::SyncEvent;
 use crate::acp_ws::AcpWsManager;
+use crate::server::WsCommandTx;
 
 /// Run the WebSocket server that accepts connections from the Telos process.
 ///
@@ -227,7 +227,8 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text:
     let event_type = msg
         .get("event_type")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
     tracing::debug!("WS event type: '{}'", event_type);
 
     // Update event timestamp for health monitor.
@@ -242,35 +243,33 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text:
         }
     }
 
-    let data = msg
-        .get("data")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
+    // The event as the contract defines it. A keepalive and any event the contract does not
+    // name land in the error arm, which is the clock update above having already happened.
+    let event: SyncEvent = match serde_json::from_value(msg) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::debug!("event '{}' is not in the contract: {}", event_type, error);
+            return;
+        }
+    };
 
-    match event_type {
-        "ping" => {}
-        "agent_ready" => {
+    match event {
+        SyncEvent::AgentReady { agent_name, .. } => {
             let mut mgr = agent_manager.write().await;
             mgr.agent_ready = true;
             tracing::info!(
                 "Agent ready ({})",
-                data.get("agent_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?")
+                if agent_name.is_empty() {
+                    "?"
+                } else {
+                    agent_name.as_str()
+                }
             );
         }
-        "thread_created" => {
-            let acp_id = data
-                .get("acp_thread_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let rid = data
-                .get("request_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        SyncEvent::ThreadCreated {
+            acp_thread_id: acp_id,
+            request_id: rid,
+        } => {
             let mut mgr = agent_manager.write().await;
             tracing::info!("Thread created: {}", acp_id);
 
@@ -309,36 +308,36 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text:
             mgr.notify_thread_change();
             mgr.save_threads();
         }
-        "message_added" => {
-            let acp_id = data
-                .get("acp_thread_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let content = data
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let role = data
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("assistant")
-                .to_string();
-            // Message ids are only unique within one ACP thread: Telos starts
-            // numbering from 1 again for each new thread, and a local actus
-            // thread accumulates messages from several ACP threads over
-            // its lifetime (each resume creates a fresh ACP thread). Scope
-            // the id with the acp_thread_id so in-place streaming updates
-            // never collide with a previous thread's message of the same
-            // id.
-            let msg_id = data
-                .get("message_id")
-                .and_then(|v| v.as_str())
-                .map(|s| format!("{}:{}", acp_id, s));
-            let entry_type = data.get("entry_type").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let tool_name = data.get("tool_name").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let tool_status = data.get("tool_status").and_then(|v| v.as_str()).map(|s| s.to_string());
+        // A title the executor sends is not taken: actus names a thread by the first thing
+        // said in it, which is the name the rail and the bar show.
+        SyncEvent::ThreadTitleChanged { .. } => {}
+        SyncEvent::MessageAdded {
+            acp_thread_id: acp_id,
+            content,
+            role,
+            message_id,
+            entry_type,
+            tool_name,
+            tool_status,
+            ..
+        } => {
+            // An absent role is the assistant's: the executor sends a person's line with the
+            // role it was given, and its own prose without one.
+            let role = if role.is_empty() {
+                "assistant".to_string()
+            } else {
+                role
+            };
+            // Message ids are only unique within one ACP thread: the executor starts
+            // numbering from 1 again for each new thread, and a local actus thread
+            // accumulates messages from several of them over its lifetime (each resume
+            // creates a fresh one). Scope the id with the acp_thread_id so in-place
+            // streaming updates never collide with a previous thread's message of the
+            // same id.
+            let msg_id = (!message_id.is_empty()).then(|| format!("{}:{}", acp_id, message_id));
+            let entry_type = (!entry_type.is_empty()).then_some(entry_type);
+            let tool_name = (!tool_name.is_empty()).then_some(tool_name);
+            let tool_status = (!tool_status.is_empty()).then_some(tool_status);
 
             tracing::debug!(
                 "message_added: acp_id={}, role={}, content_len={}",
@@ -367,17 +366,11 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text:
             mgr.notify_thread_change();
             mgr.save_threads();
         }
-        "message_completed" => {
-            let acp_id = data
-                .get("acp_thread_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let request_id = data
-                .get("request_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        SyncEvent::MessageCompleted {
+            acp_thread_id: acp_id,
+            request_id,
+            ..
+        } => {
             let mut mgr = agent_manager.write().await;
             // Consume the request mapping instead of deleting it: a
             // duplicate completion (interrupt race, wrapper replay) for
@@ -466,13 +459,12 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text:
                 &acp_id[..acp_id.len().min(12)]
             );
         }
-        "chat_response_error" => {
-            let error = data.get("error").and_then(|v| v.as_str()).unwrap_or("?");
-            let request_id = data
-                .get("request_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        SyncEvent::ChatResponseError {
+            request_id,
+            error,
+            ..
+        } => {
+            let error = if error.is_empty() { "?" } else { error.as_str() };
             let mut mgr = agent_manager.write().await;
             // Drop a duplicate error for an already-consumed request_id,
             // and record the turn so the poll/SSE index stays aligned. The
@@ -514,13 +506,12 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text:
             mgr.notify_thread_change();
             tracing::error!("Chat response error (req {}): {}", &request_id[..request_id.len().min(12)], error);
         }
-        "turn_cancelled" => {
-            let request_id = data
-                .get("request_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+        SyncEvent::TurnCancelled {
+            request_id,
+            status,
+            ..
+        } => {
+            let status = if status.is_empty() { "?" } else { status.as_str() };
             let mut mgr = agent_manager.write().await;
             // A cancelled turn never fires message_completed; consume the
             // pending entry so reconnection does not resend it, the health
@@ -564,22 +555,16 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text:
             mgr.notify_thread_change();
             tracing::info!("Turn cancelled (req {}, status {})", &request_id[..request_id.len().min(12)], status);
         }
-        "tool_call_authorization_requested" => {
-            let acp_thread_id = data
-                .get("acp_thread_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let tool_call_id = data
-                .get("tool_call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let tool_name = data
-                .get("tool_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?")
-                .to_string();
+        SyncEvent::ToolCallAuthorizationRequested {
+            acp_thread_id,
+            tool_call_id,
+            tool_name,
+        } => {
+            let tool_name = if tool_name.is_empty() {
+                "?".to_string()
+            } else {
+                tool_name
+            };
             let mut mgr = agent_manager.write().await;
             mgr.pending_authorizations.insert(
                 tool_call_id.clone(),
@@ -595,9 +580,6 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text:
                 tool_name,
                 &acp_thread_id[..acp_thread_id.len().min(12)]
             );
-        }
-        _ => {
-            tracing::debug!("Unhandled WS event type: {}", event_type);
         }
     }
 }
