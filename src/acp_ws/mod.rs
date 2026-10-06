@@ -8,27 +8,13 @@ use crate::agent::config::AgentSpec;
 use crate::agent::{PendingAuthorization, ThreadMessage, ThreadSession};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Channel sender for WebSocket commands to Telos. Shared between
+/// Channel sender for WebSocket commands to the executor. Shared between
 /// `AppState` and `AcpWsManager` so cancel can send without acquiring the
 /// `AcpWsManager` RwLock (avoiding lock contention with long-running SSE
 /// handlers).
 pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
 
-/// Truncate `s` to at most `max` bytes without splitting a UTF-8
-/// character. Returns the original string when it is already short
-/// enough; otherwise the longest prefix that ends on a char boundary.
-pub(crate) fn truncate_utf8(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
-// Telos manager — WebSocket connection, session management, and settings bootstrap
+// ACP-over-WebSocket manager: connection, session management, and settings bootstrap.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -39,16 +25,18 @@ use serde_json;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 use uuid::Uuid;
 
-/// Manages a single Telos WebSocket connection and message dispatch.
+use crate::util::truncate_utf8;
+
+/// Manages a single executor WebSocket connection and message dispatch.
 #[allow(dead_code)]
 pub struct AcpWsManager {
     pub session_id: String,
     pub ws_host: String,
     pub agent_connected: bool,
     pub agent_ready: bool,
-    /// Channel to send WebSocket commands to Telos
+    /// Channel to send WebSocket commands to the executor
     pub ws_tx: Option<mpsc::UnboundedSender<String>>,
-    /// Threads managed by this Telos instance, as their metadata and, for a thread this
+    /// Threads managed by this executor session, as their metadata and, for a thread this
     /// session has touched, its messages. A store that does not need the whole state is
     /// asked for the index, and a thread's messages are read from it when the thread is
     /// first worked on, so what a host holds is the threads in use rather than the volume.

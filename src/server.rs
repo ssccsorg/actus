@@ -19,12 +19,12 @@ use std::time::Duration;
 
 use std::path::PathBuf;
 
+pub use crate::acp_ws::WsCommandTx;
 use crate::agent::config::ControlPolicy;
 use crate::agent::{AgentBackend, AgentRegistry, AgentStatus, ThreadMessage, ThreadParent};
 use crate::context;
 use crate::files;
 use crate::git;
-pub use crate::acp_ws::WsCommandTx;
 
 // ── App State ──────────────────────────────────────────────────────────
 

@@ -11,13 +11,13 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::{Notify, RwLock};
 
+use crate::acp_ws::{AcpWsManager, WsCommandTx};
 use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
     ThreadParent, ThreadSession, NOTE_ROLE,
 };
-use crate::acp_ws::{AcpWsManager, WsCommandTx};
 
-/// One Telos agent instance behind the fabric interface.
+/// One executor agent instance behind the fabric interface.
 pub struct AcpWsBackend {
     /// Name this instance answers to. The registry keys on it and routing
     /// looks it up, so it has to be the configured agent name: a constant

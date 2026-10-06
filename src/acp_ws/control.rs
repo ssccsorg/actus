@@ -178,12 +178,12 @@ async fn handle_ws_message(
     match msg {
         Some(Ok(Message::Text(text))) => {
             tracing::debug!("WS recv ({} bytes): {}", text.len(), &text[..text.len().min(200)]);
-            handle_telos_event(agent_manager, &text).await;
+            handle_agent_event(agent_manager, &text).await;
             true
         }
         Some(Ok(Message::Binary(data))) => {
             if let Ok(text) = String::from_utf8(data.to_vec()) {
-                handle_telos_event(agent_manager, &text).await;
+                handle_agent_event(agent_manager, &text).await;
             } else {
                 tracing::warn!("Non-UTF-8 binary WS message ({} bytes)", data.len());
             }
@@ -213,7 +213,7 @@ async fn handle_ws_message(
 ///
 /// Public so integration tests can drive the event loop directly without
 /// a WebSocket connection.
-pub async fn handle_telos_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text: &str) {
+pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpWsManager>>, text: &str) {
     tracing::debug!("WS event: {}", &text[..text.len().min(200)]);
 
     let msg: serde_json::Value = match serde_json::from_str(text) {

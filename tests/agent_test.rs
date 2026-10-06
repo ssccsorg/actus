@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
+use actus::acp_ws::backend::AcpWsBackend;
+use actus::acp_ws::control::handle_agent_event;
+use actus::acp_ws::{WsCommandTx, AcpWsManager};
 use actus::agent::{AgentBackend, AgentKind, AgentRegistry};
 use actus::store::RecordStore;
-use actus::acp_ws::backend::AcpWsBackend;
-use actus::acp_ws::control::handle_telos_event;
-use actus::acp_ws::{WsCommandTx, AcpWsManager};
 use tokio::sync::RwLock;
 
 fn agent_manager(dir: &std::path::Path) -> AcpWsManager {
@@ -583,14 +583,14 @@ async fn duplicate_completion_consumed_by_sentinel() {
     }
 
     // First completion: consumes the mapping, bumps the counter.
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-1","request_id":"req-1"}}"#,
     )
     .await;
 
     // Duplicate completion: sentinel present, must be ignored.
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-1","request_id":"req-1"}}"#,
     )
@@ -622,7 +622,7 @@ async fn a_completion_with_no_platform_mapping_lands_by_request_id() {
         tid
     };
 
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-9","request_id":"req-9"}}"#,
     )
@@ -652,7 +652,7 @@ async fn empty_completion_records_error() {
         mgr.pending_requests.insert("req-2".to_string(), tid.clone());
     }
 
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-2","request_id":"req-2"}}"#,
     )
@@ -684,12 +684,12 @@ async fn error_then_completion_consumes_once() {
         mgr.pending_requests.insert("req-3".to_string(), tid.clone());
     }
 
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"chat_response_error","data":{"request_id":"req-3","error":"boom"}}"#,
     )
     .await;
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-3","request_id":"req-3"}}"#,
     )
@@ -722,22 +722,22 @@ async fn replay_of_prior_turn_entry_is_dropped() {
         mgr.thread_id_map.insert("acp-4".to_string(), tid.clone());
         mgr.pending_requests.insert("req-4".to_string(), tid.clone());
     }
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"1","role":"assistant","content":"<thinking>first</thinking>","entry_type":"text"}}"#,
     )
     .await;
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"2","role":"assistant","content":"**Tool Call: ls**","entry_type":"tool_call","tool_name":"ls","tool_status":"Completed"}}"#,
     )
     .await;
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"3","role":"assistant","content":"answer one","entry_type":"text"}}"#,
     )
     .await;
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_completed","data":{"acp_thread_id":"acp-4","request_id":"req-4"}}"#,
     )
@@ -756,18 +756,18 @@ async fn replay_of_prior_turn_entry_is_dropped() {
         mgr.add_message(&tid, "user", "second", None);
         mgr.pending_requests.insert("req-5".to_string(), tid.clone());
     }
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"1","role":"assistant","content":"<thinking>first</thinking>","entry_type":"text"}}"#,
     )
     .await;
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"2","role":"assistant","content":"**Tool Call: ls**","entry_type":"tool_call","tool_name":"ls","tool_status":"Completed"}}"#,
     )
     .await;
     // Genuinely new content under a reused id: must be accepted.
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-4","message_id":"3","role":"assistant","content":"<thinking>second</thinking>","entry_type":"text"}}"#,
     )
@@ -837,7 +837,7 @@ async fn thread_created_after_consumption_is_ignored() {
         mgr.consume_request("req-6");
     }
 
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"thread_created","data":{"acp_thread_id":"acp-6","request_id":"req-6"}}"#,
     )
@@ -867,12 +867,12 @@ async fn error_then_thread_created_ignored() {
         mgr.pending_requests.insert("req-7".to_string(), tid.clone());
     }
 
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"chat_response_error","data":{"request_id":"req-7","error":"boom"}}"#,
     )
     .await;
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"thread_created","data":{"acp_thread_id":"acp-7b","request_id":"req-7"}}"#,
     )
@@ -901,12 +901,12 @@ async fn turn_cancelled_consumes_and_ignores_duplicate() {
         mgr.pending_requests.insert("req-8".to_string(), tid.clone());
     }
 
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"turn_cancelled","data":{"request_id":"req-8","status":"cancelled"}}"#,
     )
     .await;
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"turn_cancelled","data":{"request_id":"req-8","status":"cancelled"}}"#,
     )
@@ -938,7 +938,7 @@ async fn thread_created_and_tool_metadata_flow() {
     };
 
     // thread_created: maps acp-9 to the local thread.
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"thread_created","data":{"acp_thread_id":"acp-9","request_id":"req-9"}}"#,
     )
@@ -956,7 +956,7 @@ async fn thread_created_and_tool_metadata_flow() {
     }
 
     // message_added with tool metadata: scoped id + metadata stored.
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-9","message_id":"7","role":"assistant","content":"**Tool Call: grep**","entry_type":"tool_call","tool_name":"grep","tool_status":"In Progress"}}"#,
     )
@@ -980,7 +980,7 @@ async fn message_added_unknown_thread_ignored() {
     let dir = tempfile::tempdir().unwrap();
     let manager = Arc::new(RwLock::new(agent_manager(dir.path())));
 
-    handle_telos_event(
+    handle_agent_event(
         &manager,
         r#"{"event_type":"message_added","data":{"acp_thread_id":"acp-ghost","message_id":"1","role":"assistant","content":"x"}}"#,
     )

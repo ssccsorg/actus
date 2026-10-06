@@ -16,6 +16,9 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
+use crate::acp_ws::backend::AcpWsBackend;
+use crate::acp_ws::control::run_ws_server;
+use crate::acp_ws::{ensure_agent_settings, launch_agent, AcpWsManager, WsCommandTx};
 use crate::agent::config::{load_config, load_control_policy, AgentDefaults};
 use crate::agent::config::{resolve_llm_settings, unquote_env_value};
 use crate::agent::ext_cli::ExtCliAgent;
@@ -24,9 +27,6 @@ use crate::agent::{AgentKind, AgentRegistry};
 use crate::control;
 use crate::server::{run_http_server, AppState};
 use crate::store::RecordStore;
-use crate::acp_ws::backend::AcpWsBackend;
-use crate::acp_ws::control::run_ws_server;
-use crate::acp_ws::{ensure_agent_settings, launch_agent, AcpWsManager, WsCommandTx};
 
 /// Where an agent's record lives, decided by whoever composes the server.
 pub type StoreFactory = Arc<dyn Fn(&Path) -> Result<Arc<dyn RecordStore>, String> + Send + Sync>;

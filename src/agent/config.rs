@@ -96,10 +96,10 @@ pub struct AgentSpec {
     pub model: String,
     pub model_display: String,
     pub base_url: String,
-    /// LLM API key. Optional at the fabric level; the Telos adapter
-    /// requires one when it launches an agent.
+    /// LLM API key. Optional at the fabric level; the executor the configuration
+    /// launches requires one when it serves an agent.
     pub api_key: Option<String>,
-    /// Telos binary path.
+    /// Path to the executor binary the configuration launches.
     pub bin: PathBuf,
     /// WebSocket port the agent process connects back to.
     pub ws_port: u16,

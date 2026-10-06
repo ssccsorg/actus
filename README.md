@@ -108,7 +108,7 @@ entry.
 ```toml
 [[agents]]
 name = "telos"             # default agent; routed when no agent is named
-kind = "telos"             # telos | langgraph | native (telos default; native is in-process)
+kind = "acp_ws"            # acp_ws | langgraph | native (acp_ws default; the old name "telos" is still accepted)
 provider = "openai-compatible"          # label of the OpenAI-compatible endpoint
 model = "example-model"                 # model served by that endpoint (LLM_MODEL)
 base_url = "https://api.example.com/v1" # base URL of that endpoint (LLM_BASE_URL)
@@ -129,7 +129,7 @@ tool_approval = "always"  # always | ask | never (drives the agent's approval po
 
 [[agents]]
 name = "research"
-kind = "telos"
+kind = "acp_ws"
 provider = "anthropic"
 model = "claude-sonnet-4"
 ws_port = 8081
@@ -209,7 +209,7 @@ of the calling agent.
 ```toml
 [[agents]]
 name = "telos"
-kind = "telos"
+kind = "acp_ws"
 # ...existing fields...
 
   [[agents.mcp]]

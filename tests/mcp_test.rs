@@ -6,10 +6,10 @@
 // Unit tests cover config parsing and settings injection; the scenario
 // test proves an injected stdio entry spawns a working MCP server.
 
+use actus::acp_ws::ensure_agent_settings;
 use actus::agent::config::{
     load_config, AgentDefaults, AgentSpec, McpServer, ToolApproval, DEFAULT_REASONING_EFFORT,
 };
-use actus::acp_ws::ensure_agent_settings;
 use std::path::PathBuf;
 
 fn defaults() -> AgentDefaults {
