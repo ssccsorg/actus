@@ -2,12 +2,11 @@
 //!
 //! A host that names no store gets the document, and a host that names the document gets
 //! it too: one value restores the behavior actus had before the seam, with the messages in
-//! one file and no volume, no socket, and no head beside it.
+//! one file and no head beside it.
 
 use std::collections::HashMap;
 
 use actus::agent::{ThreadMessage, ThreadSession};
-use actus::store::{RecordStore, SocketStore, SocketVolume};
 
 fn message(role: &str, content: &str) -> ThreadMessage {
     ThreadMessage {
@@ -72,29 +71,4 @@ fn the_document_is_the_default_and_holds_the_messages() {
     let read = named.load().expect("load");
     assert_eq!(read["t1"].messages.len(), 2);
     unsafe { std::env::remove_var("ACTUS_RECORD_STORE") };
-}
-
-/// The socket store and the document store are different files. A volume that cannot be
-/// reached fails when the manager loads, which is startup, and it leaves the document
-/// exactly as it was, so a switch back is complete.
-#[test]
-fn a_volume_that_cannot_be_reached_fails_at_startup() {
-    let dir = tempfile::tempdir().expect("tempdir");
-
-    let document = actus::store::open(dir.path()).expect("the document");
-    document.persist(stored("from the document")).expect("persist");
-    let before = std::fs::read_to_string(dir.path().join("threads.json")).expect("the document");
-
-    // Nothing serves this socket, so the store fails where it is opened rather than
-    // answering from the document and calling it a volume.
-    let socket = SocketStore::new(SocketVolume::new(dir.path().join("store.sock")), dir.path());
-    let error = match socket.load() {
-        Ok(_) => panic!("a volume nobody serves must fail at startup"),
-        Err(error) => error,
-    };
-    assert!(error.contains("connect"), "{error}");
-
-    let after = std::fs::read_to_string(dir.path().join("threads.json")).expect("the document");
-    assert_eq!(before, after, "the document was not touched");
-    assert!(!dir.path().join("heads.json").exists(), "no head was written");
 }

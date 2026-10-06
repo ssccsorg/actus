@@ -13,19 +13,14 @@
 
 mod document;
 mod record;
-mod socket;
 mod volume;
 
 pub use document::DocumentStore;
 pub use record::Record;
-pub use socket::SocketVolume;
 pub use volume::{Volume, VolumeStore};
 
-/// The store that reaches an engine in another process, over a socket.
-pub type SocketStore = VolumeStore<SocketVolume>;
-
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::agent::{ThreadMessage, ThreadSession};
@@ -33,13 +28,7 @@ use crate::agent::{ThreadMessage, ThreadSession};
 /// The store a deployment selected. Absent means the document.
 pub const STORE_ENV: &str = "ACTUS_RECORD_STORE";
 
-/// The unix socket a `socket` store connects to. When it is not set, the socket is
-/// `store.sock` in the agent's own directory, which is what lets one host run one volume
-/// per agent without a per-agent variable to name it.
-pub const STORE_SOCKET_ENV: &str = "ACTUS_RECORD_STORE_SOCKET";
-
-/// The document that holds the record, named once for both stores: it is where the
-/// document store writes and where the socket store seeds from.
+/// The document that holds the record.
 const DOCUMENT_FILE: &str = "threads.json";
 
 /// The store a host gets when it names none. Overridable, and that is why it is allowed.
@@ -51,10 +40,7 @@ const DEFAULT_STORE: &str = "document";
 /// a name added here without a suite entry fails the suite rather than reaching a
 /// deployment unexercised. A name a build composes in rather than names, which is what the
 /// product does with the engine, is covered on that side.
-pub const STORES: &[&str] = &["document", "socket"];
-
-/// The socket a `socket` store uses when the environment names none.
-const DEFAULT_SOCKET_FILE: &str = "store.sock";
+pub const STORES: &[&str] = &["document"];
 
 /// A thread's record, kept and read back outside the router.
 ///
@@ -153,15 +139,6 @@ pub fn open(dir: &Path) -> Result<Arc<dyn RecordStore>, String> {
     let name = std::env::var(STORE_ENV).unwrap_or_else(|_| DEFAULT_STORE.to_string());
     match name.as_str() {
         "document" => Ok(Arc::new(DocumentStore::new(dir.join(DOCUMENT_FILE)))),
-        "socket" => {
-            // The socket is the deployment's address. An explicit one is used as it is;
-            // otherwise it follows the agent's own directory, because the environment is
-            // one value for the process and a host runs one volume per agent.
-            let socket = std::env::var(STORE_SOCKET_ENV)
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| dir.join(DEFAULT_SOCKET_FILE));
-            Ok(Arc::new(VolumeStore::new(SocketVolume::new(socket), dir)))
-        }
         other => Err(format!(
             "{STORE_ENV}={other} names no store: the stores are {}",
             STORES.join(", ")

@@ -303,18 +303,23 @@ fn every_selectable_store_is_covered() {
                 let dir = tempfile::tempdir().expect("dir");
                 contract(&*document_store(dir.path()));
             }
-            "socket" => {
-                // The socket shape's mechanism is the volume store over a volume that
-                // reaches another process; the store under it is what the suite exercises.
-                let dir = tempfile::tempdir().expect("dir");
-                let (volume, _) = volume_store(dir.path());
-                contract(&*volume);
-            }
             other => panic!(
                 "'{other}' is selectable and the integrity suite does not cover it: add it here"
             ),
         }
     }
+}
+
+/// The volume shape, held to the same contract.
+///
+/// No selector reaches it any more: a composition supplies it, which is what this
+/// deployment does with the engine, and that is the shape a device's record lives in. So it
+/// is exercised here by the name it has rather than under a store name nothing can choose.
+#[test]
+fn the_composed_shape_is_held_to_the_same_contract() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (volume, _) = volume_store(dir.path());
+    contract(&*volume);
 }
 
 /// The same two shapes see the same input the same way, which is what a deployment moves
