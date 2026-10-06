@@ -24,10 +24,12 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
-# Respect a pre-configured TELOS_BIN (e.g. CI sets TELOS_BIN=/bin/true);
-# default to the sibling telos build, the only agent binary actus runs.
-if [ -z "${TELOS_BIN:-}" ]; then
-    TELOS_BIN="$SCRIPT_DIR/../telos/target/telos-release/tel"
+# The executor binary this run launches. This is the one place that knows the sibling
+# build, because actus names no path of its own: the value goes on with --bin and is
+# exported for the scenario harness. Set ACTUS_EXECUTOR_BIN to launch another binary
+# (CI sets /bin/true for the mock tier).
+if [ -z "${ACTUS_EXECUTOR_BIN:-}" ]; then
+    ACTUS_EXECUTOR_BIN="$SCRIPT_DIR/../telos/target/telos-release/tel"
 fi
 SERVER_LOG="/tmp/actus-server.log"
 HTTP_PORT="${ACTUS_HTTP_PORT:-9090}"
@@ -309,11 +311,11 @@ test_llm_chat() {
 # ── Server start ──────────────────────────────────────────────────────
 
 ensure_telos_binary() {
-    if [ -f "$TELOS_BIN" ]; then
-        pass "Agent binary: $TELOS_BIN"
+    if [ -f "$ACTUS_EXECUTOR_BIN" ]; then
+        pass "Agent binary: $ACTUS_EXECUTOR_BIN"
         return 0
     fi
-    info "Agent binary not found at $TELOS_BIN"
+    info "Agent binary not found at $ACTUS_EXECUTOR_BIN"
     warn "Build the sibling telos repo first (cargo build --profile telos-release -p telos), then retry. Agent integration tests are skipped until the binary exists."
     return 1
 }
@@ -337,8 +339,8 @@ start_server() {
         "--server-only"
     )
     [ -n "$api_key" ] && runner_args+=("--api-key" "$api_key")
-    if [ -f "$TELOS_BIN" ]; then
-        runner_args+=("--bin" "$TELOS_BIN")
+    if [ -f "$ACTUS_EXECUTOR_BIN" ]; then
+        runner_args+=("--bin" "$ACTUS_EXECUTOR_BIN")
     fi
 
     info "HTTP:  http://127.0.0.1:$HTTP_PORT"
@@ -441,7 +443,7 @@ run_scenarios() {
     # output to a log, and buffered prints would hide a long-running
     # scenario until it exits.
     ACTUS_HTTP_PORT="$HTTP_PORT" ACTUS_WS_PORT="$WS_PORT" \
-        TELOS_BIN="$TELOS_BIN" SOAK_MINUTES="$soak" \
+        ACTUS_EXECUTOR_BIN="$ACTUS_EXECUTOR_BIN" SOAK_MINUTES="$soak" \
         SCENARIOS_DEADLINE_S="$deadline" \
         python3 -u "$SCRIPT_DIR/tests/scenarios.py" &
     local scenario_pid=$!

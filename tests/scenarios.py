@@ -27,9 +27,16 @@ from pathlib import Path
 PORT = int(os.environ.get("ACTUS_HTTP_PORT", "9090"))
 BASE = f"http://127.0.0.1:{PORT}"
 WS_PORT = int(os.environ.get("ACTUS_WS_PORT", "8080"))
-TELOS_BIN = os.environ.get(
-    "TELOS_BIN", "../telos/target/telos-release/tel"
-)
+# The executor binary this harness launches. Actus names no path of its own, so the
+# run names it: run.sh computes the sibling build and exports this, and CI sets it. A
+# default here would be the same guess at a machine's layout the library refuses.
+ACTUS_EXECUTOR_BIN = os.environ.get("ACTUS_EXECUTOR_BIN")
+if not ACTUS_EXECUTOR_BIN:
+    raise SystemExit(
+        "the executor binary is not named: set ACTUS_EXECUTOR_BIN to the agent "
+        "binary this run should launch, or start through run.sh, which names the "
+        "sibling build"
+    )
 SOAK_MINUTES = float(os.environ.get("SOAK_MINUTES", "2"))
 # Deterministic contract mode: the agent runs with TELOS_STUB_BACKEND=1 and
 # answers every prompt with a fixed string. No LLM API key is involved, so
@@ -137,14 +144,14 @@ def check_stub_response(thread):
 # ── agent process management ───────────────────────────────────────────
 
 def _agent_pid_patterns():
-    # Match the agent binary actually pinned for this run (TELOS_BIN), not a
+    # Match the agent binary actually pinned for this run (ACTUS_EXECUTOR_BIN), not a
     # hardcoded sibling layout, so reconnect scenarios stay deterministic
-    # whether TELOS_BIN points at a local copy, the sibling release build,
+    # whether ACTUS_EXECUTOR_BIN points at a local copy, the sibling release build,
     # or the CI image path.
     # Require the headless flag: the actus server command line also carries
     # the binary path (as --bin), so matching the path alone would kill the
     # server along with the agent.
-    patterns = [re.escape(os.path.abspath(TELOS_BIN)) + r" +--headless"]
+    patterns = [re.escape(os.path.abspath(ACTUS_EXECUTOR_BIN)) + r" +--headless"]
     # Fallback: canonical telos-release layout (CI image path).
     patterns.append(r"telos-release/(tel|telos) +--headless")
     return patterns
@@ -202,7 +209,7 @@ def agent_launch_contract(pid):
 
 def relaunch_agent(env, user_data_dir, workdir):
     args = [
-        os.path.abspath(TELOS_BIN),
+        os.path.abspath(ACTUS_EXECUTOR_BIN),
         "--headless", "--allow-multiple-instances",
         "--user-data-dir", user_data_dir or "/tmp",
         workdir,
@@ -491,7 +498,7 @@ def scenario_soak():
 # ── main ───────────────────────────────────────────────────────────────
 
 def main():
-    print(f"scenarios: http {BASE}, agent {os.path.abspath(TELOS_BIN)}")
+    print(f"scenarios: http {BASE}, agent {os.path.abspath(ACTUS_EXECUTOR_BIN)}")
     deadline_s = float(os.environ.get("SCENARIOS_DEADLINE_S", "0") or 0)
     start = time.time()
     h = wait_ready(timeout=40)

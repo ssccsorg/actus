@@ -43,7 +43,7 @@ jobs:
           # workflow.
           docker run --rm \
             -e CI \
-            -e TELOS_BIN=/bin/true \
+            -e ACTUS_EXECUTOR_BIN=/bin/true \
             -e LLM_API_KEY=ci-skip \
             --entrypoint ./run.sh \
             actus:ci --test
@@ -85,7 +85,7 @@ jobs:
           # otherwise treat actus as a member of the telos workspace.
           docker run --rm \
             -e CI \
-            -e TELOS_BIN=/workspace/target/telos-release/tel \
+            -e ACTUS_EXECUTOR_BIN=/workspace/target/telos-release/tel \
             -e LLM_API_KEY=ci-skip \
             -e TELOS_STUB_BACKEND=1 \
             -v "$GITHUB_WORKSPACE:/home/actus" \

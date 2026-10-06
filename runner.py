@@ -31,8 +31,10 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent  # actus/
 PROJECT_DIR = SCRIPT_DIR                        # actus/ = project root
 ACTUS_BIN = PROJECT_DIR / "target" / "debug" / "actus"
-# Default agent binary: the sibling telos repo's release build.
-TELOS_BIN = PROJECT_DIR.parent / "telos" / "target" / "telos-release" / "tel"
+# The executor binary a run launches. Actus names no path of its own, so this is the
+# environment or --bin, which wins. A default here would be the same guess at a
+# machine's layout that the library refuses to make.
+ACTUS_EXECUTOR_BIN = os.environ.get("ACTUS_EXECUTOR_BIN")
 TERMINAL = SCRIPT_DIR / "terminal.py"
 
 
@@ -71,8 +73,8 @@ def build_rust_cmd(bin_path: Path, args: argparse.Namespace) -> list[str]:
     ]
     if args.bin:
         cmd += ["--bin", args.bin]
-    elif TELOS_BIN.exists():
-        cmd += ["--bin", str(TELOS_BIN)]
+    elif ACTUS_EXECUTOR_BIN:
+        cmd += ["--bin", ACTUS_EXECUTOR_BIN]
     if args.api_key:
         cmd += ["--api-key", args.api_key]
     if args.provider:
@@ -91,7 +93,7 @@ def main():
     parser.add_argument("--workdir", default=os.getcwd(), help="Working directory")
     parser.add_argument("--http-port", type=int, default=int(os.environ.get("ACTUS_HTTP_PORT", "9090")), help="HTTP API port")
     parser.add_argument("--ws-port", type=int, default=int(os.environ.get("ACTUS_WS_PORT", "8080")), help="WebSocket port")
-    parser.add_argument("--bin", help="Telos binary path")
+    parser.add_argument("--bin", help="Executor binary path")
     parser.add_argument("--api-key", help="LLM API key")
     parser.add_argument("--provider", default=os.environ.get("LLM_PROVIDER", ""), help="LLM provider")
     parser.add_argument("--base-url", default=os.environ.get("LLM_BASE_URL", ""), help="LLM base URL")
