@@ -134,9 +134,12 @@ def main():
                 os.environ.setdefault(key, value)
 
     # The declaration of the agent this run launches. A .env that names one wins, and so does
-    # an ACTUS_CONFIG the caller exported.
+    # an ACTUS_CONFIG the caller exported. The line below is what keeps the choice visible:
+    # a run that names this repository's declaration says so, because actus's own fallback
+    # (~/.actus/config.toml) is then not the file in use.
     if not os.environ.get("ACTUS_CONFIG") and DEV_CONFIG.exists():
         os.environ["ACTUS_CONFIG"] = str(DEV_CONFIG)
+        print(f"agent config: {DEV_CONFIG}", file=sys.stderr)
 
     # Resolve API key
     api_key = args.api_key or os.environ.get("LLM_API_KEY", "")

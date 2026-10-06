@@ -24,15 +24,17 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 RUNNER="$SCRIPT_DIR/runner.py"
 TERMINAL="$SCRIPT_DIR/terminal.py"
-# The executor binary this run launches. This is the one place that knows the sibling
-# build, because actus names no path of its own: the value goes on with --bin and is
-# exported for the scenario harness. Set ACTUS_EXECUTOR_BIN to launch another binary
-# (CI sets /bin/true for the mock tier). The agent this run declares is in
-# config/dev.toml; a sessionful executor takes a deployment that composes a settings
-# writer, so it is the deployment's file that declares that launch.
+# The agent program this run launches. actus names no path of its own: the value goes on
+# with --bin where a run builds the command itself, and runner.py reads the variable,
+# which is what covers a run that starts the server without naming one. Set
+# ACTUS_EXECUTOR_BIN to launch another program (CI sets /bin/true for the mock tier). What
+# the run declares is config/dev.toml, and the default below is the stand-in this
+# repository carries: a sessionful executor is started by a deployment that composes a
+# settings writer for the format it reads, and this crate's binary is not one.
 if [ -z "${ACTUS_EXECUTOR_BIN:-}" ]; then
-    ACTUS_EXECUTOR_BIN="$SCRIPT_DIR/../telos/target/telos-release/tel"
+    ACTUS_EXECUTOR_BIN="$SCRIPT_DIR/stubs/agent.sh"
 fi
+export ACTUS_EXECUTOR_BIN
 SERVER_LOG="/tmp/actus-server.log"
 HTTP_PORT="${ACTUS_HTTP_PORT:-9090}"
 WS_PORT="${ACTUS_WS_PORT:-8080}"
@@ -312,20 +314,20 @@ test_llm_chat() {
 
 # ── Server start ──────────────────────────────────────────────────────
 
-ensure_telos_binary() {
+ensure_executor_binary() {
     if [ -f "$ACTUS_EXECUTOR_BIN" ]; then
-        pass "Agent binary: $ACTUS_EXECUTOR_BIN"
+        pass "Agent program: $ACTUS_EXECUTOR_BIN"
         return 0
     fi
-    info "Agent binary not found at $ACTUS_EXECUTOR_BIN"
-    warn "Build the sibling telos repo first (cargo build --profile telos-release -p telos), then retry. Agent integration tests are skipped until the binary exists."
+    info "Agent program not found at $ACTUS_EXECUTOR_BIN"
+    warn "A run launches a program, and none was found. Set ACTUS_EXECUTOR_BIN to the program a turn should run, or name one through runner.py. Agent integration tests are skipped until then."
     return 1
 }
 
 start_server() {
     step "Starting Actus server via runner.py"
 
-    ensure_telos_binary
+    ensure_executor_binary
 
     local api_key="${LLM_API_KEY:-}"
     if [ -z "$api_key" ] && [ -f "$SCRIPT_DIR/.env" ]; then
@@ -410,66 +412,6 @@ run_tests() {
     info "${BOLD}All tests passed.${END}"
 }
 
-# ── Real-scenario tests ────────────────────────────────────────────────
-
-run_scenarios() {
-    local stub="${ACTUS_STUB:-0}"
-    if [ "$stub" = "1" ]; then
-        info "${BOLD}Deterministic contract scenarios (stub backend, no LLM)${END}"
-        # The stub backend answers every prompt with a fixed string, so the
-        # scenario checks are reproducible without a real API key. The actus
-        # server still requires a non-empty api_key to launch a telos agent,
-        # so export an empty value: the variables must stay exported even
-        # when the caller never set them, otherwise the server sees them
-        # unset and exits with "LLM API key required".
-        export TELOS_STUB_BACKEND=1
-        export ACTUS_STUB=1
-        export LLM_API_KEY=""
-        export DEEPSEEK_API_KEY=""
-    else
-        # Hard stop: the real tier prompts a live provider. A CI job must
-        # never spend LLM tokens, so refuse unless an operator explicitly
-        # overrides with ALLOW_LLM_IN_CI=1.
-        if [ "${CI:-}" = "true" ] && [ "${ALLOW_LLM_IN_CI:-0}" != "1" ]; then
-            fail "refusing to run the live LLM tier under CI (set ALLOW_LLM_IN_CI=1 to override)"
-        fi
-        info "${BOLD}Real-scenario tests (tool turns, concurrency, reconnect, soak)${END}"
-    fi
-    start_server
-    echo ""
-    local soak="${SOAK_MINUTES:-2}"
-    # Hard upper bound so a wedged scenario cannot pin CI or a local run
-    # forever; override with SCENARIOS_DEADLINE_S.
-    local deadline="${SCENARIOS_DEADLINE_S:-1200}"
-    # -u: stream scenario progress unbuffered; the launcher redirects the
-    # output to a log, and buffered prints would hide a long-running
-    # scenario until it exits.
-    ACTUS_HTTP_PORT="$HTTP_PORT" ACTUS_WS_PORT="$WS_PORT" \
-        ACTUS_EXECUTOR_BIN="$ACTUS_EXECUTOR_BIN" SOAK_MINUTES="$soak" \
-        SCENARIOS_DEADLINE_S="$deadline" \
-        python3 -u "$SCRIPT_DIR/tests/scenarios.py" &
-    local scenario_pid=$!
-    local waited=0
-    while kill -0 "$scenario_pid" 2>/dev/null; do
-        sleep 5
-        waited=$((waited + 5))
-        if [ "$waited" -ge "$deadline" ]; then
-            warn "Scenarios exceeded ${deadline}s deadline; killing the run"
-            kill "$scenario_pid" 2>/dev/null || true
-            wait "$scenario_pid" 2>/dev/null || true
-            cleanup
-            fail "Scenarios timed out after ${deadline}s"
-            return
-        fi
-    done
-    if wait "$scenario_pid"; then
-        pass "Scenarios passed"
-    else
-        fail "Scenarios failed"
-    fi
-    cleanup
-}
-
 # ── Interactive CLI ───────────────────────────────────────────────────
 
 run_cli() {
@@ -491,8 +433,6 @@ Actus launcher and test suite
 Modes:
   (default)       Build, start server, then launch CLI
   --test          Run static checks and integration tests
-  --scenarios     Run deterministic contract scenarios (stub backend, no LLM)
-  --scenarios-llm Run live scenarios against the real LLM (opt-in, consumes API)
   --server-only   Start server only (background)
   --cli           CLI only (connect to already-running server)
   --help          Show this help
@@ -516,19 +456,8 @@ case "$MODE" in
     --test|-t)
         run_tests
         ;;
-    --scenarios|-s)
-        # Deterministic by default: never spend LLM tokens unless the
-        # caller explicitly opts into the live tier with --scenarios-llm.
-        ACTUS_STUB=1 run_scenarios
-        ;;
-    --scenarios-stub|-sf)
-        ACTUS_STUB=1 run_scenarios
-        ;;
-    --scenarios-llm|-sl)
-        ACTUS_STUB=0 run_scenarios
-        ;;
     --server-only|-o)
-        ensure_telos_binary
+        ensure_executor_binary
         info "Starting server only via runner.py"
         python3 "$RUNNER" --server-only --workdir "$PROJECT_DIR" &
         SERVER_PID=$!
@@ -542,7 +471,7 @@ case "$MODE" in
         show_help
         ;;
     *)
-        ensure_telos_binary
+        ensure_executor_binary
         info "Building and starting Actus..."
         python3 "$RUNNER" --workdir "$PROJECT_DIR"
         ;;

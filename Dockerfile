@@ -40,6 +40,7 @@ RUN cargo fetch --locked
 COPY src/ src/
 COPY tests/ tests/
 COPY config/ config/
+COPY stubs/ stubs/
 COPY run.sh runner.py terminal.py ./
 
 FROM toolchain AS release
