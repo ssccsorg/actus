@@ -29,6 +29,7 @@ fn stored(content: &str) -> HashMap<String, ThreadSession> {
             id: "t1".to_string(),
             title: Some("a title".to_string()),
             parent: None,
+            waiting: Vec::new(),
             messages: vec![message("user", content), message("assistant", "answer")],
             created_at: chrono::Utc::now(),
             updated_at: None,

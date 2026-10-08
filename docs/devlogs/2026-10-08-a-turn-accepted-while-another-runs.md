@@ -56,6 +56,10 @@ there.
 
 ## The design
 
+Read this section as the design, not as the state: the mark on the message is the part the storage
+refused, and "What landed" below records what replaced it. The reason it looked right is here, and
+the reason it was wrong is there.
+
 A message accepted while a turn runs is recorded in the thread and dispatched when the turn ends.
 Three properties follow from putting it there rather than beside it.
 
@@ -70,6 +74,9 @@ A receipt says the turn is queued, so a caller reports it rather than guessing.
 
 `ThreadMessage` already carries `entry_type` and `author`, so a queued message needs no new type: it
 is a message whose state says queued and whose author is who sent it.
+
+The state on the message is what did not hold. A volume's record is written once, so the state could
+not be cleared, and `ThreadSession::waiting` carries it instead.
 
 ## The queue's semantics, from upstream Zed
 
@@ -136,52 +143,53 @@ absorbing rule Zed found it needed.
 Whether the app's local queue stays. It should: it is what makes a one-user session instant, and it
 is not the same thing as the room's order.
 
-## What the first unit landed
+## What landed, and the design decision the storage forced
 
 The queue is in actus. `AcpwsManager::queued_turns` holds the turns that are waiting, in arrival
 order; `submit_with_options` records the message and queues it when `has_live_request()` says the
-agent is running one; `dispatch_queued` sends the front turn, and the three places a turn can end
-(answered, failed, cancelled) call it through `release_queue` in `src/acpws/control.rs`.
+agent is running one; `dispatch_queued` sends the front turn; the three places a turn can end
+(answered, failed, cancelled) call it through `release_queue`, and so does `agent_ready`, which is
+what lets a rebuilt queue run. `AgentBackend::request_state` answers a turn by the request id its
+receipt carried (`Running`, `Waiting`, `Settled`, `Unknown`), and both the poll and the stream take
+that answer, so a client that names the request it submitted is told about its own turn rather than
+about the thread's counter. A backend that cannot answer says `Unknown` and the counter answers as
+it always did.
 
-Two properties the design claimed are realized, and one and a half are not yet. Which is which
-matters more than the code:
+One part of the design did not survive contact with the storage, and the reversal is the important
+thing in this record.
 
-Realized. A queued message is a user message whose `entry_type` is `queued`, so it is visible in the
-thread to every client, and dispatch clears the state rather than removing the message. And no
-command reaches the executor while another turn runs, because the busy test and the queue are read
-and written under the one manager lock.
+The design said the record would carry the wait: a queued message is a user message whose state says
+it has not run, and dispatch clears that state. That was implemented, and it was wrong. A volume's
+record is written once and never rewritten (`src/store/volume.rs`: a name resolves to an address, so
+a record never changes), and a store that writes one message at a time persists only the messages a
+thread has not deposited yet. So clearing a mark on a message is a write the persistence layer
+discards. A probe confirmed it: after the mark was cleared and the state flushed, the record still
+held it. Two consequences, both bad: a client reading the record after a restart would see a wait
+that had already run, and a queue rebuilt from those marks would run that turn a second time.
 
-Not realized, and the second one is a defect rather than a wait.
+The wait therefore lives in actus's own state about the thread, `ThreadSession::waiting`, which is
+the list of the ids of its messages that are turns which have not run. It sits beside the message
+counts and the title versions, which are carried in the index for the same reason: they are derived,
+the volume cannot cheaply answer them, and the head is rewritten whole on every persist, so a change
+to them is a write the storage can make. What the record holds is the message, and what the index
+holds is which of a thread's messages are still waiting. `is_waiting(&thread.waiting, message)` is
+the single question every reader asks, so `read_turn` keeps the running turn whole and the
+empty-turn check reads past the waits.
 
-1. The queue does not rebuild from the record after a restart. The design says it would, and a
-   queued message is in the record, but the request id and the effort are not, so a restart leaves
-   the message recorded with no turn behind it. That is the same gap a turn already in flight has,
-   and closing it needs either two more fields on the queued message or a derived request id.
-2. The stream does not follow a queued turn, though the poll now does.
-   `AgentBackend::request_state` answers a turn by the request id its receipt carried, with
-   `Running`, `Waiting`, `Settled` and `Unknown`; `AcpwsBackend` answers it from `pending_requests`
-   and `queued_turns`; and the poll takes `request`, so a client that names the request it submitted
-   is answered about that turn rather than about the thread's counter. A backend that cannot answer
-   says `Unknown` and the counter answers as it always did, so an older client and an older server
-   each keep the meaning they had.
+The rebuild is `AcpwsManager::rebuild_queue`, called once at startup: a thread the index marks as
+holding a wait is read, and each waiting message becomes a queued turn. The request id is minted
+because the record does not carry it, and the reasoning effort the turn asked for is not recoverable,
+so a rebuilt turn runs at the thread's own level. Everything else about the wait, the message, its
+author and its place in the order, is the record's.
 
-   The stream still waits on the counter, so it answers a queued submit with one `queued` event and
-   ends, and a caller reads the answer from the thread. Making it exact is the same change one route
-   further, and it needs the stream's delta source (`last_assistant`) to serve nothing while its own
-   turn is waiting, because the thread's last assistant message then belongs to the other turn. That
-   is a unit of its own, and nothing in the product takes that route today: the app and the CLI both
-   drive `run_turn`, which polls.
-
-   The turn the poll serves is fixed, and that half is not optional: `read_turn` took the last
-   user message as the start of the turn in flight, and a queued message is a user message that
-   has not run, so it truncated the running turn to nothing. It now looks for the last message
-   that begins a turn and leaves the waits to the thread read.
-
-   The empty-turn check moved the same way. It asked whether the thread's last message was the
-   person's, which a wait behind the turn is not, so the check now reads past the waits to the
-   last message that belongs to a turn. Merely excluding the waits was wrong in the other
-   direction: a turn that recorded no answer at all went unreported because a wait happened to be
-   behind it. Both directions are pinned in `tests/queued_turn_test.rs`.
+The tests are `tests/queued_turn_test.rs` (the second message waits and then runs, the queue keeps
+arrival order, and the empty check reads past a wait in both directions), `tests/server_test.rs`
+(`poll_does_not_serve_a_turn_that_is_still_waiting`, `a_queued_submit_is_followed_by_the_stream`, and
+`a_poll_by_request_answers_about_that_request`),
+`tests/manager_index_test.rs::a_waiting_turn_is_rebuilt_and_runs_once_the_executor_is_ready` (a
+restart over a volume, which also pins that the clear reaches that volume's record), and
+`kletos/client/tests` (`turn_test` asserts the polls name the request the submit answered with, and
+`request_test` asserts the query carries it).
 
 Both are named here because a reader who finds the queue working should know which of its promises
 are still owed.

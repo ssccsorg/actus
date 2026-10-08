@@ -265,6 +265,11 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text:
                     agent_name.as_str()
                 }
             );
+            // An executor that has just said it is ready has nothing in flight, so a turn that
+            // was waiting when this process last wrote runs now. This is what carries a queue
+            // across a restart, and what lets the rebuild dispatch without a turn having to end
+            // first.
+            release_queue(&mut mgr);
         }
         SyncEvent::ThreadCreated {
             acp_thread_id: acp_id,
@@ -415,17 +420,25 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text:
                 // zero content.
                 //
                 // A turn that is waiting is a different message, one that has not run, so the
-                // check reads past the waits. A wait is never older than the turn that is
-                // running, and the waits behind this turn are exactly the queue's, so reading
-                // one message past them reaches the last message that belongs to a turn.
-                let back = mgr.queued_turns.len() + 1;
+                // check reads past the waits. Reading one message past them reaches the last
+                // message that belongs to a turn, which is what this question is about.
+                let waits = mgr
+                    .threads
+                    .get(&local_id)
+                    .map(|thread| thread.waiting.len())
+                    .unwrap_or(0);
                 let last_is_user = mgr
-                    .tail(&local_id, back)
+                    .tail(&local_id, waits + 1)
                     .ok()
                     .and_then(|tail| {
+                        let waiting = mgr
+                            .threads
+                            .get(&local_id)
+                            .map(|thread| thread.waiting.as_slice())
+                            .unwrap_or(&[]);
                         tail.iter()
                             .rev()
-                            .find(|message| !is_waiting(message))
+                            .find(|message| !is_waiting(waiting, message))
                             .map(|message| message.role == "user")
                     })
                     .unwrap_or(false);

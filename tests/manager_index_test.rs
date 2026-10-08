@@ -8,9 +8,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use actus::acpws::AcpwsManager;
+use actus::acpws::types::Command;
+use actus::acpws::{control, AcpwsManager};
 use actus::agent::{ThreadMessage, ThreadSession};
 use actus::store::{RecordStore, Volume, VolumeStore};
+use tokio::sync::{mpsc, RwLock};
 
 // ── A volume in memory, with the reads it served counted ────────────────
 
@@ -91,6 +93,7 @@ fn thread_with(n: usize) -> ThreadSession {
         completed: true,
         acp_thread_id: Some("acp-1".to_string()),
         turn_completed: 1,
+        waiting: Vec::new(),
     }
 }
 
@@ -189,5 +192,78 @@ fn a_thread_made_here_keeps_what_is_written_to_it() {
         read[&id].messages.len(),
         2,
         "the two messages this process wrote are in the record"
+    );
+}
+
+/// A turn that was waiting when this process last wrote waits still: the thread's own list is in the
+/// index, and the record answers what it says. The dispatch is what clears it, and that the clear
+/// reaches the record is what a store whose records never change has to be able to write.
+#[tokio::test]
+async fn a_waiting_turn_is_rebuilt_and_runs_once_the_executor_is_ready() {
+    let dir = tempfile::tempdir().expect("dir");
+    let volume = MemVolume::default();
+
+    let tid = {
+        let mut mgr = manager(dir.path(), &volume);
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message_full(
+            &tid,
+            "user",
+            "the waiting question",
+            Some("m-1".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+        mgr.note_waiting(&tid, "m-1");
+        mgr.flush_threads();
+        tid
+    };
+
+    // A second manager over the same volume is a restart: the queue is rebuilt from the record.
+    let mut restarted = manager(dir.path(), &volume);
+    assert_eq!(
+        restarted.queued_turns.len(),
+        1,
+        "the wait the record holds is the queue"
+    );
+    assert_eq!(restarted.queued_turns[0].message, "the waiting question");
+    assert_eq!(restarted.queued_turns[0].message_id, "m-1");
+    assert_eq!(
+        restarted.queued_turns[0].thinking_effort, None,
+        "the effort a turn asked for is not in the record"
+    );
+
+    let (tx, mut commands) = mpsc::unbounded_channel::<String>();
+    restarted.set_ws_tx(tx);
+    restarted.agent_connected = true;
+    restarted.agent_ready = true;
+    let shared = Arc::new(RwLock::new(restarted));
+
+    // What the executor sends when it connects, which is what a rebuilt queue waits for.
+    let ready = serde_json::json!({
+        "event_type": "agent_ready",
+        "data": {"agent_name": "telos", "thread_id": ""},
+    });
+    control::handle_agent_event(&shared, &ready.to_string()).await;
+
+    let sent = commands.try_recv().expect("the rebuilt turn is dispatched");
+    match serde_json::from_str::<Command>(&sent).expect("a command") {
+        Command::ChatMessage { message, .. } => assert_eq!(message, "the waiting question"),
+        other => panic!("expected a chat message, got {other:?}"),
+    }
+
+    // The dispatch is in the record, and the message it dispatched carries no mark of its own: a
+    // volume's record is written once, so nothing about the wait could live on it.
+    shared.write().await.flush_threads();
+    let read = VolumeStore::new(volume.clone(), dir.path())
+        .load()
+        .expect("load");
+    assert!(read[&tid].waiting.is_empty(), "the wait is gone");
+    assert_eq!(read[&tid].messages.len(), 1, "and no message was added");
+    assert_eq!(
+        read[&tid].messages[0].entry_type, None,
+        "the person's message carries no state of its own"
     );
 }

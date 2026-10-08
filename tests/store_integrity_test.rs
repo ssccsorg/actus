@@ -116,6 +116,7 @@ fn thread(n: usize) -> ThreadSession {
         completed: true,
         acp_thread_id: Some("acp-1".to_string()),
         turn_completed: 1,
+        waiting: Vec::new(),
     }
 }
 

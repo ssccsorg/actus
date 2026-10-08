@@ -319,6 +319,7 @@ fn load_threads_repairs_turn_counter_drift() {
         id: "t1".to_string(),
         title: Some("drift".to_string()),
         parent: None,
+        waiting: Vec::new(),
         messages: vec![
             ThreadMessage {
                 role: "user".to_string(),

@@ -204,6 +204,17 @@ pub struct ThreadSession {
     /// Dispatch origin of the first turn, when a meta agent submitted it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<ThreadParent>,
+    /// The ids of this thread's messages that are turns which have not run, in the order they were
+    /// accepted.
+    ///
+    /// A turn a person sends while another runs is recorded at once, so its message is in the
+    /// thread before it has run, and nothing on the message can say whether it still waits: a
+    /// volume's record is written once and never changes, so a mark on it could not be cleared.
+    /// The wait is therefore actus's own state about the thread, kept here with the message counts
+    /// and the title versions for the same reason, and carried in the index so a restart finds it
+    /// without reading every thread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<String>,
 }
 
 /// The role a note carries: something a person said in a thread that is not addressed to the

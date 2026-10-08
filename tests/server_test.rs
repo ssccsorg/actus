@@ -59,13 +59,35 @@ fn test_state_with_manager() -> (SharedState, tempfile::TempDir, Manager) {
 }
 
 /// A submit that arrives while another turn runs is queued, and the streaming route says so and
-/// ends rather than following a turn that has not started. The thread's counter cannot say which
-/// completion is the queued turn's, because the turn in flight increments it first, so reporting
-/// a completion here would report the other turn's.
+/// then follows its own turn, closing on that turn's end rather than on the other turn's.
 #[tokio::test]
-async fn a_queued_submit_is_told_so_by_the_stream() {
-    let (state, _keep, _manager) = busy_state().await;
+async fn a_queued_submit_is_followed_by_the_stream() {
+    let (state, _keep, manager) = busy_state().await;
     let (base, _server) = spawn_server(state).await;
+
+    // The waiting turn is dispatched and then ended while the stream is open. Dispatching it is
+    // what the stream is waiting for; ending it is what closes the stream.
+    let running = manager.clone();
+    let settles = tokio::spawn(async move {
+        let request_id = loop {
+            {
+                let mut mgr = running.write().await;
+                if let Some(turn) = mgr.queued_turns.first().cloned() {
+                    mgr.queued_turns.remove(0);
+                    mgr.pending_requests
+                        .insert(turn.request_id.clone(), turn.thread_id.clone());
+                    mgr.notify_thread_change();
+                    break turn.request_id;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        // Long enough for the stream to see the turn running before it ends.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let mut mgr = running.write().await;
+        mgr.consume_request(&request_id);
+        mgr.notify_thread_change();
+    });
 
     let response = client()
         .post(format!("{base}/v1/chat"))
@@ -74,18 +96,20 @@ async fn a_queued_submit_is_told_so_by_the_stream() {
         .await
         .expect("send the submit");
     assert_eq!(response.status(), 200, "the submit is accepted");
-    // Reading the whole body ends only because the stream ends. A stream that fell through would
-    // wait out the client's timeout here instead.
+    // Reading the whole body ends only because the stream ends.
     let body = response.text().await.expect("read the stream");
+    settles.await.expect("the settling task finishes");
 
+    let created = body
+        .find("event: thread_created")
+        .expect("the thread is named");
+    let queued = body.find("event: queued").expect("the wait is said");
+    let completed = body
+        .find("event: message_completed")
+        .expect("and the turn's own end is reported");
     assert!(
-        body.contains("event: queued"),
-        "the stream says the turn waits: {body}"
-    );
-    assert!(body.contains("t1"), "and names the thread: {body}");
-    assert!(
-        !body.contains("message_completed"),
-        "and reports no end, which would be the other turn's: {body}"
+        created < queued && queued < completed,
+        "in the order they happened: {body}"
     );
 }
 
@@ -1096,17 +1120,19 @@ async fn poll_does_not_serve_a_turn_that_is_still_waiting() {
             None,
             None,
         );
-        // The second person's message, accepted while the first turn is running.
+        // The second person's message, accepted while the first turn is running, and the thread's
+        // own list of waits is what says so.
         mgr.add_message_full(
             &tid,
             "user",
             "the second question",
-            Some("queued:1".to_string()),
-            Some(actus::acpws::QUEUED_ENTRY.to_string()),
+            Some("q-1".to_string()),
+            None,
             None,
             None,
             None,
         );
+        mgr.note_waiting(&tid, "q-1");
         tid
     };
 

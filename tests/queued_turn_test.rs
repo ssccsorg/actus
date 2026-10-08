@@ -1,16 +1,17 @@
 //! A turn accepted while another runs.
 //!
 //! Two people in one room is the premise, and the second person's message must not be refused.
-//! What the executor cannot take yet waits, and the wait is in the record so every client reads
-//! the same order. What this pins is that the message is recorded, that no command reaches the
-//! executor while it is busy, and that the turn goes when the one in flight ends.
+//! What the executor cannot take yet waits, and the wait is something the thread itself carries, so
+//! every client reads the same order and a restart can find it. What this pins is that the message
+//! is recorded, that no command reaches the executor while it is busy, and that the turn goes when
+//! the one in flight ends.
 
 use std::sync::Arc;
 
 use actus::acpws::backend::AcpwsBackend;
 use actus::acpws::control;
 use actus::acpws::types::{Command, SyncEvent};
-use actus::acpws::{AcpwsManager, QUEUED_ENTRY};
+use actus::acpws::AcpwsManager;
 use actus::agent::AgentBackend;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -71,16 +72,27 @@ async fn entries(
         .collect()
 }
 
-/// The same, as the pair of columns a test compares against.
-fn shown(entries: &[(String, Option<String>)]) -> Vec<(&str, Option<&str>)> {
-    entries
+/// The turns of a thread that have not run, as the content of the messages that carry them.
+async fn waits(manager: &Arc<RwLock<AcpwsManager>>, thread_id: &str) -> Vec<String> {
+    let mgr = manager.read().await;
+    let Some(thread) = mgr.threads.get(thread_id) else {
+        return Vec::new();
+    };
+    thread
+        .waiting
         .iter()
-        .map(|(content, entry)| (content.as_str(), entry.as_deref()))
+        .filter_map(|id| {
+            thread
+                .messages
+                .iter()
+                .find(|message| message.message_id.as_ref() == Some(id))
+                .map(|message| message.content.clone())
+        })
         .collect()
 }
 
-/// The second message of a room is accepted while the agent runs the first, and runs when the
-/// first ends. No command reaches the executor in between, and the wait is in the record.
+/// The second message of a room is accepted while the agent runs the first, and runs when the first
+/// ends. No command reaches the executor in between, and the wait is the thread's own state.
 #[tokio::test]
 async fn a_second_turn_waits_for_the_one_in_flight() {
     let dir = tempfile::tempdir().expect("dir");
@@ -116,16 +128,10 @@ async fn a_second_turn_waits_for_the_one_in_flight() {
         commands.try_recv().is_err(),
         "and nothing reaches the executor while it is busy"
     );
-
-    // The wait is in the record, so a client that reads the thread sees it without asking.
     assert_eq!(
-        shown(&entries(&manager, "t1").await),
-        vec![
-            ("first", None),
-            ("an answer", Some("text")),
-            ("second", Some(QUEUED_ENTRY)),
-        ],
-        "the queued message says it is waiting"
+        waits(&manager, "t1").await,
+        vec!["second".to_string()],
+        "the thread says which of its turns have not run"
     );
 
     // The turn in flight ends, which is what frees the agent.
@@ -140,14 +146,9 @@ async fn a_second_turn_waits_for_the_one_in_flight() {
     assert_eq!(message, "second");
     assert!(commands.try_recv().is_err(), "only that one goes");
 
-    assert_eq!(
-        shown(&entries(&manager, "t1").await),
-        vec![
-            ("first", None),
-            ("an answer", Some("text")),
-            ("second", None),
-        ],
-        "the message is the turn that runs now, so it stops reading as a wait"
+    assert!(
+        waits(&manager, "t1").await.is_empty(),
+        "the message is the turn that runs now, so it is no longer a wait"
     );
     assert!(
         manager
@@ -160,8 +161,8 @@ async fn a_second_turn_waits_for_the_one_in_flight() {
     );
 }
 
-/// The queue is in arrival order, so a room's second and third messages run in the order they
-/// were said rather than in whichever order the agent happens to free up.
+/// The queue is in arrival order, so a room's second and third messages run in the order they were
+/// said rather than in whichever order the agent happens to free up.
 #[tokio::test]
 async fn the_queue_keeps_the_order_the_messages_arrived() {
     let dir = tempfile::tempdir().expect("dir");
@@ -172,6 +173,11 @@ async fn the_queue_keeps_the_order_the_messages_arrived() {
     let second = backend.submit(Some("t1"), "two").await.expect("submit");
     let third = backend.submit(Some("t1"), "three").await.expect("submit");
     assert!(second.queued && third.queued);
+    assert_eq!(
+        waits(&manager, "t1").await,
+        vec!["two".to_string(), "three".to_string()],
+        "both waits are the thread's, in the order they arrived"
+    );
 
     control::handle_agent_event(&manager, &completed(&first.request_id)).await;
     let (request_id, message) = chat_command(&commands.try_recv().expect("the second turn goes"));
@@ -180,16 +186,19 @@ async fn the_queue_keeps_the_order_the_messages_arrived() {
         "the earlier message goes first"
     );
     assert_eq!(message, "two");
+    assert_eq!(waits(&manager, "t1").await, vec!["three".to_string()]);
 
     control::handle_agent_event(&manager, &completed(&second.request_id)).await;
     let (request_id, message) = chat_command(&commands.try_recv().expect("the third turn goes"));
     assert_eq!(request_id, third.request_id);
     assert_eq!(message, "three");
     assert!(commands.try_recv().is_err());
+    assert!(waits(&manager, "t1").await.is_empty());
 }
 
-/// A turn that answered is not read as empty because a message waits behind it. The check reads
-/// past the waits to the last message that belongs to a turn, and that message is the agent's.
+/// A turn that answered is not read as empty because a message waits behind it. The empty check
+/// reads past the waits to the last message that belongs to a turn, and that message is the
+/// agent's.
 #[tokio::test]
 async fn an_answered_turn_is_not_read_as_empty_because_a_wait_is_behind_it() {
     let dir = tempfile::tempdir().expect("dir");
@@ -215,19 +224,17 @@ async fn an_answered_turn_is_not_read_as_empty_because_a_wait_is_behind_it() {
 
     control::handle_agent_event(&manager, &completed(&first.request_id)).await;
 
-    assert_eq!(
-        shown(&entries(&manager, "t1").await),
-        vec![
-            ("first", None),
-            ("an answer", Some("text")),
-            ("second", None),
-        ],
+    assert!(
+        entries(&manager, "t1")
+            .await
+            .iter()
+            .all(|(_, entry)| entry.as_deref() != Some("error")),
         "the empty check read the answer, so no empty answer was recorded"
     );
 }
 
-/// A turn that answered nothing is still recorded as empty, with a message waiting behind it:
-/// the wait does not stand in for the answer and does not mask the absence of one.
+/// A turn that answered nothing is still recorded as empty, with a message waiting behind it: the
+/// wait does not stand in for the answer and does not mask the absence of one.
 #[tokio::test]
 async fn an_empty_turn_is_still_read_as_empty_though_a_wait_is_behind_it() {
     let dir = tempfile::tempdir().expect("dir");

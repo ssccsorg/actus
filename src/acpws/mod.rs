@@ -15,28 +15,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// handlers).
 pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
 
-/// The entry type a user message carries while its turn waits for the agent.
+/// Whether a message is one of a thread's turns that have not run.
 ///
-/// A queued turn is a user message whose state says it has not run, so the state lives where the
-/// record already carries per-message state rather than in a second place that could disagree
-/// with the thread. Dispatch clears it, which is what makes the message the turn that runs.
-pub const QUEUED_ENTRY: &str = "queued";
-
-/// Whether a message is a turn that has not run yet.
-///
-/// A message accepted while another turn runs is a user message that is still waiting. It is not
-/// where a turn begins and not part of the one in flight, so every reader that would otherwise
-/// mistake it for either asks this rather than comparing the entry type itself.
-pub fn is_waiting(message: &ThreadMessage) -> bool {
-    message.entry_type.as_deref() == Some(QUEUED_ENTRY)
+/// A message a person sent while another turn was running is recorded at once and waits, so it is
+/// not where a turn begins and not part of the one in flight. The wait is the thread's own list of
+/// ids, so every reader that would otherwise mistake the message for either asks it.
+pub fn is_waiting(waiting: &[String], message: &ThreadMessage) -> bool {
+    match message.message_id.as_deref() {
+        Some(id) => waiting.iter().any(|waiting| waiting == id),
+        None => false,
+    }
 }
 
 /// A turn accepted while the agent was running another one.
 ///
-/// The message is already in the thread. What waits here is the command, and this list is what
-/// says the turn has not been sent. Entries are held in arrival order across the agent, which
-/// keeps every thread's own order because a thread's entries are appended in that order, and the
-/// order across threads is the agent's own single lock made visible.
+/// The message is already in the thread, and the thread's `waiting` list holds its id. What waits
+/// here is the command, and this list is what says the turn has not been sent. Entries are held in
+/// arrival order across the agent, which keeps every thread's own order because a thread's entries
+/// are appended in that order, and the order across threads is the agent's own single lock made
+/// visible.
 #[derive(Clone, Debug)]
 pub struct QueuedTurn {
     pub request_id: String,
@@ -46,7 +43,8 @@ pub struct QueuedTurn {
     /// is running is still writing.
     pub message: String,
     pub thinking_effort: Option<String>,
-    /// The id the waiting message was recorded under, so dispatch can mark it sent.
+    /// The id the waiting message was recorded under, which is what the thread's `waiting` list
+    /// holds and what dispatch clears.
     pub message_id: String,
 }
 
@@ -162,7 +160,7 @@ impl AcpwsManager {
 
         let (thread_notify, _) = watch::channel(0u64);
 
-        Ok(Self {
+        let mut manager = Self {
             session_id,
             ws_host,
             agent_connected: false,
@@ -185,7 +183,11 @@ impl AcpwsManager {
             prior_message_content: HashMap::new(),
             sentinel_cap: 512,
             threads_dirty: AtomicBool::new(false),
-        })
+        };
+        // A turn that was still waiting when this process last wrote is waiting still, and the
+        // queue is rebuilt from the record before anything asks for a turn.
+        manager.rebuild_queue()?;
+        Ok(manager)
     }
 
     /// Read a thread's messages into hand, if they are not already there.
@@ -272,6 +274,7 @@ impl AcpwsManager {
                     acp_thread_id: None,
                     turn_completed: 0,
                     parent: None,
+                    waiting: Vec::new(),
                 },
             );
             // A thread made here has its messages in hand by construction, so it is not one
@@ -355,7 +358,7 @@ impl AcpwsManager {
             // A turn that is still waiting is not part of the turn that ended, so it does not
             // end the trailing block: skipping it makes the snapshot the completed turn's own
             // answer, which is what a replay of that answer has to be compared against.
-            .filter(|m| !is_waiting(m))
+            .filter(|m| !is_waiting(&thread.waiting, m))
             .take_while(|m| m.role == "assistant")
         {
             if let Some(id) = &m.message_id {
@@ -433,17 +436,8 @@ impl AcpwsManager {
         self.send_command(&cmd)?;
         self.queued_turns.remove(0);
         // The message said it was waiting. The command is out, so it is now the turn that runs,
-        // and the state it carries says so to every client that reads the thread.
-        self.add_message_full(
-            &turn.thread_id,
-            "user",
-            &turn.message,
-            Some(turn.message_id.clone()),
-            None,
-            None,
-            None,
-            None,
-        );
+        // and the thread's own list of waits says so to every client that reads it.
+        self.clear_waiting(&turn.thread_id, &turn.message_id);
         self.pending_requests
             .insert(turn.request_id.clone(), turn.thread_id.clone());
         self.threads_activated.insert(turn.thread_id.clone());
@@ -454,6 +448,84 @@ impl AcpwsManager {
             .push((turn.request_id.clone(), turn.thread_id.clone(), cmd));
         self.notify_thread_change();
         Ok(Some(turn.request_id))
+    }
+
+    /// Note that a message is a turn that has not run, so readers know it and a restart finds it.
+    pub fn note_waiting(&mut self, thread_id: &str, message_id: &str) {
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            return;
+        };
+        if thread.waiting.iter().any(|waiting| waiting == message_id) {
+            return;
+        }
+        thread.waiting.push(message_id.to_string());
+        self.notify_thread_change();
+        self.save_threads();
+    }
+
+    /// Drop a message from the thread's waits, because its turn is now the one running.
+    fn clear_waiting(&mut self, thread_id: &str, message_id: &str) {
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            return;
+        };
+        thread.waiting.retain(|waiting| waiting != message_id);
+    }
+
+    /// Rebuild the waiting turns from the record.
+    ///
+    /// The thread's own `waiting` list is the index's answer to which of its messages are turns
+    /// that have not run, and the record is the answer to what each of them says. What neither
+    /// carries is the request id, which is minted here, and the reasoning effort the turn asked
+    /// for, which cannot be recovered and is left to the thread's own level.
+    ///
+    /// A thread the index holds is read only when the index says it has a wait, so a restart does
+    /// not read the volume to find a queue that is almost always empty.
+    fn rebuild_queue(&mut self) -> Result<(), String> {
+        let mut ids: Vec<String> = self.threads.keys().cloned().collect();
+        ids.sort();
+        let mut rebuilt: Vec<(chrono::DateTime<chrono::Utc>, usize, QueuedTurn)> = Vec::new();
+        for id in ids {
+            let waits = match self.threads.get(&id) {
+                Some(thread) if thread.waiting.is_empty() => continue,
+                Some(thread) => thread.waiting.clone(),
+                None => continue,
+            };
+            self.hold(&id)?;
+            let messages = match self.threads.get(&id) {
+                Some(thread) => thread.messages.clone(),
+                None => continue,
+            };
+            for (position, message) in messages.iter().enumerate() {
+                let Some(message_id) = message.message_id.as_deref() else {
+                    continue;
+                };
+                if !waits.iter().any(|waiting| waiting == message_id) {
+                    continue;
+                }
+                rebuilt.push((
+                    message.timestamp,
+                    position,
+                    QueuedTurn {
+                        request_id: Uuid::new_v4().to_string(),
+                        thread_id: id.clone(),
+                        message: message.content.clone(),
+                        thinking_effort: None,
+                        message_id: message_id.to_string(),
+                    },
+                ));
+            }
+        }
+        // The waits run in the order they were accepted, which is the order their messages carry.
+        rebuilt.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        let rebuilt: Vec<QueuedTurn> = rebuilt.into_iter().map(|(_, _, turn)| turn).collect();
+        if !rebuilt.is_empty() {
+            tracing::info!(
+                "{} turn(s) were still waiting when this process last wrote, and wait here",
+                rebuilt.len()
+            );
+        }
+        self.queued_turns = rebuilt;
+        Ok(())
     }
 
     /// Append a message to a thread, replacing an existing message with the

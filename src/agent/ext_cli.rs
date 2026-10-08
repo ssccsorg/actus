@@ -165,6 +165,8 @@ impl ExtCliAgent {
             acp_thread_id: None,
             turn_completed: 0,
             parent: None,
+            // This kind runs a turn per process and declares `parallel`, so nothing waits.
+            waiting: Vec::new(),
         }
     }
 

@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tokio::sync::{Notify, RwLock};
 
 use crate::acpws::types::Command;
-use crate::acpws::{AcpwsManager, QueuedTurn, WsCommandTx, QUEUED_ENTRY};
+use crate::acpws::{AcpwsManager, QueuedTurn, WsCommandTx};
 use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, RequestState, SubmitReceipt,
     ThreadMessage, ThreadParent, ThreadSession, NOTE_ROLE,
@@ -135,11 +135,12 @@ impl AgentBackend for AcpwsBackend {
                     "user",
                     message,
                     Some(message_id.clone()),
-                    Some(QUEUED_ENTRY.to_string()),
+                    None,
                     None,
                     None,
                     author,
                 );
+                mgr.note_waiting(&tid, &message_id);
                 mgr.queued_turns.push(QueuedTurn {
                     request_id: rid.clone(),
                     thread_id: tid.clone(),

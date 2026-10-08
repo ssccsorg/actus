@@ -236,6 +236,10 @@ pub struct ThreadSummary {
     /// The agent this thread belongs to. A listing that folds over every agent
     /// has no other way to say where a row came from.
     pub agent: String,
+    /// How many of this thread's messages are turns that have not run, which is what a client shows
+    /// as waiting. A message a person sent while another turn ran is one of them.
+    #[serde(default)]
+    pub waiting: usize,
     /// What the agent works in, in its own backend's terms. Absent when the
     /// backend has no such notion, which leaves a client to group by agent.
     pub scope: Option<String>,
@@ -255,6 +259,10 @@ pub struct ThreadDetailResponse {
     pub created_at: String,
     pub completed: bool,
     pub turn_completed: u64,
+    /// How many of this thread's messages are turns that have not run, which is what a client shows
+    /// as waiting. A message a person sent while another turn ran is one of them.
+    #[serde(default)]
+    pub waiting: usize,
     /// Dispatch origin of the thread, when a meta agent created it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<ThreadParent>,
@@ -306,14 +314,18 @@ const STREAM_TAIL: usize = 64;
 /// the record instead of the whole of it.
 /// Whether a message begins a turn: a person's message whose turn has run.
 ///
-/// A message accepted while another turn runs is a user message that is still waiting, so it is
+/// A message a person sent while another turn was running is recorded at once and waits, so it is
 /// not where a turn begins. Reading it as one reports the running turn as nothing, because
 /// everything the agent has written falls before the wait.
-fn begins_a_turn(message: &ThreadMessage) -> bool {
-    message.role == "user" && !crate::acpws::is_waiting(message)
+fn begins_a_turn(waiting: &[String], message: &ThreadMessage) -> bool {
+    message.role == "user" && !crate::acpws::is_waiting(waiting, message)
 }
 
-async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<ThreadMessage> {
+async fn read_turn(
+    agent: &Arc<dyn AgentBackend>,
+    thread_id: &str,
+    waiting: &[String],
+) -> Vec<ThreadMessage> {
     /// Messages one step of the backwards walk carries.
     const CHUNK: usize = 64;
 
@@ -326,7 +338,10 @@ async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<Thread
         if window.is_empty() {
             break;
         }
-        match window.iter().rposition(begins_a_turn) {
+        match window
+            .iter()
+            .rposition(|message| begins_a_turn(waiting, message))
+        {
             Some(index) => {
                 let mut turn: Vec<ThreadMessage> = window[index + 1..].to_vec();
                 turn.extend(collected);
@@ -334,7 +349,7 @@ async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<Thread
                 // left to the thread read, which serves the room's talk whole.
                 return turn
                     .into_iter()
-                    .filter(|message| !crate::acpws::is_waiting(message))
+                    .filter(|message| !crate::acpws::is_waiting(waiting, message))
                     .collect();
             }
             None => {
@@ -347,7 +362,7 @@ async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<Thread
     }
     collected
         .into_iter()
-        .filter(|message| !crate::acpws::is_waiting(message))
+        .filter(|message| !crate::acpws::is_waiting(waiting, message))
         .collect()
 }
 
@@ -516,7 +531,14 @@ async fn chat_stream(
 
     let tid = receipt.thread_id.clone();
     let is_new = receipt.is_new;
-    let queued = receipt.queued;
+    let request_id = receipt.request_id.clone();
+    // A backend that can answer about the request is asked instead of the thread's counter, so this
+    // stream ends on its own turn rather than on whichever turn finished first. A backend that
+    // cannot answer says so, and the counter answers as it always did.
+    let tracks_request = !matches!(
+        agent.request_state(&request_id).await,
+        RequestState::Unknown
+    );
     // Build SSE stream: poll with backoff, using the watch channel for
     // notification. Each SSE stream captures the current turn_id and
     // waits for thread.turn_completed > turn_id, so multiple SSE streams
@@ -528,27 +550,14 @@ async fn chat_stream(
         .unwrap_or(0);
 
     tracing::debug!(
-        "chat_stream: SSE stream created for thread {} (turn_id={}, new={})",
+        "chat_stream: SSE stream created for thread {} (turn_id={}, new={}, queued={})",
         tid,
         turn_id,
-        is_new
+        is_new,
+        receipt.queued
     );
     let agent_stream = agent.clone();
     let stream = async_stream::stream! {
-        // A turn accepted while another ran did not start here: it waits behind the turn in
-        // flight, and the thread's own completion counter cannot say which completion is this
-        // one's, because the running turn increments it first. So the stream says the turn is
-        // waiting and ends rather than reporting an end that would be the other turn's. The
-        // answer is read from the thread, which is where the queue's order lives too.
-        if queued {
-            tracing::debug!("SSE stream {}: the turn is queued behind one in flight", tid);
-            yield Ok(Event::default()
-                .event("queued")
-                .data(serde_json::to_string(&serde_json::json!({
-                    "thread_id": tid.clone(),
-                })).unwrap()));
-            return;
-        }
         tracing::debug!("SSE stream starting for thread {} (turn_id={}, new={})", tid, turn_id, is_new);
         let event_name = if is_new { "thread_created" } else { "thread_resumed" };
         yield Ok(Event::default()
@@ -567,6 +576,7 @@ async fn chat_stream(
             .map(|message| message.content)
             .unwrap_or_default();
         let mut done = false;
+        let mut said_waiting = false;
         let mut rx = agent_stream.subscribe().await;
 
         let mut poll_count = 0u64;
@@ -578,6 +588,26 @@ async fn chat_stream(
         // stream ends on turn completion, so this is a stuck-agent safety
         // ceiling, not the expected path. 30 minutes matches the CLI poll.
         let max_wait = Duration::from_secs(1800); // 30 min max before timeout
+
+        // A turn that was accepted while another ran is waiting, and the stream says so at once
+        // rather than after its first poll, so a client that reads only events is told what the
+        // submit's own answer already said.
+        if tracks_request
+            && matches!(
+                agent_stream.request_state(&request_id).await,
+                RequestState::Waiting
+            )
+        {
+            said_waiting = true;
+            tracing::debug!("SSE stream {}: the turn is waiting behind one in flight", tid);
+            yield Ok(Event::default()
+                .event("queued")
+                .data(serde_json::to_string(&serde_json::json!({
+                    "thread_id": tid.clone(),
+                })).unwrap()));
+            last_emit = std::time::Instant::now();
+        }
+
         while !done {
             // Wait for notification or poll at 100ms intervals
             tokio::select! {
@@ -590,6 +620,45 @@ async fn chat_stream(
             // Log every 10th poll so we can see the loop is alive
             if poll_count.is_multiple_of(10) {
                 tracing::debug!("SSE pool {}: iter #{}", tid, poll_count);
+            }
+
+            // A turn that has not started is not followed yet: what the thread holds now belongs
+            // to the turn in flight, and serving it would report another turn's work as this one's.
+            // The stream says once that the turn waits, keeps the connection warm, and follows the
+            // turn from the moment it runs.
+            let state = if tracks_request {
+                agent_stream.request_state(&request_id).await
+            } else {
+                RequestState::Unknown
+            };
+            if matches!(state, RequestState::Waiting) {
+                if said_waiting {
+                    if last_emit.elapsed() >= Duration::from_secs(15) {
+                        yield Ok(Event::default().event("ping").data("{}"));
+                        last_emit = std::time::Instant::now();
+                    }
+                } else {
+                    said_waiting = true;
+                    tracing::debug!("SSE stream {}: the turn is waiting behind one in flight", tid);
+                    yield Ok(Event::default()
+                        .event("queued")
+                        .data(serde_json::to_string(&serde_json::json!({
+                            "thread_id": tid.clone(),
+                        })).unwrap()));
+                    last_emit = std::time::Instant::now();
+                }
+                poll_count += 1;
+                if start.elapsed() > max_wait {
+                    tracing::warn!("SSE stream {}: timeout after {}s ({} polls)", tid, max_wait.as_secs(), poll_count);
+                    yield Ok(Event::default()
+                        .event("error")
+                        .data(serde_json::to_string(&serde_json::json!({
+                            "thread_id": tid.clone(),
+                            "error": "timeout: no response from agent",
+                        })).unwrap()));
+                    done = true;
+                }
+                continue;
             }
 
             let thread = agent_stream.thread(&tid).await;
@@ -645,9 +714,15 @@ async fn chat_stream(
                     last_emit = std::time::Instant::now();
                 }
 
-                // Check completion: wait for the turn we started
-                if thread.turn_completed > turn_id {
-                    tracing::debug!("SSE stream {}: turn completed ({} > {})", tid, thread.turn_completed, turn_id);
+                // Check completion. A backend that answers about the request says whether this
+                // turn ended; the counter is what a backend without that record leaves.
+                let settled = if tracks_request {
+                    matches!(state, RequestState::Settled)
+                } else {
+                    thread.turn_completed > turn_id
+                };
+                if settled {
+                    tracing::debug!("SSE stream {}: the turn this stream follows ended", tid);
                     yield Ok(Event::default()
                         .event("message_completed")
                         .data(serde_json::to_string(&serde_json::json!({
@@ -731,6 +806,7 @@ async fn list_threads(
                     created_at: thread.created_at.to_rfc3339(),
                     updated_at: updated_at.map(|at| at.to_rfc3339()),
                     agent: agent.clone(),
+                    waiting: thread.waiting.len(),
                     scope: scope.clone(),
                 },
             ));
@@ -787,6 +863,7 @@ async fn get_thread(
                 created_at: thread.created_at.to_rfc3339(),
                 completed: thread.completed,
                 turn_completed: thread.turn_completed,
+                waiting: thread.waiting.len(),
                 parent: thread.parent.clone(),
             }))
         }
@@ -904,7 +981,7 @@ async fn poll_thread(
     // nothing rather than the other turn's messages.
     let turn = match state {
         RequestState::Waiting => Vec::new(),
-        _ => read_turn(&agent, &thread_id).await,
+        _ => read_turn(&agent, &thread_id, &thread.waiting).await,
     };
     let messages: Vec<PollMessage> = turn
         .iter()
