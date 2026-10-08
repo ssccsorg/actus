@@ -1,0 +1,99 @@
+# A Turn Accepted While Another Runs
+
+date: 2026-10-08
+project: Actus
+status: design, no code changed
+related:
+
+- kletos `gateway/src/main.rs`, `gateway/tests/multiuser.rs`
+- actus `src/acpws/backend.rs`, `src/acpws/control.rs`, `src/agent/mod.rs`
+
+## The defect
+
+Two people in one room, which is the pilot's whole premise. One is running a turn. The other's
+message is refused with `HTTP 429: the agent is running a turn; one sandbox runs one turn at a
+time`, and what they typed is gone.
+
+The app queues a message locally, so a single user almost never sees this. The moment a second
+client shares the folder it is the ordinary case, and the second person is the one who loses the
+message.
+
+## What the code does today
+
+The refusal is the gateway's and not actus's. `submit_turn` in `gateway/src/main.rs` takes a lock
+keyed by the sandbox name and refuses when `current_turn(owner).is_some()`. The in-flight turn is
+cleared by the client's own poll reporting `completed`, or by `turn_stale` when the client went away.
+
+actus neither refuses nor queues. `AcpwsBackend::submit_with_options` adds the user's message to the
+thread
+
+```rust
+mgr.add_message_full(&tid, "user", message, None, None, None, None, author);
+```
+
+and then sends `Command::ChatMessage` to the executor. There is no per-agent admission check in that
+path.
+
+So the record already holds the message the refusal prevents, and the only thing standing between
+the second person's message and the thread is the gateway.
+
+## Why the serialization is ours
+
+`AgentKind::Acpws` declares `parallel: false`. The contract says the executor does not run two turns
+at once, so serializing cannot be delegated to it. `ExtCli` declares `parallel: true`, and a device
+turn that mutates nothing can run beside another.
+
+## Where a lock is genuinely needed
+
+The contended thing is the workspace, not the thread. Every thread of one agent shares one folder and
+a turn may mutate it. So the lock's scope is the agent, and it is needed when the executor is not
+parallel. A parallel executor whose turns touch no shared state needs no lock.
+
+A per-thread lock would be wrong: it would let two turns mutate one workspace at once.
+
+What is per-thread is the queue. A message to a busy agent belongs to its thread and is ordered
+there.
+
+## The design
+
+A message accepted while a turn runs is recorded in the thread and dispatched when the turn ends.
+Three properties follow from putting it there rather than beside it.
+
+The queue is derived from the record. A queued message is a user message with a queued state and no
+answer, so the pending dispatch is a small table keyed by request id and the queue after a restart
+rebuilds by reading the record. Nothing new is persisted and nothing can drift from the thread.
+
+Nothing has to be synchronized. Clients read the thread, so a queued message shows to every client
+the way the thread's other messages do.
+
+A receipt says the turn is queued, so a caller reports it rather than guessing.
+
+`ThreadMessage` already carries `entry_type` and `author`, so a queued message needs no new type: it
+is a message whose state says queued and whose author is who sent it.
+
+## What changes, in order
+
+actus. `submit_with_options` records the message as it does now; when the agent already has a live
+request and the kind is not parallel, it records the message as queued and does not send the
+command. `live_requests()` is the busy test. The turn's end is where the request id leaves
+`pending_requests` in `src/acpws/control.rs`, and that is where the next queued turn is dispatched.
+`SubmitReceipt` gains the queued indication.
+
+kletos gateway. The refusal goes, and with it the per-agent turn lock, whose only job was the
+refusal; the turn log shrinks to what the client's poll still needs. The four `multiuser.rs`
+assertions that expect 429 expect a queued accept instead.
+
+The app. It already queues locally and renders that state. A message queued by the server is rendered
+from the thread's own record, so the two read the same to a person.
+
+Order matters. The gateway must not stop refusing before actus queues, or two turns reach a
+non-parallel executor.
+
+## Not decided here
+
+The queue's bound, and what a caller sees for a full queue.
+
+Whether a queued message can be edited or cancelled before it is dispatched.
+
+Whether the app's local queue stays. It should: it is what makes a one-user session instant, and it
+is not the same thing as the room's order.
