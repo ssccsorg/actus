@@ -157,16 +157,26 @@ Not realized, and the second one is a defect rather than a wait.
    queued message is in the record, but the request id and the effort are not, so a restart leaves
    the message recorded with no turn behind it. That is the same gap a turn already in flight has,
    and closing it needs either two more fields on the queued message or a derived request id.
-2. The streaming route cannot follow a queued turn. `chat_stream` waits on the thread's own
-   completion counter, which the turn in flight increments first, so the counter cannot say which
-   completion is the queued turn's; there is no per-request completion on the fabric's surface to
-   ask instead. The route now answers a queued submit with one `queued` event and ends, which is
-   honest about what it can say, and a caller that wants the answer polls the thread. Making the
-   stream follow the turn needs a per-request question on `AgentBackend`.
+2. The routes that watch a turn cannot follow a queued one. The streaming route waits on the
+   thread's own completion counter, and the poll answers `completed` by comparing that counter
+   with the one the client names, so neither can say which completion is the queued turn's: the
+   turn in flight increments the counter first. There is no per-request completion on the fabric's
+   surface to ask instead. The stream now answers a queued submit with one `queued` event and
+   ends, which is honest about what it can say, and a caller that wants the answer polls the
+   thread; a poll by the client that queued the turn may see `completed` when the *other* turn
+   ends, so it should read the thread rather than trust that one field. Closing this needs a
+   per-request question on `AgentBackend` (is this request still running) and a client that names
+   the request instead of a counter.
+
+   The turn the poll serves is fixed, and that half is not optional: `read_turn` took the last
+   user message as the start of the turn in flight, and a queued message is a user message that
+   has not run, so it truncated the running turn to nothing. It now looks for the last message
+   that begins a turn and leaves the waits to the thread read.
 
 Both are named here because a reader who finds the queue working should know which of its promises
 are still owed.
 
 The three tests are in `tests/queued_turn_test.rs`: the second message waits and then runs, the
 queue keeps arrival order, and a waiting message is not mistaken for the answer to the turn that
-ended.
+ended. The fourth is in `tests/server_test.rs`, where the poll is driven over HTTP:
+`poll_does_not_serve_a_turn_that_is_still_waiting`.

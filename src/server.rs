@@ -302,6 +302,20 @@ const STREAM_TAIL: usize = 64;
 /// thread's tail backwards a window at a time, so what is held is the turn rather than the
 /// conversation the turn grew out of, and a thread the backend does not hold is read from
 /// the record instead of the whole of it.
+/// Whether a message begins a turn: a person's message whose turn has run.
+///
+/// A message accepted while another turn runs is a user message that is still waiting, so it is
+/// not where a turn begins. Reading it as one reports the running turn as nothing, because
+/// everything the agent has written falls before the wait.
+fn begins_a_turn(message: &ThreadMessage) -> bool {
+    message.role == "user" && message.entry_type.as_deref() != Some(crate::acpws::QUEUED_ENTRY)
+}
+
+/// Whether a message is a turn that has not run yet.
+fn is_waiting(message: &ThreadMessage) -> bool {
+    message.entry_type.as_deref() == Some(crate::acpws::QUEUED_ENTRY)
+}
+
 async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<ThreadMessage> {
     /// Messages one step of the backwards walk carries.
     const CHUNK: usize = 64;
@@ -315,11 +329,16 @@ async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<Thread
         if window.is_empty() {
             break;
         }
-        match window.iter().rposition(|message| message.role == "user") {
+        match window.iter().rposition(begins_a_turn) {
             Some(index) => {
                 let mut turn: Vec<ThreadMessage> = window[index + 1..].to_vec();
                 turn.extend(collected);
-                return turn;
+                // The turn in flight is what the agent has written. A wait is not that, so it is
+                // left to the thread read, which serves the room's talk whole.
+                return turn
+                    .into_iter()
+                    .filter(|message| !is_waiting(message))
+                    .collect();
             }
             None => {
                 let mut chunk = window;
@@ -330,6 +349,9 @@ async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<Thread
         }
     }
     collected
+        .into_iter()
+        .filter(|message| !is_waiting(message))
+        .collect()
 }
 
 /// The last assistant message of a thread, read from a tail of it.
@@ -423,16 +445,22 @@ async fn chat_async(
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
+    // The message is accepted for execution, not yet approved; the hardcoded "approved" from
+    // the earlier approval design was misleading because approval only applies in ask mode. A
+    // turn the agent could not start yet says so, so a caller reports what happened rather than
+    // guessing from a status that reads the same whether the agent is running the turn or
+    // holding it.
+    let status = if receipt.queued {
+        "queued"
+    } else {
+        "submitted"
+    };
+
     Ok(Json(ChatResponse {
         // The task id is the fabric request id, so POST /v1/cancel can
         // accept it as request_id for a request-scoped cancel.
         task_id: receipt.request_id.clone(),
-        // The message is accepted for execution, not yet approved; the
-        // hardcoded "approved" from the earlier approval design was
-        // misleading because approval only applies in ask mode. A turn the agent could not
-        // start yet says so, so a caller reports what happened rather than guessing from a
-        // status that reads the same whether the agent is running the turn or holding it.
-        status: if receipt.queued { "queued" } else { "submitted" }.to_string(),
+        status: status.to_string(),
         thread_id: receipt.thread_id,
     }))
 }

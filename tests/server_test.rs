@@ -948,6 +948,60 @@ async fn cors_whitelist_controls_browser_origins() {
     server.abort();
 }
 
+/// A message accepted while another turn runs is in the thread with a waiting state, and a
+/// waiting turn is not a turn: it is not where the turn in flight begins, so it neither truncates
+/// the running turn's messages nor is served as one of them.
+#[tokio::test]
+async fn poll_does_not_serve_a_turn_that_is_still_waiting() {
+    let (state, _keep, manager) = test_state_with_manager();
+    let (base, _server) = spawn_server(state).await;
+
+    let tid = {
+        let mut mgr = manager.write().await;
+        let tid = mgr.get_or_create_thread(None);
+        mgr.add_message(&tid, "user", "the question", None);
+        mgr.add_message_full(
+            &tid,
+            "assistant",
+            "the answer being written",
+            Some("acp:1".to_string()),
+            Some("text".to_string()),
+            None,
+            None,
+            None,
+        );
+        // The second person's message, accepted while the first turn is running.
+        mgr.add_message_full(
+            &tid,
+            "user",
+            "the second question",
+            Some("queued:1".to_string()),
+            Some(actus::acpws::QUEUED_ENTRY.to_string()),
+            None,
+            None,
+            None,
+        );
+        tid
+    };
+
+    let body: serde_json::Value = client()
+        .get(format!("{base}/v1/threads/{tid}/poll"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let messages = body["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 1, "only the turn in flight");
+    assert_eq!(messages[0]["message_id"], "acp:1");
+    assert_eq!(
+        body["new_content"], "the answer being written",
+        "the running turn's message, not the one that is waiting"
+    );
+}
+
 /// A turn is several messages (thinking, tool calls, then the answer) and the poll served
 /// only the most recent one, so a client could never hold the end of a message the agent
 /// had moved past: what it had was the middle of that message's stream, and no later poll
