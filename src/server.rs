@@ -308,12 +308,7 @@ const STREAM_TAIL: usize = 64;
 /// not where a turn begins. Reading it as one reports the running turn as nothing, because
 /// everything the agent has written falls before the wait.
 fn begins_a_turn(message: &ThreadMessage) -> bool {
-    message.role == "user" && message.entry_type.as_deref() != Some(crate::acpws::QUEUED_ENTRY)
-}
-
-/// Whether a message is a turn that has not run yet.
-fn is_waiting(message: &ThreadMessage) -> bool {
-    message.entry_type.as_deref() == Some(crate::acpws::QUEUED_ENTRY)
+    message.role == "user" && !crate::acpws::is_waiting(message)
 }
 
 async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<ThreadMessage> {
@@ -337,7 +332,7 @@ async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<Thread
                 // left to the thread read, which serves the room's talk whole.
                 return turn
                     .into_iter()
-                    .filter(|message| !is_waiting(message))
+                    .filter(|message| !crate::acpws::is_waiting(message))
                     .collect();
             }
             None => {
@@ -350,7 +345,7 @@ async fn read_turn(agent: &Arc<dyn AgentBackend>, thread_id: &str) -> Vec<Thread
     }
     collected
         .into_iter()
-        .filter(|message| !is_waiting(message))
+        .filter(|message| !crate::acpws::is_waiting(message))
         .collect()
 }
 

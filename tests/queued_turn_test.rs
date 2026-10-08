@@ -56,14 +56,26 @@ fn completed(request_id: &str) -> String {
     serde_json::to_string(&event).expect("json")
 }
 
-async fn entry_types(manager: &Arc<RwLock<AcpwsManager>>) -> Vec<(String, Option<String>)> {
+/// What a thread's messages are, as content and the state each carries.
+async fn entries(
+    manager: &Arc<RwLock<AcpwsManager>>,
+    thread_id: &str,
+) -> Vec<(String, Option<String>)> {
     manager
         .read()
         .await
-        .window("t1", 0, 20)
+        .window(thread_id, 0, 20)
         .expect("window")
         .into_iter()
         .map(|message| (message.content, message.entry_type))
+        .collect()
+}
+
+/// The same, as the pair of columns a test compares against.
+fn shown(entries: &[(String, Option<String>)]) -> Vec<(&str, Option<&str>)> {
+    entries
+        .iter()
+        .map(|(content, entry)| (content.as_str(), entry.as_deref()))
         .collect()
 }
 
@@ -79,6 +91,20 @@ async fn a_second_turn_waits_for_the_one_in_flight() {
     let (request_id, message) = chat_command(&commands.try_recv().expect("the first turn is sent"));
     assert_eq!(request_id, first.request_id);
     assert_eq!(message, "first");
+    // What the agent wrote while the turn ran.
+    {
+        let mut mgr = manager.write().await;
+        mgr.add_message_full(
+            &first.thread_id,
+            "assistant",
+            "an answer",
+            Some("a-1".to_string()),
+            Some("text".to_string()),
+            None,
+            None,
+            None,
+        );
+    }
 
     let second = backend.submit(Some("t1"), "second").await.expect("submit");
     assert!(
@@ -93,10 +119,11 @@ async fn a_second_turn_waits_for_the_one_in_flight() {
 
     // The wait is in the record, so a client that reads the thread sees it without asking.
     assert_eq!(
-        entry_types(&manager).await,
+        shown(&entries(&manager, "t1").await),
         vec![
-            ("first".to_string(), None),
-            ("second".to_string(), Some(QUEUED_ENTRY.to_string())),
+            ("first", None),
+            ("an answer", Some("text")),
+            ("second", Some(QUEUED_ENTRY)),
         ],
         "the queued message says it is waiting"
     );
@@ -114,8 +141,12 @@ async fn a_second_turn_waits_for_the_one_in_flight() {
     assert!(commands.try_recv().is_err(), "only that one goes");
 
     assert_eq!(
-        entry_types(&manager).await,
-        vec![("first".to_string(), None), ("second".to_string(), None)],
+        shown(&entries(&manager, "t1").await),
+        vec![
+            ("first", None),
+            ("an answer", Some("text")),
+            ("second", None),
+        ],
         "the message is the turn that runs now, so it stops reading as a wait"
     );
     assert!(
@@ -157,10 +188,48 @@ async fn the_queue_keeps_the_order_the_messages_arrived() {
     assert!(commands.try_recv().is_err());
 }
 
-/// An empty turn is read as empty against the turn that ended, not against a message that is
-/// still waiting: a queued message is not the answer to anything yet.
+/// A turn that answered is not read as empty because a message waits behind it. The check reads
+/// past the waits to the last message that belongs to a turn, and that message is the agent's.
 #[tokio::test]
-async fn a_waiting_message_is_not_mistaken_for_the_answer() {
+async fn an_answered_turn_is_not_read_as_empty_because_a_wait_is_behind_it() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (backend, manager, mut commands) = backend(dir.path());
+
+    let first = backend.submit(Some("t1"), "first").await.expect("submit");
+    let _ = commands.try_recv().expect("the first turn is sent");
+    {
+        let mut mgr = manager.write().await;
+        mgr.add_message_full(
+            &first.thread_id,
+            "assistant",
+            "an answer",
+            Some("a-1".to_string()),
+            Some("text".to_string()),
+            None,
+            None,
+            None,
+        );
+    }
+    let second = backend.submit(Some("t1"), "second").await.expect("submit");
+    assert!(second.queued, "the second message waits behind the answer");
+
+    control::handle_agent_event(&manager, &completed(&first.request_id)).await;
+
+    assert_eq!(
+        shown(&entries(&manager, "t1").await),
+        vec![
+            ("first", None),
+            ("an answer", Some("text")),
+            ("second", None),
+        ],
+        "the empty check read the answer, so no empty answer was recorded"
+    );
+}
+
+/// A turn that answered nothing is still recorded as empty, with a message waiting behind it:
+/// the wait does not stand in for the answer and does not mask the absence of one.
+#[tokio::test]
+async fn an_empty_turn_is_still_read_as_empty_though_a_wait_is_behind_it() {
     let dir = tempfile::tempdir().expect("dir");
     let (backend, manager, mut commands) = backend(dir.path());
 
@@ -169,14 +238,15 @@ async fn a_waiting_message_is_not_mistaken_for_the_answer() {
     let second = backend.submit(Some("t1"), "second").await.expect("submit");
     assert!(second.queued);
 
-    // No assistant message arrived before the completion, and the message behind it is not one.
+    // No assistant message arrived before the completion.
     control::handle_agent_event(&manager, &completed(&first.request_id)).await;
 
+    let entries = entries(&manager, "t1").await;
     assert!(
-        entry_types(&manager)
-            .await
+        entries
             .iter()
-            .all(|(_, entry)| entry.as_deref() != Some("error")),
-        "a turn with no answer is not recorded as an empty answer here"
+            .any(|(content, entry)| content == "[error] empty response"
+                && entry.as_deref() == Some("error")),
+        "a turn with no answer is recorded as one: {entries:?}"
     );
 }

@@ -58,7 +58,52 @@ fn test_state_with_manager() -> (SharedState, tempfile::TempDir, Manager) {
     (Arc::new(state), workdir, manager)
 }
 
-/// Bind an ephemeral port, serve the production router, return its URL.
+/// A submit that arrives while another turn runs is queued, and the streaming route says so and
+/// ends rather than following a turn that has not started. The thread's counter cannot say which
+/// completion is the queued turn's, because the turn in flight increments it first, so reporting
+/// a completion here would report the other turn's.
+#[tokio::test]
+async fn a_queued_submit_is_told_so_by_the_stream() {
+    let (state, _keep, _manager) = busy_state().await;
+    let (base, _server) = spawn_server(state).await;
+
+    let response = client()
+        .post(format!("{base}/v1/chat"))
+        .json(&serde_json::json!({"message": "the second question", "thread_id": "t1"}))
+        .send()
+        .await
+        .expect("send the submit");
+    assert_eq!(response.status(), 200, "the submit is accepted");
+    // Reading the whole body ends only because the stream ends. A stream that fell through would
+    // wait out the client's timeout here instead.
+    let body = response.text().await.expect("read the stream");
+
+    assert!(
+        body.contains("event: queued"),
+        "the stream says the turn waits: {body}"
+    );
+    assert!(body.contains("t1"), "and names the thread: {body}");
+    assert!(
+        !body.contains("message_completed"),
+        "and reports no end, which would be the other turn's: {body}"
+    );
+}
+
+/// A state whose agent is connected and ready with one turn in flight, so a submit is queued
+/// rather than sent. This is what a room's second person meets.
+async fn busy_state() -> (SharedState, tempfile::TempDir, Manager) {
+    let (state, workdir, manager) = test_state_with_manager();
+    {
+        let mut mgr = manager.write().await;
+        mgr.agent_connected = true;
+        mgr.agent_ready = true;
+        mgr.pending_requests
+            .insert("req-running".to_string(), "t-running".to_string());
+    }
+    (state, workdir, manager)
+}
+
+/// Bound an ephemeral port, serve the production router, return its URL.
 /// The listener stays bound, so the server task never races to claim
 /// the port.
 async fn spawn_server(state: SharedState) -> (String, tokio::task::JoinHandle<()>) {

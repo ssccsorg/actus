@@ -22,6 +22,15 @@ pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Strin
 /// with the thread. Dispatch clears it, which is what makes the message the turn that runs.
 pub const QUEUED_ENTRY: &str = "queued";
 
+/// Whether a message is a turn that has not run yet.
+///
+/// A message accepted while another turn runs is a user message that is still waiting. It is not
+/// where a turn begins and not part of the one in flight, so every reader that would otherwise
+/// mistake it for either asks this rather than comparing the entry type itself.
+pub fn is_waiting(message: &ThreadMessage) -> bool {
+    message.entry_type.as_deref() == Some(QUEUED_ENTRY)
+}
+
 /// A turn accepted while the agent was running another one.
 ///
 /// The message is already in the thread. What waits here is the command, and this list is what
@@ -346,7 +355,7 @@ impl AcpwsManager {
             // A turn that is still waiting is not part of the turn that ended, so it does not
             // end the trailing block: skipping it makes the snapshot the completed turn's own
             // answer, which is what a replay of that answer has to be compared against.
-            .filter(|m| m.entry_type.as_deref() != Some(QUEUED_ENTRY))
+            .filter(|m| !is_waiting(m))
             .take_while(|m| m.role == "assistant")
         {
             if let Some(id) = &m.message_id {
@@ -407,7 +416,10 @@ impl AcpwsManager {
         if self.has_live_request() || self.queued_turns.is_empty() {
             return Ok(None);
         }
-        let turn = self.queued_turns.remove(0);
+        // The turn stays at the front until the command is out, so neither a failure to build it
+        // nor a failure to send it can lose it. Preparing the message twice is harmless: what it
+        // does for a thread it has not activated is idempotent.
+        let turn = self.queued_turns[0].clone();
         let enriched = self.prepare_message(&turn.thread_id, &turn.message);
         let cmd = Command::ChatMessage {
             acp_thread_id: self.get_acp_thread_id(&turn.thread_id),
@@ -416,12 +428,10 @@ impl AcpwsManager {
             thinking_effort: turn.thinking_effort.clone(),
         }
         .to_json()?;
-        if let Err(e) = self.send_command(&cmd) {
-            // Nothing carried the command, so the turn keeps its place and waits for a
-            // connection. It is not lost, and it has not been sent.
-            self.queued_turns.insert(0, turn);
-            return Err(e);
-        }
+        // Nothing carried the command means the turn keeps its place and waits for a connection.
+        // It is not lost, and it has not been sent.
+        self.send_command(&cmd)?;
+        self.queued_turns.remove(0);
         // The message said it was waiting. The command is out, so it is now the turn that runs,
         // and the state it carries says so to every client that reads the thread.
         self.add_message_full(

@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::acpws::types::SyncEvent;
-use crate::acpws::{AcpwsManager, QUEUED_ENTRY};
+use crate::acpws::{is_waiting, AcpwsManager};
 use crate::server::WsCommandTx;
 
 /// Run the WebSocket server that accepts connections from the executor.
@@ -412,15 +412,21 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text:
                 // message at all (no text, no tool call, no error). The
                 // last message is still the user's, so record an error
                 // instead of letting consumers see a silent success with
-                // zero content. A turn that is waiting is a different message that has not run,
-                // so it says nothing about this one and does not stand in for the answer.
+                // zero content.
+                //
+                // A turn that is waiting is a different message, one that has not run, so the
+                // check reads past the waits. A wait is never older than the turn that is
+                // running, and the waits behind this turn are exactly the queue's, so reading
+                // one message past them reaches the last message that belongs to a turn.
+                let back = mgr.queued_turns.len() + 1;
                 let last_is_user = mgr
-                    .tail(&local_id, 1)
+                    .tail(&local_id, back)
                     .ok()
                     .and_then(|tail| {
-                        tail.last().map(|m| {
-                            m.role == "user" && m.entry_type.as_deref() != Some(QUEUED_ENTRY)
-                        })
+                        tail.iter()
+                            .rev()
+                            .find(|message| !is_waiting(message))
+                            .map(|message| message.role == "user")
                     })
                     .unwrap_or(false);
                 if last_is_user {

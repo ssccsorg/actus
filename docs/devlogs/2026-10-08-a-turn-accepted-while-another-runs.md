@@ -173,6 +173,12 @@ Not realized, and the second one is a defect rather than a wait.
    has not run, so it truncated the running turn to nothing. It now looks for the last message
    that begins a turn and leaves the waits to the thread read.
 
+   The empty-turn check moved the same way. It asked whether the thread's last message was the
+   person's, which a wait behind the turn is not, so the check now reads past the waits to the
+   last message that belongs to a turn. Merely excluding the waits was wrong in the other
+   direction: a turn that recorded no answer at all went unreported because a wait happened to be
+   behind it. Both directions are pinned in `tests/queued_turn_test.rs`.
+
 Both are named here because a reader who finds the queue working should know which of its promises
 are still owed.
 
