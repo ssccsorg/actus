@@ -71,6 +71,39 @@ A receipt says the turn is queued, so a caller reports it rather than guessing.
 `ThreadMessage` already carries `entry_type` and `author`, so a queued message needs no new type: it
 is a message whose state says queued and whose author is who sent it.
 
+## The queue's semantics, from upstream Zed
+
+The queue is a mature thing upstream, so its rules are adopted rather than invented. In Zed the
+queue is per thread (`thread.message_queue`, `crates/agent_ui/src/conversation_view/message_queue.rs`),
+FIFO, and each entry is editable and removable. Its rules:
+
+Release on the generation-stopped event, which sends the front entry.
+
+One entry while a turn runs may `steer`: only the front entry carries it, and it interrupts at the
+next turn boundary rather than waiting for the turn to finish.
+
+Explicit actions pace the queue by hand. Send-now pops an entry even while generating, which
+cancels the running turn, and the cancellation's stopped event is then absorbed so the queue does
+not send twice.
+
+A manual stop pauses the queue, and queueing a message or sending resumes it.
+
+Auto-send waits while the user is editing the next entry.
+
+A turn's end here is the same trigger as the generation-stopped event, so the release rule carries
+over unchanged.
+
+## The one place we differ
+
+Zed's queue is client-side because a Zed thread has one client. Ours has several, so the queue has
+to be in the record or two clients cannot see the same order. That is the whole of the difference,
+and it has one consequence.
+
+The record is append-only, so a queued message cannot be edited or deleted in place the way a Zed
+entry can. Its state changes instead: queued, dispatched, answered, withdrawn. That is a lifecycle,
+and the format already carries one for intents, so a queued message is an intent rather than a new
+kind of message.
+
 ## What changes, in order
 
 actus. `submit_with_options` records the message as it does now; when the agent already has a live
@@ -91,9 +124,14 @@ non-parallel executor.
 
 ## Not decided here
 
-The queue's bound, and what a caller sees for a full queue.
+The queue's bound, and what a caller sees for a full queue. Zed has none, because a client's queue
+is the client's own memory; a shared one needs a stated bound.
 
-Whether a queued message can be edited or cancelled before it is dispatched.
+Whether a withdrawal needs its own status or is expressed another way, given that the record is
+append-only and an intent's status axis is submitted, claimed, and concluded.
+
+Whether `steer` and send-now are in the first unit. Both cancel a running turn, so both need the
+absorbing rule Zed found it needed.
 
 Whether the app's local queue stays. It should: it is what makes a one-user session instant, and it
 is not the same thing as the room's order.
