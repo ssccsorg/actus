@@ -26,10 +26,10 @@ use tokio::sync::{watch, Mutex, RwLock};
 
 use crate::agent::config::PromptMode;
 use crate::agent::{
-    AgentBackend, AgentKind, AgentStatus, NOTE_ROLE, PendingAuthorization, SubmitReceipt,
-    ThreadMessage, ThreadParent, ThreadSession, truncate_title,
+    truncate_title, AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt,
+    ThreadMessage, ThreadParent, ThreadSession, NOTE_ROLE,
 };
-use crate::store::{Record, RecordStore};
+use crate::store::{Record, RecordStore, RecordedMessage};
 
 /// Cap on the recorded assistant message, in characters. A CLI can emit
 /// long output; a thread message stays bounded.
@@ -499,7 +499,13 @@ impl AgentBackend for ExtCliAgent {
     }
 
     async fn threads(&self) -> Vec<ThreadSession> {
-        self.threads.read().await.threads.values().cloned().collect()
+        self.threads
+            .read()
+            .await
+            .threads
+            .values()
+            .cloned()
+            .collect()
     }
 
     async fn record_store(&self) -> String {
@@ -511,6 +517,14 @@ impl AgentBackend for ExtCliAgent {
         self.record
             .message_count(&state.threads, &state.held, thread_id)
             .unwrap_or(0)
+    }
+
+    async fn messages_between(
+        &self,
+        since: Option<u64>,
+        until: Option<u64>,
+    ) -> Result<Vec<RecordedMessage>, String> {
+        self.record.between(since, until)
     }
 
     async fn messages_window(

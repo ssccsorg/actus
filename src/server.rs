@@ -375,7 +375,12 @@ async fn health(State(state): State<SharedState>) -> Json<HealthResponse> {
                     .iter()
                     .filter(|thread| !thread.completed)
                     .count();
-                (status.connected, status.ready, threads, agent.record_store().await)
+                (
+                    status.connected,
+                    status.ready,
+                    threads,
+                    agent.record_store().await,
+                )
             }
             None => (false, false, 0, String::new()),
         };
@@ -1286,6 +1291,67 @@ async fn cancel_turn(
 
 // ── Router ─────────────────────────────────────────────────────────────
 
+/// A read of the records by a span of time.
+#[derive(Deserialize)]
+pub struct RecordsQuery {
+    /// Agent name to route to; defaults to the fabric default agent.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Lower bound on the record's own time, in nanoseconds since the epoch, inclusive.
+    /// Absent is no lower bound.
+    #[serde(default)]
+    pub since: Option<u64>,
+    /// Upper bound on the record's own time, inclusive. Absent is no upper bound, which
+    /// makes the read the whole volume.
+    #[serde(default)]
+    pub until: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct RecordsResponse {
+    pub records: Vec<serde_json::Value>,
+}
+
+/// The records a span of time found, across every thread the agent's store holds.
+///
+/// The read a volume's own axis answers rather than a thread's window, so the store answers
+/// it and actus filters nothing on its side. What actus does with it is what it does with a
+/// thread's window: route the request to the agent a caller named and hand the answer back.
+///
+/// A store that does not carry the read is answered as a store that does not carry it,
+/// rather than as a span that matched nothing.
+async fn list_records(
+    State(state): State<SharedState>,
+    Query(q): Query<RecordsQuery>,
+) -> Result<Json<RecordsResponse>, StatusCode> {
+    let agent = agent_for(&state, q.agent.as_deref()).await?;
+    let found = agent
+        .messages_between(q.since, q.until)
+        .await
+        .map_err(|_| StatusCode::NOT_IMPLEMENTED)?;
+    let records: Vec<serde_json::Value> = found
+        .iter()
+        .map(|recorded| {
+            let message = &recorded.message;
+            serde_json::json!({
+                // The time crosses as a string, which is the form a request's bounds take:
+                // a nanosecond count is past the range a double holds integers exactly, so a
+                // client built on doubles would read it without its low bits.
+                "written_at": recorded.written_at.to_string(),
+                "role": message.role,
+                "content": message.content,
+                "message_id": message.message_id,
+                "entry_type": message.entry_type,
+                "tool_name": message.tool_name,
+                "tool_status": message.tool_status,
+                "author": message.author,
+                "timestamp": message.timestamp.to_rfc3339(),
+            })
+        })
+        .collect();
+    Ok(Json(RecordsResponse { records }))
+}
+
 /// Build the axum router over the given state. Kept separate from
 /// `run_http_server` so integration tests can serve the same router on
 /// an ephemeral port without binding a fixed address.
@@ -1311,6 +1377,7 @@ pub fn build_router(state: SharedState, cors_origins: &[String]) -> Router {
             post(resolve_tool_call_handler),
         )
         .route("/v1/threads", get(list_threads))
+        .route("/v1/records", get(list_records))
         .route("/v1/threads", post(create_thread_handler))
         .route("/v1/threads/{thread_id}", get(get_thread))
         .route("/v1/threads/{thread_id}/poll", get(poll_thread))

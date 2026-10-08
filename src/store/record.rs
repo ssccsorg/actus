@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::agent::{ThreadMessage, ThreadSession};
-use crate::store::RecordStore;
+use crate::store::{RecordStore, RecordedMessage};
 
 /// The store a backend records through, with the one rule for reading and writing it.
 #[derive(Clone)]
@@ -116,6 +116,19 @@ impl Record {
             }
         }
         self.store.load_messages(thread_id, from, limit)
+    }
+
+    /// The messages a span of time found, which is the volume's own axis rather than a
+    /// thread's window.
+    ///
+    /// Nothing of the caller's maps takes part: the span is answered from the records, so a
+    /// thread this backend never read into hand is in the answer all the same.
+    pub fn between(
+        &self,
+        since: Option<u64>,
+        until: Option<u64>,
+    ) -> Result<Vec<RecordedMessage>, String> {
+        self.store.read_between(since, until)
     }
 
     /// Write the record back, consuming the caller's snapshot.

@@ -13,6 +13,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use crate::store::RecordedMessage;
+
 pub mod config;
 pub mod ext_cli;
 
@@ -302,6 +304,19 @@ pub trait AgentBackend: Send + Sync {
     /// The default takes the window from the snapshot [`thread`](Self::thread) returns,
     /// which is what a backend holding its threads in memory can do. A backend over a store
     /// reads the window alone, so a view costs the window and not the conversation.
+    /// The messages a span of time found, across every thread this agent's record holds.
+    ///
+    /// The read a volume's own axis answers rather than a thread's window, so a caller
+    /// reaches it without naming a thread. The default says the backend does not carry it,
+    /// because an answer with no records would be read as a span that matched nothing.
+    async fn messages_between(
+        &self,
+        _since: Option<u64>,
+        _until: Option<u64>,
+    ) -> Result<Vec<RecordedMessage>, String> {
+        Err("this backend does not read a span by time".to_string())
+    }
+
     async fn messages_window(
         &self,
         thread_id: &str,

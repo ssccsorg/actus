@@ -17,6 +17,7 @@ use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
     ThreadParent, ThreadSession, NOTE_ROLE,
 };
+use crate::store::RecordedMessage;
 
 /// One executor agent instance behind the fabric interface.
 pub struct AcpwsBackend {
@@ -122,16 +123,7 @@ impl AgentBackend for AcpwsBackend {
             };
             mgr.set_title(&tid, message);
             let enriched = mgr.prepare_message(&tid, message);
-            mgr.add_message_full(
-                &tid,
-                "user",
-                message,
-                None,
-                None,
-                None,
-                None,
-                author,
-            );
+            mgr.add_message_full(&tid, "user", message, None, None, None, None, author);
             let rid = uuid::Uuid::new_v4().to_string();
             let acp_id = mgr.get_acp_thread_id(&tid);
             let cmd = Command::ChatMessage {
@@ -276,6 +268,17 @@ impl AgentBackend for AcpwsBackend {
             .await
             .message_count(thread_id)
             .unwrap_or(0)
+    }
+
+    async fn messages_between(
+        &self,
+        since: Option<u64>,
+        until: Option<u64>,
+    ) -> Result<Vec<RecordedMessage>, String> {
+        // The record is cloned out of the manager so the read, which reaches the medium,
+        // does not hold the lock a turn needs.
+        let record = self.manager.read().await.record.clone();
+        record.between(since, until)
     }
 
     async fn messages_window(
