@@ -2,7 +2,7 @@
 
 date: 2026-10-08
 project: Actus
-status: design, no code changed
+status: designed and landed; the queue is in actus, the gateway still refuses
 related:
 
 - kletos `gateway/src/main.rs`, `gateway/tests/multiuser.rs`
@@ -135,3 +135,38 @@ absorbing rule Zed found it needed.
 
 Whether the app's local queue stays. It should: it is what makes a one-user session instant, and it
 is not the same thing as the room's order.
+
+## What the first unit landed
+
+The queue is in actus. `AcpwsManager::queued_turns` holds the turns that are waiting, in arrival
+order; `submit_with_options` records the message and queues it when `has_live_request()` says the
+agent is running one; `dispatch_queued` sends the front turn, and the three places a turn can end —
+answered, failed, cancelled — call it through `release_queue` in `src/acpws/control.rs`.
+
+Two properties the design claimed are realized, and two are not yet. Which is which matters more
+than the code:
+
+Realized. A queued message is a user message whose `entry_type` is `queued`, so it is visible in the
+thread to every client, and dispatch clears the state rather than removing the message. And no
+command reaches the executor while another turn runs, because the busy test and the queue are read
+and written under the one manager lock.
+
+Not realized, and the second one is a defect rather than a wait.
+
+1. The queue does not rebuild from the record after a restart. The design says it would, and a
+   queued message is in the record, but the request id and the effort are not, so a restart leaves
+   the message recorded with no turn behind it. That is the same gap a turn already in flight has,
+   and closing it needs either two more fields on the queued message or a derived request id.
+2. The streaming route cannot follow a queued turn. `chat_stream` waits on the thread's own
+   completion counter, which the turn in flight increments first, so the counter cannot say which
+   completion is the queued turn's; there is no per-request completion on the fabric's surface to
+   ask instead. The route now answers a queued submit with one `queued` event and ends, which is
+   honest about what it can say, and a caller that wants the answer polls the thread. Making the
+   stream follow the turn needs a per-request question on `AgentBackend`.
+
+Both are named here because a reader who finds the queue working should know which of its promises
+are still owed.
+
+The three tests are in `tests/queued_turn_test.rs`: the second message waits and then runs, the
+queue keeps arrival order, and a waiting message is not mistaken for the answer to the turn that
+ended.

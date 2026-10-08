@@ -429,8 +429,10 @@ async fn chat_async(
         task_id: receipt.request_id.clone(),
         // The message is accepted for execution, not yet approved; the
         // hardcoded "approved" from the earlier approval design was
-        // misleading because approval only applies in ask mode.
-        status: "submitted".to_string(),
+        // misleading because approval only applies in ask mode. A turn the agent could not
+        // start yet says so, so a caller reports what happened rather than guessing from a
+        // status that reads the same whether the agent is running the turn or holding it.
+        status: if receipt.queued { "queued" } else { "submitted" }.to_string(),
         thread_id: receipt.thread_id,
     }))
 }
@@ -489,6 +491,7 @@ async fn chat_stream(
 
     let tid = receipt.thread_id.clone();
     let is_new = receipt.is_new;
+    let queued = receipt.queued;
     // Build SSE stream: poll with backoff, using the watch channel for
     // notification. Each SSE stream captures the current turn_id and
     // waits for thread.turn_completed > turn_id, so multiple SSE streams
@@ -507,6 +510,20 @@ async fn chat_stream(
     );
     let agent_stream = agent.clone();
     let stream = async_stream::stream! {
+        // A turn accepted while another ran did not start here: it waits behind the turn in
+        // flight, and the thread's own completion counter cannot say which completion is this
+        // one's, because the running turn increments it first. So the stream says the turn is
+        // waiting and ends rather than reporting an end that would be the other turn's. The
+        // answer is read from the thread, which is where the queue's order lives too.
+        if queued {
+            tracing::debug!("SSE stream {}: the turn is queued behind one in flight", tid);
+            yield Ok(Event::default()
+                .event("queued")
+                .data(serde_json::to_string(&serde_json::json!({
+                    "thread_id": tid.clone(),
+                })).unwrap()));
+            return;
+        }
         tracing::debug!("SSE stream starting for thread {} (turn_id={}, new={})", tid, turn_id, is_new);
         let event_name = if is_new { "thread_created" } else { "thread_resumed" };
         yield Ok(Event::default()

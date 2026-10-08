@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::acpws::types::SyncEvent;
-use crate::acpws::AcpwsManager;
+use crate::acpws::{AcpwsManager, QUEUED_ENTRY};
 use crate::server::WsCommandTx;
 
 /// Run the WebSocket server that accepts connections from the executor.
@@ -412,11 +412,16 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text:
                 // message at all (no text, no tool call, no error). The
                 // last message is still the user's, so record an error
                 // instead of letting consumers see a silent success with
-                // zero content.
+                // zero content. A turn that is waiting is a different message that has not run,
+                // so it says nothing about this one and does not stand in for the answer.
                 let last_is_user = mgr
                     .tail(&local_id, 1)
                     .ok()
-                    .and_then(|tail| tail.last().map(|m| m.role == "user"))
+                    .and_then(|tail| {
+                        tail.last().map(|m| {
+                            m.role == "user" && m.entry_type.as_deref() != Some(QUEUED_ENTRY)
+                        })
+                    })
                     .unwrap_or(false);
                 if last_is_user {
                     tracing::warn!(
@@ -452,6 +457,7 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text:
                     &request_id[..request_id.len().min(12)]
                 );
             }
+            release_queue(&mut mgr);
             mgr.notify_thread_change();
             mgr.save_threads();
             tracing::info!(
@@ -503,6 +509,7 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text:
                 // Snapshot the error entry so a follow-up replay is dropped.
                 mgr.record_prior_entries(&local_id);
             }
+            release_queue(&mut mgr);
             mgr.notify_thread_change();
             tracing::error!("Chat response error (req {}): {}", &request_id[..request_id.len().min(12)], error);
         }
@@ -552,6 +559,7 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text:
                 // dropped.
                 mgr.record_prior_entries(&local_id);
             }
+            release_queue(&mut mgr);
             mgr.notify_thread_change();
             tracing::info!("Turn cancelled (req {}, status {})", &request_id[..request_id.len().min(12)], status);
         }
@@ -581,5 +589,22 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text:
                 &acp_thread_id[..acp_thread_id.len().min(12)]
             );
         }
+    }
+}
+
+/// A turn ended, so the agent may be free: the turn that was waiting goes now.
+///
+/// The release is one trigger for every way a turn can end — answered, failed, cancelled —
+/// because what frees the agent is the request id leaving `pending_requests` rather than the
+/// answer the turn produced. A failure to send is said out loud and the turn keeps its place;
+/// it is never dropped, because dropping it is the loss this queue exists to prevent.
+fn release_queue(mgr: &mut AcpwsManager) {
+    match mgr.dispatch_queued() {
+        Ok(Some(request_id)) => tracing::info!(
+            "Queued turn dispatched (req {})",
+            &request_id[..request_id.len().min(12)]
+        ),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("a queued turn could not be dispatched: {e}"),
     }
 }

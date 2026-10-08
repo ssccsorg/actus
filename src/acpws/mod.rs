@@ -15,6 +15,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// handlers).
 pub type WsCommandTx = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>;
 
+/// The entry type a user message carries while its turn waits for the agent.
+///
+/// A queued turn is a user message whose state says it has not run, so the state lives where the
+/// record already carries per-message state rather than in a second place that could disagree
+/// with the thread. Dispatch clears it, which is what makes the message the turn that runs.
+pub const QUEUED_ENTRY: &str = "queued";
+
+/// A turn accepted while the agent was running another one.
+///
+/// The message is already in the thread. What waits here is the command, and this list is what
+/// says the turn has not been sent. Entries are held in arrival order across the agent, which
+/// keeps every thread's own order because a thread's entries are appended in that order, and the
+/// order across threads is the agent's own single lock made visible.
+#[derive(Clone, Debug)]
+pub struct QueuedTurn {
+    pub request_id: String,
+    pub thread_id: String,
+    /// The message as the caller typed it. The command carries the prepared form, and the
+    /// preparation waits for dispatch because it reads the thread's history, which the turn that
+    /// is running is still writing.
+    pub message: String,
+    pub thinking_effort: Option<String>,
+    /// The id the waiting message was recorded under, so dispatch can mark it sent.
+    pub message_id: String,
+}
+
 // ACP-over-WebSocket manager: connection, session management, and settings bootstrap.
 
 use std::collections::{HashMap, HashSet};
@@ -71,6 +97,11 @@ pub struct AcpwsManager {
     /// Pending chat messages that need to be re-sent after reconnection.
     /// Stores (request_id, thread_id, message) tuples.
     pub pending_chat_queue: Vec<(String, String, String)>,
+    /// Turns accepted while this agent was running another one, in arrival order. A different
+    /// thing from `pending_chat_queue`, which holds commands that have already gone to the
+    /// agent: a reconnection resends those and must not resend these, because these were never
+    /// sent.
+    pub queued_turns: Vec<QueuedTurn>,
     /// Dirty flag for the debounced background thread-saver.
     pub threads_dirty: AtomicBool,
     /// Tool-call authorizations awaiting a human decision, keyed by
@@ -140,6 +171,7 @@ impl AcpwsManager {
             last_ping_time: Instant::now(),
             last_sse_event_time: Instant::now(),
             pending_chat_queue: Vec::new(),
+            queued_turns: Vec::new(),
             pending_authorizations: HashMap::new(),
             prior_message_content: HashMap::new(),
             sentinel_cap: 512,
@@ -311,6 +343,10 @@ impl AcpwsManager {
             .messages
             .iter()
             .rev()
+            // A turn that is still waiting is not part of the turn that ended, so it does not
+            // end the trailing block: skipping it makes the snapshot the completed turn's own
+            // answer, which is what a replay of that answer has to be compared against.
+            .filter(|m| m.entry_type.as_deref() != Some(QUEUED_ENTRY))
             .take_while(|m| m.role == "assistant")
         {
             if let Some(id) = &m.message_id {
@@ -348,6 +384,66 @@ impl AcpwsManager {
                 self.pending_requests.remove(&k);
             }
         }
+    }
+
+    /// Whether this agent is running a turn, which is what makes an arriving message wait.
+    ///
+    /// `pending_requests` holds a live mapping while a turn is in flight and a blank sentinel
+    /// once it has been consumed, so a non-empty value is what "running" means.
+    pub fn has_live_request(&self) -> bool {
+        self.pending_requests
+            .values()
+            .any(|thread_id| !thread_id.is_empty())
+    }
+
+    /// Send the turn at the front of the queue, if this agent is free.
+    ///
+    /// Called where a turn's request id leaves `pending_requests`, which is where a turn ends.
+    /// What it repeats from a submit is the part after the command is built: the message is
+    /// prepared against the thread's history now rather than when it was accepted, because the
+    /// turn that was running has written to the thread in between, and the request id starts
+    /// counting only now.
+    pub fn dispatch_queued(&mut self) -> Result<Option<String>, String> {
+        if self.has_live_request() || self.queued_turns.is_empty() {
+            return Ok(None);
+        }
+        let turn = self.queued_turns.remove(0);
+        let enriched = self.prepare_message(&turn.thread_id, &turn.message);
+        let cmd = Command::ChatMessage {
+            acp_thread_id: self.get_acp_thread_id(&turn.thread_id),
+            message: enriched,
+            request_id: turn.request_id.clone(),
+            thinking_effort: turn.thinking_effort.clone(),
+        }
+        .to_json()?;
+        if let Err(e) = self.send_command(&cmd) {
+            // Nothing carried the command, so the turn keeps its place and waits for a
+            // connection. It is not lost, and it has not been sent.
+            self.queued_turns.insert(0, turn);
+            return Err(e);
+        }
+        // The message said it was waiting. The command is out, so it is now the turn that runs,
+        // and the state it carries says so to every client that reads the thread.
+        self.add_message_full(
+            &turn.thread_id,
+            "user",
+            &turn.message,
+            Some(turn.message_id.clone()),
+            None,
+            None,
+            None,
+            None,
+        );
+        self.pending_requests
+            .insert(turn.request_id.clone(), turn.thread_id.clone());
+        self.threads_activated.insert(turn.thread_id.clone());
+        if let Some(thread) = self.threads.get_mut(&turn.thread_id) {
+            thread.completed = false;
+        }
+        self.pending_chat_queue
+            .push((turn.request_id.clone(), turn.thread_id.clone(), cmd));
+        self.notify_thread_change();
+        Ok(Some(turn.request_id))
     }
 
     /// Append a message to a thread, replacing an existing message with the

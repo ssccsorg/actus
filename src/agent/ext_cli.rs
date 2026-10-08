@@ -466,6 +466,9 @@ impl AgentBackend for ExtCliAgent {
             thread_id: tid,
             request_id,
             is_new,
+            // This kind declares `parallel`, so a second turn is a second process and nothing
+            // waits for a first one.
+            queued: false,
         })
     }
 

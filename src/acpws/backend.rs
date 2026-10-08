@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tokio::sync::{Notify, RwLock};
 
 use crate::acpws::types::Command;
-use crate::acpws::{AcpwsManager, WsCommandTx};
+use crate::acpws::{AcpwsManager, QueuedTurn, WsCommandTx, QUEUED_ENTRY};
 use crate::agent::{
     AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
     ThreadParent, ThreadSession, NOTE_ROLE,
@@ -122,6 +122,39 @@ impl AgentBackend for AcpwsBackend {
                 }
             };
             mgr.set_title(&tid, message);
+
+            // This kind declares no parallelism, so the executor runs one turn at a time and a
+            // message that arrives while one runs cannot be given to it yet. It is recorded and
+            // queued rather than refused: the record keeps what the person wrote, so no client
+            // loses it, and a receipt says the turn is waiting rather than running.
+            if mgr.has_live_request() {
+                let rid = uuid::Uuid::new_v4().to_string();
+                let message_id = uuid::Uuid::new_v4().to_string();
+                mgr.add_message_full(
+                    &tid,
+                    "user",
+                    message,
+                    Some(message_id.clone()),
+                    Some(QUEUED_ENTRY.to_string()),
+                    None,
+                    None,
+                    author,
+                );
+                mgr.queued_turns.push(QueuedTurn {
+                    request_id: rid.clone(),
+                    thread_id: tid.clone(),
+                    message: message.to_string(),
+                    thinking_effort: thinking_effort.map(str::to_string),
+                    message_id,
+                });
+                return Ok(SubmitReceipt {
+                    thread_id: tid,
+                    request_id: rid,
+                    is_new,
+                    queued: true,
+                });
+            }
+
             let enriched = mgr.prepare_message(&tid, message);
             mgr.add_message_full(&tid, "user", message, None, None, None, None, author);
             let rid = uuid::Uuid::new_v4().to_string();
@@ -223,6 +256,7 @@ impl AgentBackend for AcpwsBackend {
             thread_id,
             request_id,
             is_new,
+            queued: false,
         })
     }
 

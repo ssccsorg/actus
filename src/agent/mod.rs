@@ -146,6 +146,10 @@ pub struct SubmitReceipt {
     pub request_id: String,
     /// True when this submit created a fresh thread.
     pub is_new: bool,
+    /// True when the agent was already running a turn and this one was recorded to run after
+    /// it. The message is in the thread either way; the flag says that no command has reached
+    /// the agent yet, so a caller reports the turn as waiting rather than as running.
+    pub queued: bool,
 }
 
 /// Who dispatched a turn into another agent: the controlling agent and
