@@ -594,10 +594,10 @@ pub async fn handle_agent_event(agent_manager: &Arc<RwLock<AcpwsManager>>, text:
 
 /// A turn ended, so the agent may be free: the turn that was waiting goes now.
 ///
-/// The release is one trigger for every way a turn can end — answered, failed, cancelled —
-/// because what frees the agent is the request id leaving `pending_requests` rather than the
-/// answer the turn produced. A failure to send is said out loud and the turn keeps its place;
-/// it is never dropped, because dropping it is the loss this queue exists to prevent.
+/// The release is one trigger for every way a turn can end, whether the turn was answered, failed
+/// or cancelled, because what frees the agent is the request id leaving `pending_requests` rather
+/// than the answer the turn produced. A failure to send is said out loud and the turn keeps its
+/// place; it is never dropped, because dropping it is the loss this queue exists to prevent.
 fn release_queue(mgr: &mut AcpwsManager) {
     match mgr.dispatch_queued() {
         Ok(Some(request_id)) => tracing::info!(

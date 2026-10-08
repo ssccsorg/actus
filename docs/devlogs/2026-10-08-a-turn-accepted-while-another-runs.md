@@ -140,8 +140,8 @@ is not the same thing as the room's order.
 
 The queue is in actus. `AcpwsManager::queued_turns` holds the turns that are waiting, in arrival
 order; `submit_with_options` records the message and queues it when `has_live_request()` says the
-agent is running one; `dispatch_queued` sends the front turn, and the three places a turn can end —
-answered, failed, cancelled — call it through `release_queue` in `src/acpws/control.rs`.
+agent is running one; `dispatch_queued` sends the front turn, and the three places a turn can end
+(answered, failed, cancelled) call it through `release_queue` in `src/acpws/control.rs`.
 
 Two properties the design claimed are realized, and two are not yet. Which is which matters more
 than the code:
