@@ -131,6 +131,36 @@ pub trait RecordStore: Send + Sync {
         }
         Ok(thread.messages[from..end].to_vec())
     }
+
+    /// The messages a volume recorded between two times, across every thread it holds.
+    ///
+    /// The read a volume's own time axis answers. A record carries the time it was written,
+    /// so a question about a span is answered from the framing, at one medium read a record
+    /// and no payload read to select it. The bounds are inclusive, and either may be absent,
+    /// which is what an unbounded read of the volume is.
+    ///
+    /// The messages come back in the order the medium handed them over, which is not the
+    /// time axis, so a caller that needs a sequence settles it on the time each one carries.
+    ///
+    /// The default says the store does not carry the read. A store that answered a span by
+    /// filtering a document it holds whole would return the same set at a cost the caller
+    /// cannot see, and that difference is what this read exists to make.
+    fn read_between(
+        &self,
+        _since: Option<u64>,
+        _until: Option<u64>,
+    ) -> Result<Vec<RecordedMessage>, String> {
+        Err("this store does not read a window by time".to_string())
+    }
+}
+
+/// A message a span of time found, with the time its record carries.
+#[derive(Debug, Clone)]
+pub struct RecordedMessage {
+    /// Nanoseconds since the Unix epoch, as the writing device's clock recorded them.
+    pub written_at: u64,
+    /// The message the record holds.
+    pub message: ThreadMessage,
 }
 
 /// Open the store this deployment selected. `dir` is the agent's own directory, and an

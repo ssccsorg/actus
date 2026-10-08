@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::RecordStore;
+use super::{RecordStore, RecordedMessage};
 use crate::agent::{ThreadMessage, ThreadSession};
 
 /// The origin a message record carries.
@@ -107,6 +107,28 @@ pub trait Volume: Send + Sync {
     /// The payload under a name, or nothing when no record carries it.
     fn read_payload(&self, name: &str) -> Result<Option<Vec<u8>>, String>;
 
+    /// The addresses and the times of the records published under one origin inside a span
+    /// of time.
+    ///
+    /// The read a volume's own axes answer, and the address is what a caller reads a payload
+    /// by afterwards. The origin is what separates the kinds of thing a volume holds, which
+    /// is what lets a caller ask for the messages rather than for every record; `None` is
+    /// every origin.
+    ///
+    /// A store that does not carry the read says so, because a caller that asked for a span
+    /// and received an unfiltered answer would take it for a filtered one.
+    fn window_addresses(
+        &self,
+        _origin: Option<&str>,
+        _since: Option<u64>,
+        _until: Option<u64>,
+    ) -> Result<Vec<(u64, String)>, String> {
+        Err(format!(
+            "the {} store does not read a window by time",
+            self.kind()
+        ))
+    }
+
     /// What kind of volume this is, as the short noun a person reads.
     ///
     /// It names the shape rather than the instance, so a store's description reads as
@@ -173,6 +195,35 @@ impl<V: Volume> VolumeStore<V> {
         }
         let cursor = messages.len() as u64;
         Ok((messages, cursor))
+    }
+
+    /// The messages a span of time found, each with the time its record carries.
+    ///
+    /// The record's own time decides the span rather than the field inside the message: it
+    /// is what the volume answers from, at one medium read a record and no payload read to
+    /// select it. The origin is the one this store writes a message under, so the records a
+    /// span reaches are the messages rather than everything the volume holds.
+    fn between_records(
+        &self,
+        since: Option<u64>,
+        until: Option<u64>,
+    ) -> Result<Vec<RecordedMessage>, String> {
+        let addresses = self
+            .volume
+            .window_addresses(Some(MESSAGE_ORIGIN), since, until)?;
+        let mut found = Vec::new();
+        for (written_at, address) in addresses {
+            let Some(bytes) = self.payload(&address)? else {
+                continue;
+            };
+            let message: ThreadMessage = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("{address} is not a message: {e}"))?;
+            found.push(RecordedMessage {
+                written_at,
+                message,
+            });
+        }
+        Ok(found)
     }
 
     fn read_titles(&self, id: &str) -> Result<TitleState, String> {
@@ -519,6 +570,14 @@ impl<V: Volume> RecordStore for VolumeStore<V> {
             }
         }
         Ok(messages)
+    }
+
+    fn read_between(
+        &self,
+        since: Option<u64>,
+        until: Option<u64>,
+    ) -> Result<Vec<RecordedMessage>, String> {
+        self.between_records(since, until)
     }
 
     fn persist(&self, mut threads: HashMap<String, ThreadSession>) -> Result<(), String> {
