@@ -993,6 +993,87 @@ async fn cors_whitelist_controls_browser_origins() {
     server.abort();
 }
 
+/// A poll that names the request it submitted is answered about that request rather than about the
+/// thread's counter, which is what a room needs: a second person's turn must not be reported as
+/// finished when the first one's ends.
+#[tokio::test]
+async fn a_poll_by_request_answers_about_that_request() {
+    async fn poll(base: &str, query: &str) -> serde_json::Value {
+        client()
+            .get(format!("{base}/v1/threads/t1/poll?{query}"))
+            .send()
+            .await
+            .expect("send the poll")
+            .json()
+            .await
+            .expect("read the poll")
+    }
+
+    let (state, _keep, manager) = test_state_with_manager();
+    {
+        let mut mgr = manager.write().await;
+        mgr.agent_connected = true;
+        mgr.agent_ready = true;
+        let tid = mgr.get_or_create_thread(Some("t1"));
+        mgr.add_message(&tid, "user", "the first question", None);
+        mgr.add_message_full(
+            &tid,
+            "assistant",
+            "the first answer",
+            Some("acp:1".to_string()),
+            Some("text".to_string()),
+            None,
+            None,
+            None,
+        );
+        // A turn the agent is running, and a turn that waits behind it.
+        mgr.pending_requests
+            .insert("req-running".to_string(), "t1".to_string());
+        mgr.queued_turns.push(actus::acpws::QueuedTurn {
+            request_id: "req-waiting".to_string(),
+            thread_id: "t1".to_string(),
+            message: "the second question".to_string(),
+            thinking_effort: None,
+            message_id: "queued:1".to_string(),
+        });
+        if let Some(thread) = mgr.threads.get_mut("t1") {
+            thread.turn_completed = 1;
+        }
+    }
+    let (base, _server) = spawn_server(state).await;
+
+    // The counter alone says a turn finished, because one did, and it was not this one's.
+    let counted = poll(&base, "turn=0").await;
+    assert_eq!(
+        counted["completed"], true,
+        "the counter's answer: {counted}"
+    );
+
+    // The running turn is not finished, whatever the counter says.
+    let running = poll(&base, "turn=0&request=req-running").await;
+    assert_eq!(running["completed"], false, "a running turn: {running}");
+
+    // A waiting turn is not finished either, and it has nothing of its own to serve.
+    let waiting = poll(&base, "turn=0&request=req-waiting").await;
+    assert_eq!(waiting["completed"], false, "a waiting turn: {waiting}");
+    assert_eq!(
+        waiting["messages"]
+            .as_array()
+            .map(|messages| messages.len()),
+        Some(0),
+        "a wait is not the turn in flight: {waiting}"
+    );
+    assert!(
+        waiting["new_content"].is_null(),
+        "nothing to serve: {waiting}"
+    );
+
+    // A turn that ended is finished. An id the process does not hold is ended, which is the same
+    // answer as one whose completion it has already recorded.
+    let settled = poll(&base, "turn=0&request=req-settled").await;
+    assert_eq!(settled["completed"], true, "a turn that ended: {settled}");
+}
+
 /// A message accepted while another turn runs is in the thread with a waiting state, and a
 /// waiting turn is not a turn: it is not where the turn in flight begins, so it neither truncates
 /// the running turn's messages nor is served as one of them.

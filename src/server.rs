@@ -21,7 +21,9 @@ use std::path::PathBuf;
 
 pub use crate::acpws::WsCommandTx;
 use crate::agent::config::ControlPolicy;
-use crate::agent::{AgentBackend, AgentRegistry, AgentStatus, ThreadMessage, ThreadParent};
+use crate::agent::{
+    AgentBackend, AgentRegistry, AgentStatus, RequestState, ThreadMessage, ThreadParent,
+};
 use crate::context;
 use crate::files;
 use crate::git;
@@ -802,6 +804,11 @@ pub struct PollQuery {
     /// If omitted, defaults to 0. Poll returns `completed: true` when
     /// thread.turn_completed exceeds this value (i.e., a new turn finished).
     turn: Option<u64>,
+    /// The request id the submit answered with, which is what a client that submitted a turn
+    /// knows about it. Given, and answered by a backend that keeps a per-request record, this is
+    /// what `completed` is about, so a second person's turn is not reported as this one's.
+    #[serde(default)]
+    request: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -878,9 +885,27 @@ async fn poll_thread(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let known_turn = query.turn.unwrap_or(0);
-    let completed = thread.turn_completed > known_turn;
 
-    let turn = read_turn(&agent, &thread_id).await;
+    // A client that names the request it submitted gets an exact answer, because a thread's
+    // counter cannot say which turn completed: the turn in flight increments it first. A backend
+    // that keeps no per-request record answers `Unknown`, and the counter answers as it always
+    // did, so an older client and an older server each keep the meaning they had.
+    let state = match query.request.as_deref() {
+        Some(request_id) => agent.request_state(request_id).await,
+        None => RequestState::Unknown,
+    };
+    let completed = match state {
+        RequestState::Settled => true,
+        RequestState::Running | RequestState::Waiting => false,
+        RequestState::Unknown => thread.turn_completed > known_turn,
+    };
+
+    // What is served is the turn in flight. A turn that is waiting is not that, so it serves
+    // nothing rather than the other turn's messages.
+    let turn = match state {
+        RequestState::Waiting => Vec::new(),
+        _ => read_turn(&agent, &thread_id).await,
+    };
     let messages: Vec<PollMessage> = turn
         .iter()
         .map(|message| PollMessage {

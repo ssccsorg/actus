@@ -143,8 +143,8 @@ order; `submit_with_options` records the message and queues it when `has_live_re
 agent is running one; `dispatch_queued` sends the front turn, and the three places a turn can end
 (answered, failed, cancelled) call it through `release_queue` in `src/acpws/control.rs`.
 
-Two properties the design claimed are realized, and two are not yet. Which is which matters more
-than the code:
+Two properties the design claimed are realized, and one and a half are not yet. Which is which
+matters more than the code:
 
 Realized. A queued message is a user message whose `entry_type` is `queued`, so it is visible in the
 thread to every client, and dispatch clears the state rather than removing the message. And no
@@ -157,16 +157,20 @@ Not realized, and the second one is a defect rather than a wait.
    queued message is in the record, but the request id and the effort are not, so a restart leaves
    the message recorded with no turn behind it. That is the same gap a turn already in flight has,
    and closing it needs either two more fields on the queued message or a derived request id.
-2. The routes that watch a turn cannot follow a queued one. The streaming route waits on the
-   thread's own completion counter, and the poll answers `completed` by comparing that counter
-   with the one the client names, so neither can say which completion is the queued turn's: the
-   turn in flight increments the counter first. There is no per-request completion on the fabric's
-   surface to ask instead. The stream now answers a queued submit with one `queued` event and
-   ends, which is honest about what it can say, and a caller that wants the answer polls the
-   thread; a poll by the client that queued the turn may see `completed` when the *other* turn
-   ends, so it should read the thread rather than trust that one field. Closing this needs a
-   per-request question on `AgentBackend` (is this request still running) and a client that names
-   the request instead of a counter.
+2. The stream does not follow a queued turn, though the poll now does.
+   `AgentBackend::request_state` answers a turn by the request id its receipt carried, with
+   `Running`, `Waiting`, `Settled` and `Unknown`; `AcpwsBackend` answers it from `pending_requests`
+   and `queued_turns`; and the poll takes `request`, so a client that names the request it submitted
+   is answered about that turn rather than about the thread's counter. A backend that cannot answer
+   says `Unknown` and the counter answers as it always did, so an older client and an older server
+   each keep the meaning they had.
+
+   The stream still waits on the counter, so it answers a queued submit with one `queued` event and
+   ends, and a caller reads the answer from the thread. Making it exact is the same change one route
+   further, and it needs the stream's delta source (`last_assistant`) to serve nothing while its own
+   turn is waiting, because the thread's last assistant message then belongs to the other turn. That
+   is a unit of its own, and nothing in the product takes that route today: the app and the CLI both
+   drive `run_turn`, which polls.
 
    The turn the poll serves is fixed, and that half is not optional: `read_turn` took the last
    user message as the start of the turn in flight, and a queued message is a user message that
@@ -182,7 +186,9 @@ Not realized, and the second one is a defect rather than a wait.
 Both are named here because a reader who finds the queue working should know which of its promises
 are still owed.
 
-The three tests are in `tests/queued_turn_test.rs`: the second message waits and then runs, the
-queue keeps arrival order, and a waiting message is not mistaken for the answer to the turn that
-ended. The fourth is in `tests/server_test.rs`, where the poll is driven over HTTP:
-`poll_does_not_serve_a_turn_that_is_still_waiting`.
+The tests are in `tests/queued_turn_test.rs` (the second message waits and then runs, the queue keeps
+arrival order, and the empty check reads past a wait in both directions),
+`tests/server_test.rs` (`poll_does_not_serve_a_turn_that_is_still_waiting`,
+`a_queued_submit_is_told_so_by_the_stream`, and `a_poll_by_request_answers_about_that_request`), and
+`kletos/client/tests` (`turn_test` asserts the polls name the request the submit answered with, and
+`request_test` asserts the query carries it).

@@ -152,6 +152,24 @@ pub struct SubmitReceipt {
     pub queued: bool,
 }
 
+/// What a backend can say about one turn, by the request id its receipt carried.
+///
+/// A client that submitted a turn has to be able to tell its own completion from another's, and a
+/// thread's counter cannot say that: a turn already in flight increments it first. A backend that
+/// tracks requests answers here exactly; one that does not says so, and its caller falls back to
+/// the thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestState {
+    /// The agent is running this turn now.
+    Running,
+    /// The turn is recorded and waits for the one in flight to end.
+    Waiting,
+    /// The turn has ended: answered, failed or cancelled.
+    Settled,
+    /// The backend keeps no per-request record, so a caller must ask the thread instead.
+    Unknown,
+}
+
 /// Who dispatched a turn into another agent: the controlling agent and
 /// its thread. Populated when a meta agent submits through the control
 /// surface with a parent thread id.
@@ -274,6 +292,14 @@ pub trait AgentBackend: Send + Sync {
         _author: Option<&str>,
     ) -> Result<SubmitReceipt, String> {
         self.submit(thread_id, message).await
+    }
+
+    /// Whether the turn a receipt named is still the agent's to run.
+    ///
+    /// The default is `Unknown`, which is the honest answer for a backend that keeps threads and
+    /// not requests: a caller then has only the thread's counter, with the race that carries.
+    async fn request_state(&self, _request_id: &str) -> RequestState {
+        RequestState::Unknown
     }
 
     /// Cancel the running turn, if any.

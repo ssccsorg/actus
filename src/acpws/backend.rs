@@ -14,8 +14,8 @@ use tokio::sync::{Notify, RwLock};
 use crate::acpws::types::Command;
 use crate::acpws::{AcpwsManager, QueuedTurn, WsCommandTx, QUEUED_ENTRY};
 use crate::agent::{
-    AgentBackend, AgentKind, AgentStatus, PendingAuthorization, SubmitReceipt, ThreadMessage,
-    ThreadParent, ThreadSession, NOTE_ROLE,
+    AgentBackend, AgentKind, AgentStatus, PendingAuthorization, RequestState, SubmitReceipt,
+    ThreadMessage, ThreadParent, ThreadSession, NOTE_ROLE,
 };
 use crate::store::RecordedMessage;
 
@@ -284,6 +284,32 @@ impl AgentBackend for AcpwsBackend {
 
     async fn thread(&self, thread_id: &str) -> Option<ThreadSession> {
         self.manager.read().await.threads.get(thread_id).cloned()
+    }
+
+    async fn request_state(&self, request_id: &str) -> RequestState {
+        if request_id.is_empty() {
+            return RequestState::Unknown;
+        }
+        let mgr = self.manager.read().await;
+        // A live mapping is the turn the executor has. The queue is the turn it has not been given
+        // yet, and it is not in `pending_requests` until it is dispatched. An id in neither has
+        // ended, and the sentinel `consume_request` leaves counts here the same way: it is kept so
+        // that a duplicate event for a finished turn can be recognised.
+        if mgr
+            .pending_requests
+            .get(request_id)
+            .is_some_and(|thread_id| !thread_id.is_empty())
+        {
+            return RequestState::Running;
+        }
+        if mgr
+            .queued_turns
+            .iter()
+            .any(|turn| turn.request_id == request_id)
+        {
+            return RequestState::Waiting;
+        }
+        RequestState::Settled
     }
 
     async fn threads(&self) -> Vec<ThreadSession> {
